@@ -37,4 +37,7 @@ COPY --from=frontend-build /srv/node_modules /model-manager/node_modules
 COPY --from=frontend-build /build/dist /model-manager/dist
 COPY --from=frontend-build /start.sh /model-manager/start.sh
 
+# Forcer root pour que Node (server.js) puisse écrire dans /proc/sys (drop_caches)
+# AnythingLLM gère lui-même les permissions internes via son entrypoint
+USER root
 ENTRYPOINT ["/model-manager/start.sh"]

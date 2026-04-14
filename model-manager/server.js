@@ -18,7 +18,13 @@
 'use strict';
 
 const express = require('express');
+const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { Readable, Transform } = require('stream');
+const { pipeline } = require('stream/promises');
+const { exec } = require('child_process');
 
 const app = express();
 app.use(express.json());
@@ -40,6 +46,101 @@ async function ollama(endpoint, options = {}) {
 
 function err(res, status, message) {
   return res.status(status).json({ detail: message });
+}
+
+async function getRunningModels() {
+  const response = await ollama('/api/ps');
+  if (!response.ok) {
+    throw new Error(response.statusText);
+  }
+  const data = await response.json();
+  return data.models || [];
+}
+
+async function getResolvedActiveModel() {
+  const runningModels = await getRunningModels();
+  const runningNames = new Set(runningModels.map((model) => model.name));
+
+  if (activeModel && runningNames.has(activeModel)) {
+    return activeModel;
+  }
+
+  activeModel = runningModels[0]?.name || '';
+  return activeModel;
+}
+
+async function getModelArchitecture(model) {
+  const response = await ollama('/api/show', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model }),
+  });
+
+  if (!response.ok) {
+    return '';
+  }
+
+  const data = await response.json();
+  return data?.model_info?.['general.architecture'] || '';
+}
+
+function describeLoadFailure(model, errorText, architecture) {
+  return String(errorText || '').trim();
+}
+
+function normalizeModelName(name) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._:/-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/(^[-.:/]+|[-.:/]+$)/g, '');
+}
+
+function filenameFromUrl(value) {
+  const pathname = new URL(value).pathname;
+  return decodeURIComponent(path.basename(pathname));
+}
+
+async function downloadFileWithDigest(url, destinationPath) {
+  const response = await fetch(url, {
+    redirect: 'follow',
+    headers: {
+      'User-Agent': 'LIA-Model-Manager',
+    },
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`Téléchargement HF impossible (${response.status} ${response.statusText})`);
+  }
+
+  const hash = crypto.createHash('sha256');
+  const source = Readable.fromWeb(response.body);
+  const digestStream = new Transform({
+    transform(chunk, encoding, callback) {
+      hash.update(chunk);
+      callback(null, chunk);
+    },
+  });
+
+  await pipeline(source, digestStream, fs.createWriteStream(destinationPath));
+  return `sha256:${hash.digest('hex')}`;
+}
+
+async function uploadBlobToOllama(digest, filePath) {
+  const response = await ollama(`/api/blobs/${digest}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+    },
+    body: fs.createReadStream(filePath),
+    duplex: 'half',
+  });
+
+  if (!response.ok && response.status !== 201) {
+    const text = await response.text();
+    throw new Error(text || `Upload blob échoué (${response.status} ${response.statusText})`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -71,14 +172,21 @@ app.get('/api/version', async (req, res) => {
 // GET /api/models/available  →  tous les modèles connus d'Ollama
 app.get('/api/models/available', async (req, res) => {
   try {
-    const r = await ollama('/api/tags');
-    if (!r.ok) return err(res, 502, r.statusText);
-    const data = await r.json();
-    const files = (data.models || []).map((m) => ({
+    const [tagsRes, runningModels] = await Promise.all([
+      ollama('/api/tags'),
+      getRunningModels(),
+    ]);
+    if (!tagsRes.ok) return err(res, 502, tagsRes.statusText);
+
+    const data = await tagsRes.json();
+    const runningNames = new Set(runningModels.map((model) => model.name));
+    const files = (data.models || [])
+      .filter((model) => !runningNames.has(model.name))
+      .map((m) => ({
       name: m.name,
       size: m.size,
       modified_at: Math.floor(new Date(m.modified_at).getTime() / 1000),
-    }));
+      }));
     res.json({ files });
   } catch (e) {
     err(res, 502, e.message);
@@ -106,15 +214,8 @@ app.get('/api/models', async (req, res) => {
 // GET /api/models/active
 app.get('/api/models/active', async (req, res) => {
   try {
-    // Si aucun actif mémorisé, prend le premier modèle en VRAM
-    if (!activeModel) {
-      const r = await ollama('/api/ps');
-      if (r.ok) {
-        const data = await r.json();
-        if (data.models?.length > 0) activeModel = data.models[0].name;
-      }
-    }
-    res.json({ active_model: activeModel });
+    const resolved = await getResolvedActiveModel();
+    res.json({ active_model: resolved });
   } catch {
     res.json({ active_model: activeModel });
   }
@@ -205,7 +306,8 @@ app.post('/api/models/load', async (req, res) => {
     });
     if (!r.ok) {
       const t = await r.text();
-      return err(res, r.status, t);
+      const architecture = await getModelArchitecture(model);
+      return err(res, r.status, describeLoadFailure(model, t, architecture));
     }
     activeModel = model;
     res.json({ model, status: 'loaded' });
@@ -215,9 +317,18 @@ app.post('/api/models/load', async (req, res) => {
 });
 
 // POST /api/models/select  →  mise à jour de l'état in-memory
-app.post('/api/models/select', (req, res) => {
+app.post('/api/models/select', async (req, res) => {
   const model = req.body.model;
   if (!model) return err(res, 400, 'model requis');
+  try {
+    const runningModels = await getRunningModels();
+    if (!runningModels.some((item) => item.name === model)) {
+      if (activeModel === model) activeModel = '';
+      return err(res, 409, 'Ce modèle n’est pas chargé en mémoire et ne peut pas être activé.');
+    }
+  } catch (e) {
+    return err(res, 502, e.message);
+  }
   activeModel = model;
   res.json({ active_model: model });
 });
@@ -227,11 +338,15 @@ app.post('/api/models/unload', async (req, res) => {
   const model = req.body.model;
   if (!model) return err(res, 400, 'model requis');
   try {
-    await ollama('/api/generate', {
+    const response = await ollama('/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, prompt: '', keep_alive: 0, stream: false }),
     });
+    if (!response.ok) {
+      const t = await response.text();
+      return err(res, response.status, t);
+    }
     if (activeModel === model) activeModel = '';
     res.json({ model, status: 'unloaded' });
   } catch (e) {
@@ -260,21 +375,41 @@ app.delete('/api/models/files/:filename', async (req, res) => {
 });
 
 // POST /api/models/import-hf  →  ollama create avec Modelfile FROM <url_gguf>
-// Supporte les URLs directes HuggingFace (.gguf) et les refs hf.co/owner/repo:tag
+// Télécharge le GGUF, le pousse vers /api/blobs, puis crée le modèle via files.
 app.post('/api/models/import-hf', async (req, res) => {
   const { url, name } = req.body;
   if (!url) return err(res, 400, 'url requis');
   if (!name) return err(res, 400, 'name requis');
 
-  // Nettoyage : retirer le paramètre ?download=true et espaces
-  const cleanUrl = url.trim().replace(/\?download=[^&]+(&|$)/, '').replace(/&$/, '');
-  const modelfile = `FROM ${cleanUrl}\n`;
+  const cleanUrl = url.trim();
+  const modelName = normalizeModelName(name);
+  const fileName = filenameFromUrl(cleanUrl);
+
+  if (!modelName) {
+    return err(res, 400, 'nom de modèle invalide');
+  }
+
+  if (!/\.gguf(?:\?.*)?$/i.test(cleanUrl)) {
+    return err(res, 400, 'URL HuggingFace GGUF invalide');
+  }
+
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'lia-hf-'));
+  const tempFile = path.join(tempDir, fileName || 'model.gguf');
 
   try {
+    const digest = await downloadFileWithDigest(cleanUrl, tempFile);
+    await uploadBlobToOllama(digest, tempFile);
+
     const r = await ollama('/api/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name.trim(), modelfile, stream: true }),
+      body: JSON.stringify({
+        name: modelName,
+        files: {
+          [fileName || 'model.gguf']: digest,
+        },
+        stream: true,
+      }),
     });
     if (!r.ok) {
       const t = await r.text();
@@ -297,15 +432,28 @@ app.post('/api/models/import-hf', async (req, res) => {
         try {
           const j = JSON.parse(line);
           if (j.status) lastStatus = j.status;
-          if (j.status === 'success') return res.json({ filename: name.trim(), status: 'ok' });
+          if (j.status === 'success') return res.json({ filename: modelName, status: 'ok' });
           if (j.error) return err(res, 500, j.error);
         } catch { /* skip malformed line */ }
       }
     }
-    res.json({ filename: name.trim(), status: lastStatus || 'ok' });
+    res.json({ filename: modelName, status: lastStatus || 'ok' });
   } catch (e) {
     err(res, 502, e.message);
+  } finally {
+    fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
+});
+
+// POST /api/cache/drop  →  vide le page cache Linux (drop_caches)
+// Nécessite que le container soit lancé avec --privileged ET tourne en root (USER root)
+app.post('/api/cache/drop', (req, res) => {
+  exec('sync && echo 3 | tee /proc/sys/vm/drop_caches > /dev/null', { shell: '/bin/sh' }, (error) => {
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+    res.json({ ok: true });
+  });
 });
 
 // SPA fallback

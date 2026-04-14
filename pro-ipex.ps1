@@ -63,6 +63,30 @@ function Wait-Ollama([int]$maxTries = 24, [int]$delay = 5) {
     return $false
 }
 
+function Wait-HttpOk([string]$url, [int]$maxTries = 48, [int]$delay = 5, [string]$serviceName = "service") {
+    for ($i = 1; $i -le $maxTries; $i++) {
+        try {
+            if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                curl.exe -I --max-time 8 $url 2>$null | Select-String 'HTTP/[0-9.]+ 2[0-9][0-9]|HTTP/[0-9.]+ 3[0-9][0-9]' | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    return $true
+                }
+            } else {
+                $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 8 -ErrorAction Stop
+                if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) {
+                    return $true
+                }
+            }
+        } catch {
+            if ($i -eq 1) {
+                Write-Host "  ⌛ $serviceName s'initialise..." -ForegroundColor DarkGray
+            }
+        }
+        Start-Sleep $delay
+    }
+    return $false
+}
+
 # ── 0. Asset GitHub ─────────────────────────────────────────────────────────────────
 try {
     $apiUrl  = "https://api.github.com/repos/ipex-llm/ipex-llm/releases/tags/$releaseTag"
@@ -170,7 +194,8 @@ export ZES_ENABLE_SYSMAN=1
 export SYCL_CACHE_PERSISTENT=1
 export ONEAPI_DEVICE_SELECTOR=level_zero:0
 export OLLAMA_HOST=0.0.0.0:11434
-export OLLAMA_NUM_PARALLEL=2
+export OLLAMA_NUM_PARALLEL=1
+export OLLAMA_NUM_CTX=16384
 export OLLAMA_KEEP_ALIVE=60m
 export LD_LIBRARY_PATH=$HOME/ollama-ipex:$LD_LIBRARY_PATH
 export no_proxy=localhost,127.0.0.1
@@ -183,7 +208,7 @@ if (-not $ollamaAlive) {
     # Nettoyer les éventuels résidus
     wsl -d Ubuntu-24.04 -- bash -c 'pkill -f "ollama serve" 2>/dev/null; pkill -f ollama-bin 2>/dev/null; sleep 1; true' 2>$null
     Write-Host "  🚀 Démarrage Ollama (GPU Arc via Level-Zero)..." -ForegroundColor Green
-    Start-Process "wsl.exe" -ArgumentList @("-d","Ubuntu-24.04","--","bash","$wslHome/ollama-ipex/start-ollama-wsl.sh") -WindowStyle Minimized
+    Start-Process "wsl.exe" -ArgumentList @("-d","Ubuntu-24.04","--","bash","$wslHome/ollama-ipex/start-ollama-wsl.sh") -WindowStyle Hidden
     Start-Sleep 8
 }
 
@@ -225,6 +250,7 @@ $anythingllmArgs = @(
     '-p', '3001:3001',
     '-p', '3002:3002',
     '--add-host', 'host.docker.internal:host-gateway',
+    '--privileged',             # Permet le drop_caches (writable /proc/sys)
     # Proxy bypass (évite que Docker redirige les appels internes vers un proxy)
     '-e', 'no_proxy=localhost,127.0.0.1,host.docker.internal',
     '-e', 'NO_PROXY=localhost,127.0.0.1,host.docker.internal',
@@ -259,6 +285,7 @@ if (-not $owuExists) {
 }
 
 $owuRunning = $false
+$owuReady = $false
 if ($owuExists) {
     $owuArgs = @(
         'run', '-d',
@@ -279,14 +306,25 @@ if ($owuExists) {
     )
     docker @owuArgs | Out-Null
     $owuRunning = ($LASTEXITCODE -eq 0)
-    if ($owuRunning) { OK "Container Open WebUI démarré (port 3003)." }
-    else             { WARN "Échec démarrage Open WebUI — les autres services restent disponibles." }
+    if ($owuRunning) {
+        OK "Container Open WebUI démarré (port 3003)."
+        Write-Host "  ℹ️  Premier lancement Open WebUI : l'initialisation peut prendre 2 à 4 minutes." -ForegroundColor DarkCyan
+        if (Wait-HttpOk -url 'http://127.0.0.1:3003/' -maxTries 48 -delay 5 -serviceName 'Open WebUI') {
+            $owuReady = $true
+            OK "Open WebUI répond sur http://localhost:3003"
+        } else {
+            WARN "Open WebUI met plus de temps que prévu à répondre. Vérifie avec : docker logs -f open-webui"
+        }
+    }
+    else {
+        WARN "Échec démarrage Open WebUI — les autres services restent disponibles."
+    }
 }
 
 # ── 7. Vérification connectivité + ouverture Chrome ─────────────────────────────────
 Step "7/7" "Vérification connectivité + ouverture navigateur"
 
-Write-Host "  ⌛ Attente initialisation des containers (12s)..." -ForegroundColor DarkGray
+Write-Host "  ⌛ Attente initialisation AnythingLLM (12s)..." -ForegroundColor DarkGray
 Start-Sleep 12
 
 # Test : AnythingLLM → Ollama
@@ -311,7 +349,11 @@ Write-Host "  $sep" -ForegroundColor Cyan
 Write-Host "  💬  AnythingLLM   → http://localhost:3001" -ForegroundColor White
 Write-Host "  ⚡  Model Manager → http://localhost:3002" -ForegroundColor White
 if ($owuRunning) {
-Write-Host "  🌐  Open WebUI    → http://localhost:3003" -ForegroundColor White
+    if ($owuReady) {
+        Write-Host "  🌐  Open WebUI    → http://localhost:3003" -ForegroundColor White
+    } else {
+        Write-Host "  🌐  Open WebUI    → http://localhost:3003 (initialisation plus longue au premier lancement)" -ForegroundColor White
+    }
 }
 Write-Host ""
 Write-Host "  🤖  LLM auto-configuré : Ollama → $defaultModel" -ForegroundColor DarkCyan

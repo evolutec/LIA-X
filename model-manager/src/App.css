@@ -100,6 +100,13 @@ body {
   gap: 8px;
 }
 
+.card-subtitle {
+  margin-top: -8px;
+  margin-bottom: 16px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
 .status-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -178,6 +185,8 @@ input[type="text"]:focus {
 .btn-primary   { background: var(--accent); color: #fff; }
 .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
 .btn-danger    { background: var(--danger); color: #fff; }
+.btn-warning   { background: #d97706; color: #fff; }
+.btn-warning:not(:disabled):hover { background: #b45309; }
 .btn-outline   { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
 .btn-outline:not(:disabled):hover { color: var(--text); border-color: var(--accent); }
 
@@ -237,6 +246,11 @@ input[type="text"]:focus {
   background: var(--accent-bg);
 }
 
+.model-card.pending-model {
+  border-color: rgba(20, 184, 166, 0.45);
+  box-shadow: 0 0 0 1px rgba(20, 184, 166, 0.18);
+}
+
 .model-name {
   font-weight: 700;
   font-size: 0.88rem;
@@ -271,6 +285,12 @@ input[type="text"]:focus {
 
 .badge-success { background: var(--success-bg); color: var(--success); }
 
+.badge-pending {
+  background: rgba(20, 184, 166, 0.12);
+  color: var(--accent);
+  gap: 6px;
+}
+
 .notification {
   padding: 11px 16px;
   border-radius: 10px;
@@ -299,6 +319,12 @@ input[type="text"]:focus {
   border-radius: 50%;
   animation: spin 0.65s linear infinite;
   vertical-align: middle;
+}
+
+.spinner-small {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -341,6 +367,22 @@ input[type="text"]:focus {
 }
 
 .card-header-row .card-title { margin-bottom: 0; }
+
+.card-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.auto-sync-label {
+  font-size: 0.78rem;
+  color: var(--accent);
+  background: rgba(20, 184, 166, 0.1);
+  border: 1px solid rgba(20, 184, 166, 0.2);
+  border-radius: 999px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
 
 .status-grid {
   display: grid;
