@@ -31,9 +31,13 @@ app.use(express.json());
 
 const OLLAMA = process.env.OLLAMA_HOST || 'http://host.docker.internal:11434';
 const PORT = Number(process.env.MODEL_MANAGER_PORT || 3002);
+const MODEL_INSPECTION_TTL_MS = 30_000;
+const MODEL_INSPECTION_TIMEOUT_MS = 4_000;
+const UNSUPPORTED_ARCHITECTURES = new Set(['qwen35', 'gemma4']);
 
 // Active model state (in-memory, resets on restart)
 let activeModel = '';
+const modelInspectionCache = new Map();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,23 +73,122 @@ async function getResolvedActiveModel() {
   return activeModel;
 }
 
-async function getModelArchitecture(model) {
-  const response = await ollama('/api/show', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model }),
-  });
+function clearModelInspectionCache() {
+  modelInspectionCache.clear();
+}
 
-  if (!response.ok) {
+function extractOllamaErrorText(detail) {
+  const raw = String(detail || '').trim();
+  if (!raw) {
     return '';
   }
 
-  const data = await response.json();
-  return data?.model_info?.['general.architecture'] || '';
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.error === 'string') {
+      return parsed.error;
+    }
+    if (typeof parsed?.detail === 'string') {
+      return parsed.detail;
+    }
+  } catch {
+    // Non-JSON payload, keep raw text.
+  }
+
+  return raw;
 }
 
-function describeLoadFailure(model, errorText, architecture) {
-  return String(errorText || '').trim();
+function inferModelIssue(detail, architecture) {
+  const message = extractOllamaErrorText(detail).toLowerCase();
+  const normalizedArchitecture = String(architecture || '').trim().toLowerCase();
+
+  if (UNSUPPORTED_ARCHITECTURES.has(normalizedArchitecture) || /unknown model architecture/.test(message)) {
+    return 'unsupported-architecture';
+  }
+
+  if (
+    /bad manifest/.test(message)
+    || /manifest filepath/.test(message)
+    || /no such file or directory/.test(message)
+    || /open .*\.ollama\/models\/blobs/.test(message)
+    || /file does not exist/.test(message)
+  ) {
+    return 'corrupted-model';
+  }
+
+  return null;
+}
+
+async function inspectModel(model) {
+  const cached = modelInspectionCache.get(model);
+  if (cached && (Date.now() - cached.timestamp) < MODEL_INSPECTION_TTL_MS) {
+    return cached.value;
+  }
+
+  let value;
+  try {
+    const response = await ollama('/api/show', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(MODEL_INSPECTION_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      const errorText = extractOllamaErrorText(await response.text());
+      value = {
+        architecture: '',
+        issue: inferModelIssue(errorText, ''),
+        errorText,
+      };
+    } else {
+      const data = await response.json();
+      const architecture = data?.model_info?.['general.architecture'] || '';
+      value = {
+        architecture,
+        issue: inferModelIssue('', architecture),
+        errorText: '',
+      };
+    }
+  } catch (error) {
+    value = {
+      architecture: '',
+      issue: 'inspection-timeout',
+      errorText: error?.name === 'TimeoutError' ? 'Inspection du modèle expirée' : String(error?.message || error),
+    };
+  }
+
+  modelInspectionCache.set(model, { timestamp: Date.now(), value });
+  return value;
+}
+
+async function filterVisibleModels(models) {
+  const inspected = await Promise.all(
+    models.map(async (model) => ({
+      model,
+      inspection: await inspectModel(model.name),
+    }))
+  );
+
+  return inspected
+    .filter(({ inspection }) => inspection.issue !== 'unsupported-architecture' && inspection.issue !== 'corrupted-model' && inspection.issue !== 'inspection-timeout')
+    .map(({ model }) => model);
+}
+
+function describeLoadFailure(model, errorText, inspection) {
+  const detail = extractOllamaErrorText(errorText);
+  const architecture = inspection?.architecture || '';
+  const issue = inspection?.issue || inferModelIssue(detail, architecture);
+
+  if (issue === 'unsupported-architecture') {
+    return `Le modèle ${model} utilise l’architecture ${architecture || 'inconnue'}, non supportée par cette version d’Ollama IPEX-LLM.`;
+  }
+
+  if (issue === 'corrupted-model') {
+    return `Le modèle ${model} est corrompu ou incomplet dans ~/.ollama/models. Supprime-le puis retélécharge-le.`;
+  }
+
+  return detail;
 }
 
 function normalizeModelName(name) {
@@ -180,7 +283,8 @@ app.get('/api/models/available', async (req, res) => {
 
     const data = await tagsRes.json();
     const runningNames = new Set(runningModels.map((model) => model.name));
-    const files = (data.models || [])
+    const visibleModels = await filterVisibleModels(data.models || []);
+    const files = visibleModels
       .filter((model) => !runningNames.has(model.name))
       .map((m) => ({
       name: m.name,
@@ -230,8 +334,9 @@ app.get('/api/models/status', async (req, res) => {
     ]);
     const tags = tagsRes.ok ? await tagsRes.json() : { models: [] };
     const ps   = psRes.ok  ? await psRes.json()   : { models: [] };
+    const visibleModels = await filterVisibleModels(tags.models || []);
     res.json({
-      total_models: (tags.models || []).length,
+      total_models: visibleModels.length,
       running_models: (ps.models || []).length,
       gpu: { device: 'Intel Arc GPU (IPEX WSL2 · Level-Zero)' },
       models: (ps.models || []).map((m) => ({
@@ -277,6 +382,7 @@ app.post('/api/models/download', async (req, res) => {
           const j = JSON.parse(line);
           if (j.status) lastStatus = j.status;
           if (j.status === 'success') {
+            clearModelInspectionCache();
             return res.json({ filename: name, status: 'ok' });
           }
           if (j.error) return err(res, 500, j.error);
@@ -286,6 +392,7 @@ app.post('/api/models/download', async (req, res) => {
       }
     }
     if (lastStatus === 'success' || buf.includes('"success"')) {
+      clearModelInspectionCache();
       return res.json({ filename: name, status: 'ok' });
     }
     err(res, 500, `Pull terminé avec statut : ${lastStatus || 'inconnu'}`);
@@ -306,8 +413,8 @@ app.post('/api/models/load', async (req, res) => {
     });
     if (!r.ok) {
       const t = await r.text();
-      const architecture = await getModelArchitecture(model);
-      return err(res, r.status, describeLoadFailure(model, t, architecture));
+      const inspection = await inspectModel(model);
+      return err(res, r.status, describeLoadFailure(model, t, inspection));
     }
     activeModel = model;
     res.json({ model, status: 'loaded' });
@@ -367,6 +474,7 @@ app.delete('/api/models/files/:filename', async (req, res) => {
       const t = await r.text();
       return err(res, r.status, t);
     }
+    clearModelInspectionCache();
     if (activeModel === filename) activeModel = '';
     res.json({ filename, status: 'deleted' });
   } catch (e) {
@@ -432,7 +540,10 @@ app.post('/api/models/import-hf', async (req, res) => {
         try {
           const j = JSON.parse(line);
           if (j.status) lastStatus = j.status;
-          if (j.status === 'success') return res.json({ filename: modelName, status: 'ok' });
+          if (j.status === 'success') {
+            clearModelInspectionCache();
+            return res.json({ filename: modelName, status: 'ok' });
+          }
           if (j.error) return err(res, 500, j.error);
         } catch { /* skip malformed line */ }
       }

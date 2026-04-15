@@ -43,6 +43,31 @@ function Open-Tabs([string[]]$urls) {
     }
 }
 
+function Ensure-DesktopShortcut {
+    $desktopPath = [Environment]::GetFolderPath('Desktop')
+    $shortcutPath = Join-Path $desktopPath 'LIA PRO IPEX-LLM.lnk'
+
+    if (Test-Path $shortcutPath) {
+        return
+    }
+
+    $scriptPath = $PSCommandPath
+    if (-not $scriptPath) {
+        return
+    }
+
+    $wshShell = New-Object -ComObject WScript.Shell
+    $shortcut = $wshShell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = (Get-Command 'powershell.exe').Source
+    $shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$scriptPath`""
+    $shortcut.WorkingDirectory = Split-Path -Parent $scriptPath
+    $shortcut.IconLocation = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe,0"
+    $shortcut.Description = 'Lancer la stack LIA PRO IPEX-LLM'
+    $shortcut.Save()
+
+    OK "Raccourci Bureau créé : LIA PRO IPEX-LLM"
+}
+
 function Test-OllamaLocal {
     try {
         Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 4 -UseBasicParsing -ErrorAction Stop | Out-Null
@@ -88,6 +113,8 @@ function Wait-HttpOk([string]$url, [int]$maxTries = 48, [int]$delay = 5, [string
 }
 
 # ── 0. Asset GitHub ─────────────────────────────────────────────────────────────────
+Ensure-DesktopShortcut
+
 try {
     $apiUrl  = "https://api.github.com/repos/ipex-llm/ipex-llm/releases/tags/$releaseTag"
     $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ 'User-Agent' = 'PowerShell' } -UseBasicParsing
