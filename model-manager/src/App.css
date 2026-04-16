@@ -581,12 +581,17 @@ input[type="text"]:focus {
   gap: 10px;
   flex-wrap: wrap;
   margin-bottom: 12px;
+  justify-content: center;
 }
 
 .download-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+}
+
+.download-grid-span {
+  grid-column: 1 / -1;
 }
 
 .field-block {
@@ -606,6 +611,12 @@ input[type="text"]:focus {
   margin-top: 16px;
   display: flex;
   justify-content: center;
+  gap: 12px;
+}
+
+.section-spacer {
+  margin-top: 6px;
+  margin-bottom: 16px;
 }
 
 .detail-list {
@@ -631,6 +642,22 @@ input[type="text"]:focus {
   margin-top: 4px;
   color: var(--text-muted);
   font-size: 0.78rem;
+}
+
+.resource-card {
+  text-align: center;
+}
+
+.resource-card .hint {
+  text-align: center;
+}
+
+.import-hint-centered {
+  text-align: center;
+}
+
+.import-hint-centered a {
+  color: #7dd3fc;
 }
 
 .table-wrap {
@@ -688,6 +715,127 @@ input[type="text"]:focus {
   word-break: break-word;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(5, 10, 20, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.modal-card {
+  width: min(1200px, 100%);
+  max-height: calc(100vh - 3rem);
+  overflow: auto;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 28px;
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.16), transparent 32%),
+    rgba(8, 15, 31, 0.96);
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.5);
+}
+
+.modal-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.5rem 1.5rem 0;
+}
+
+.btn-close-modal {
+  flex-shrink: 0;
+}
+
+.modal-empty-state {
+  margin: 1.5rem;
+}
+
+.modal-content-grid {
+  display: grid;
+  gap: 1.25rem;
+  padding: 1.5rem;
+}
+
+.modal-section {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.modal-table-wrap {
+  max-height: 360px;
+}
+
+.metadata-table,
+.tensor-table {
+  min-width: 100%;
+}
+
+.metadata-key {
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.8rem;
+  color: #bfdbfe;
+  word-break: break-word;
+}
+
+.metadata-type {
+  white-space: nowrap;
+  color: #cbd5e1;
+}
+
+.metadata-value-cell {
+  min-width: 320px;
+}
+
+.metadata-value {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: #e2e8f0;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+}
+
+.tensor-groups {
+  display: grid;
+  gap: 1rem;
+}
+
+.tensor-group-card {
+  display: grid;
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 20px;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.tensor-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.tensor-group-title span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.16);
+  color: #7dd3fc;
+  font-size: 0.75rem;
+}
+
 .state-stack,
 .table-actions {
   display: flex;
@@ -705,4 +853,8 @@ input[type="text"]:focus {
   .btn-download, .btn, .btn-table { width: 100%; }
   .backend-badge { width: 100%; justify-content: center; }
   .card-header-row { flex-direction: column; align-items: stretch; }
+  .modal-backdrop { padding: 0.75rem; }
+  .modal-card { max-height: calc(100vh - 1.5rem); border-radius: 22px; }
+  .modal-header-row { flex-direction: column; align-items: stretch; }
+  .metadata-value-cell { min-width: 220px; }
 }

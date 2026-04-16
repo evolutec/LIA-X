@@ -1,203 +1,586 @@
-/**
- * Model Manager Bridge Server
- * Traduit l'API attendue par le frontend React vers l'API native Ollama IPEX.
- *
- * Mappings :
- *   GET  /api/version              → GET  /api/version       (Ollama)
- *   GET  /api/models/available     → GET  /api/tags          (liste tous les modèles)
- *   GET  /api/models               → GET  /api/ps            (modèles en VRAM)
- *   GET  /api/models/active        → GET  /api/ps            (premier actif)
- *   GET  /api/models/status        → GET  /api/tags + /api/ps
- *   POST /api/models/download      → POST /api/pull
- *   POST /api/models/load          → POST /api/generate keep_alive=-1 (warmup)
- *   POST /api/models/select        → state in-memory
- *   POST /api/models/unload        → POST /api/generate keep_alive=0  (evict)
- *   DELETE /api/models/files/:name → DELETE /api/delete
- */
-
 'use strict';
 
 const express = require('express');
-const crypto = require('crypto');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const { Readable, Transform } = require('stream');
+const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
-const { exec } = require('child_process');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
-const OLLAMA = process.env.OLLAMA_HOST || 'http://host.docker.internal:11434';
+const CONTROLLER_URL = (process.env.LLAMA_HOST_CONTROL_URL || 'http://host.docker.internal:13579').replace(/\/$/, '');
+const LLAMA_SERVER_BASE_URL = (process.env.LLAMA_SERVER_BASE_URL || 'http://host.docker.internal:12434').replace(/\/$/, '');
+const MODEL_STORAGE_DIR = process.env.MODEL_STORAGE_DIR || path.join(__dirname, 'models');
 const PORT = Number(process.env.MODEL_MANAGER_PORT || 3002);
-const MODEL_INSPECTION_TTL_MS = 30_000;
-const MODEL_INSPECTION_TIMEOUT_MS = 4_000;
-const UNSUPPORTED_ARCHITECTURES = new Set(['qwen35', 'gemma4']);
+const PROXY_MODEL_ID = process.env.PROXY_MODEL_ID || 'lia-local';
+const OLLAMA_REGISTRY_BASE_URL = 'https://registry.ollama.ai';
+const GGUF_METADATA_CACHE = new Map();
 
-// Active model state (in-memory, resets on restart)
-let activeModel = '';
-const modelInspectionCache = new Map();
+const GGUF_VALUE_TYPE_NAMES = {
+  0: 'u8',
+  1: 'i8',
+  2: 'u16',
+  3: 'i16',
+  4: 'u32',
+  5: 'i32',
+  6: 'f32',
+  7: 'bool',
+  8: 'str',
+  9: 'arr',
+  10: 'u64',
+  11: 'i64',
+  12: 'f64',
+};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const GGML_TENSOR_TYPE_NAMES = {
+  0: 'F32',
+  1: 'F16',
+  2: 'Q4_0',
+  3: 'Q4_1',
+  6: 'Q5_0',
+  7: 'Q5_1',
+  8: 'Q8_0',
+  9: 'Q8_1',
+  10: 'Q2_K',
+  11: 'Q3_K',
+  12: 'Q4_K',
+  13: 'Q5_K',
+  14: 'Q6_K',
+  15: 'Q8_K',
+  16: 'IQ2_XXS',
+  17: 'IQ2_XS',
+  18: 'IQ3_XXS',
+  19: 'IQ1_S',
+  20: 'IQ4_NL',
+  21: 'IQ3_S',
+  22: 'IQ2_S',
+  23: 'IQ4_XS',
+  24: 'I8',
+  25: 'I16',
+  26: 'I32',
+  27: 'I64',
+  28: 'F64',
+  29: 'IQ1_M',
+  30: 'BF16',
+  34: 'TQ1_0',
+  35: 'TQ2_0',
+};
 
-async function ollama(endpoint, options = {}) {
-  const url = `${OLLAMA}${endpoint}`;
-  return fetch(url, options);
+const LLAMA_FILE_TYPE_NAMES = {
+  0: 'F32',
+  1: 'F16',
+  2: 'Q4_0',
+  3: 'Q4_1',
+  6: 'Q5_0',
+  7: 'Q5_1',
+  8: 'Q8_0',
+  10: 'Q2_K',
+  11: 'Q3_K_S',
+  12: 'Q3_K_M',
+  13: 'Q3_K_L',
+  14: 'Q4_K_S',
+  15: 'Q4_K_M',
+  16: 'Q5_K_S',
+  17: 'Q5_K_M',
+  18: 'Q6_K',
+  19: 'IQ2_XXS',
+  20: 'IQ2_XS',
+  21: 'IQ3_XXS',
+  22: 'IQ1_S',
+  23: 'IQ4_NL',
+  24: 'IQ3_S',
+  25: 'IQ2_S',
+  26: 'IQ4_XS',
+  27: 'I8',
+  28: 'I16',
+  29: 'I32',
+  30: 'BF16',
+  34: 'TQ1_0',
+  35: 'TQ2_0',
+};
+
+class BufferedFileReader {
+  constructor(fileHandle, bufferSize = 64 * 1024) {
+    this.fileHandle = fileHandle;
+    this.buffer = Buffer.allocUnsafe(bufferSize);
+    this.bufferPos = 0;
+    this.bufferLength = 0;
+    this.offset = 0;
+  }
+
+  get unread() {
+    return this.bufferLength - this.bufferPos;
+  }
+
+  async ensure(length) {
+    if (length <= this.unread) {
+      return;
+    }
+
+    if (length > this.buffer.length) {
+      throw new Error(`Lecture trop grande pour le buffer interne: ${length}`);
+    }
+
+    if (this.unread > 0 && this.bufferPos > 0) {
+      this.buffer.copy(this.buffer, 0, this.bufferPos, this.bufferLength);
+    }
+
+    this.bufferLength = this.unread;
+    this.bufferPos = 0;
+
+    while (this.unread < length) {
+      const { bytesRead } = await this.fileHandle.read(
+        this.buffer,
+        this.bufferLength,
+        this.buffer.length - this.bufferLength,
+        this.offset,
+      );
+
+      if (!bytesRead) {
+        throw new Error('Fin de fichier GGUF inattendue');
+      }
+
+      this.offset += bytesRead;
+      this.bufferLength += bytesRead;
+    }
+  }
+
+  consume(length) {
+    const slice = this.buffer.subarray(this.bufferPos, this.bufferPos + length);
+    this.bufferPos += length;
+    return slice;
+  }
+
+  async readBuffer(length) {
+    if (length <= this.buffer.length) {
+      await this.ensure(length);
+      return Buffer.from(this.consume(length));
+    }
+
+    const output = Buffer.allocUnsafe(length);
+    let written = 0;
+
+    if (this.unread > 0) {
+      const prefix = this.consume(this.unread);
+      prefix.copy(output, 0);
+      written = prefix.length;
+    }
+
+    this.bufferPos = 0;
+    this.bufferLength = 0;
+
+    while (written < length) {
+      const { bytesRead } = await this.fileHandle.read(output, written, length - written, this.offset);
+      if (!bytesRead) {
+        throw new Error('Fin de fichier GGUF inattendue');
+      }
+
+      this.offset += bytesRead;
+      written += bytesRead;
+    }
+
+    return output;
+  }
+
+  async skip(length) {
+    if (length <= this.unread) {
+      this.bufferPos += length;
+      return;
+    }
+
+    const remaining = length - this.unread;
+    this.bufferPos = 0;
+    this.bufferLength = 0;
+    this.offset += remaining;
+  }
+
+  async readUInt8() {
+    await this.ensure(1);
+    return this.consume(1).readUInt8(0);
+  }
+
+  async readInt8() {
+    await this.ensure(1);
+    return this.consume(1).readInt8(0);
+  }
+
+  async readUInt16() {
+    await this.ensure(2);
+    return this.consume(2).readUInt16LE(0);
+  }
+
+  async readInt16() {
+    await this.ensure(2);
+    return this.consume(2).readInt16LE(0);
+  }
+
+  async readUInt32() {
+    await this.ensure(4);
+    return this.consume(4).readUInt32LE(0);
+  }
+
+  async readInt32() {
+    await this.ensure(4);
+    return this.consume(4).readInt32LE(0);
+  }
+
+  async readFloat32() {
+    await this.ensure(4);
+    return this.consume(4).readFloatLE(0);
+  }
+
+  async readBigUInt64() {
+    await this.ensure(8);
+    return this.consume(8).readBigUInt64LE(0);
+  }
+
+  async readBigInt64() {
+    await this.ensure(8);
+    return this.consume(8).readBigInt64LE(0);
+  }
+
+  async readFloat64() {
+    await this.ensure(8);
+    return this.consume(8).readDoubleLE(0);
+  }
+
+  async readString() {
+    const length = Number(await this.readBigUInt64());
+    if (!length) {
+      return '';
+    }
+    const buffer = await this.readBuffer(length);
+    return buffer.toString('utf8');
+  }
 }
+
+function normalizeLargeNumber(value) {
+  if (typeof value !== 'bigint') {
+    return value;
+  }
+
+  return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value.toString();
+}
+
+function formatPreviewItem(value) {
+  if (typeof value === 'string') {
+    return value.length > 120 ? `${value.slice(0, 117)}...` : value;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Number.isInteger(value) ? value : Number(value.toPrecision(8));
+  }
+
+  return value;
+}
+
+function formatMetadataDisplayValue(key, value) {
+  if (key === 'general.file_type' && Number.isInteger(value) && LLAMA_FILE_TYPE_NAMES[value]) {
+    return LLAMA_FILE_TYPE_NAMES[value];
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => String(formatPreviewItem(item))).join(', ')}]`;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value) && !Number.isInteger(value)) {
+    return String(Number(value.toPrecision(10)));
+  }
+
+  return typeof value === 'boolean' ? String(value) : String(value ?? '');
+}
+
+async function readGgufScalarValue(reader, valueType) {
+  switch (valueType) {
+    case 0: return reader.readUInt8();
+    case 1: return reader.readInt8();
+    case 2: return reader.readUInt16();
+    case 3: return reader.readInt16();
+    case 4: return reader.readUInt32();
+    case 5: return reader.readInt32();
+    case 6: return reader.readFloat32();
+    case 7: return Boolean(await reader.readUInt8());
+    case 8: return reader.readString();
+    case 10: return normalizeLargeNumber(await reader.readBigUInt64());
+    case 11: return normalizeLargeNumber(await reader.readBigInt64());
+    case 12: return reader.readFloat64();
+    default:
+      throw new Error(`Type GGUF non supporté: ${valueType}`);
+  }
+}
+
+async function readGgufValue(reader, valueType, options = {}) {
+  const { arrayPreviewLimit = 8 } = options;
+
+  if (valueType !== 9) {
+    const value = await readGgufScalarValue(reader, valueType);
+    return {
+      kind: 'scalar',
+      value,
+      displayValue: value,
+      typeName: GGUF_VALUE_TYPE_NAMES[valueType] || `type_${valueType}`,
+    };
+  }
+
+  const itemType = await reader.readUInt32();
+  const itemCount = normalizeLargeNumber(await reader.readBigUInt64());
+  const totalCount = typeof itemCount === 'number' ? itemCount : Number(itemCount);
+  const preview = [];
+  const limit = Number.isFinite(totalCount) ? Math.min(totalCount, arrayPreviewLimit) : arrayPreviewLimit;
+
+  if (itemType === 8) {
+    for (let index = 0; index < totalCount; index += 1) {
+      const entryLength = Number(await reader.readBigUInt64());
+      if (index < limit) {
+        const entryBuffer = await reader.readBuffer(entryLength);
+        preview.push(entryBuffer.toString('utf8'));
+      } else {
+        await reader.skip(entryLength);
+      }
+    }
+  } else {
+    for (let index = 0; index < totalCount; index += 1) {
+      const entryValue = await readGgufScalarValue(reader, itemType);
+      if (index < limit) {
+        preview.push(entryValue);
+      }
+    }
+  }
+
+  const truncated = totalCount > limit;
+  const displayItems = truncated ? [...preview, '...'] : preview;
+  return {
+    kind: 'array',
+    value: preview,
+    displayValue: displayItems,
+    typeName: `arr[${GGUF_VALUE_TYPE_NAMES[itemType] || `type_${itemType}`},${itemCount}]`,
+    itemTypeName: GGUF_VALUE_TYPE_NAMES[itemType] || `type_${itemType}`,
+    itemCount,
+    truncated,
+  };
+}
+
+function extractContextLength(architecture, metadataMap) {
+  if (architecture && Number.isInteger(metadataMap[`${architecture}.context_length`])) {
+    return metadataMap[`${architecture}.context_length`];
+  }
+
+  const fallbackKey = Object.keys(metadataMap)
+    .find((key) => /\.context_length$/u.test(key) && !/original_context_length$/u.test(key) && Number.isInteger(metadataMap[key]));
+
+  return fallbackKey ? metadataMap[fallbackKey] : null;
+}
+
+async function parseGgufFile(filePath) {
+  const fileHandle = await fs.promises.open(filePath, 'r');
+  const reader = new BufferedFileReader(fileHandle);
+
+  try {
+    const magic = (await reader.readBuffer(4)).toString('ascii');
+    if (magic !== 'GGUF') {
+      throw new Error(`Le fichier n'est pas un GGUF valide: ${filePath}`);
+    }
+
+    const version = await reader.readUInt32();
+    const tensorCount = normalizeLargeNumber(await reader.readBigUInt64());
+    const kvCount = normalizeLargeNumber(await reader.readBigUInt64());
+    const metadata = [];
+    const metadataMap = {};
+    const totalKvCount = typeof kvCount === 'number' ? kvCount : Number(kvCount);
+
+    for (let index = 0; index < totalKvCount; index += 1) {
+      const key = await reader.readString();
+      const valueType = await reader.readUInt32();
+      const parsedValue = await readGgufValue(reader, valueType);
+      const value = parsedValue.kind === 'array'
+        ? parsedValue.displayValue.map((item) => formatPreviewItem(item))
+        : parsedValue.value;
+
+      const displayValue = Array.isArray(value)
+        ? `[${value.map((item) => String(item)).join(', ')}]`
+        : formatMetadataDisplayValue(key, value);
+
+      metadata.push({
+        key,
+        type: parsedValue.typeName,
+        item_type: parsedValue.itemTypeName || null,
+        item_count: parsedValue.itemCount ?? null,
+        truncated: Boolean(parsedValue.truncated),
+        value_display: displayValue,
+      });
+
+      if (parsedValue.kind === 'scalar') {
+        metadataMap[key] = parsedValue.value;
+      } else {
+        metadataMap[key] = parsedValue.itemCount;
+      }
+    }
+
+    const tensors = [];
+    const totalTensorCount = typeof tensorCount === 'number' ? tensorCount : Number(tensorCount);
+    for (let index = 0; index < totalTensorCount; index += 1) {
+      const name = await reader.readString();
+      const dimensionCount = await reader.readUInt32();
+      const dimensions = [];
+      for (let dimIndex = 0; dimIndex < dimensionCount; dimIndex += 1) {
+        dimensions.push(normalizeLargeNumber(await reader.readBigUInt64()));
+      }
+
+      const tensorTypeId = await reader.readUInt32();
+      const offset = normalizeLargeNumber(await reader.readBigUInt64());
+      tensors.push({
+        name,
+        dimensions,
+        type: GGML_TENSOR_TYPE_NAMES[tensorTypeId] || `TYPE_${tensorTypeId}`,
+        offset,
+      });
+    }
+
+    const architecture = typeof metadataMap['general.architecture'] === 'string' ? metadataMap['general.architecture'] : '';
+    const contextLength = extractContextLength(architecture, metadataMap);
+    return {
+      version,
+      tensor_count: tensorCount,
+      kv_count: kvCount,
+      architecture,
+      context_length: contextLength,
+      metadata,
+      tensors,
+    };
+  } finally {
+    await fileHandle.close();
+  }
+}
+
+async function getModelGgufDetails(model) {
+  const stat = await fs.promises.stat(model.path);
+  const cacheKey = `${model.path}:${stat.size}:${stat.mtimeMs}`;
+
+  if (GGUF_METADATA_CACHE.has(cacheKey)) {
+    return GGUF_METADATA_CACHE.get(cacheKey);
+  }
+
+  const details = await parseGgufFile(model.path);
+  GGUF_METADATA_CACHE.set(cacheKey, details);
+  return details;
+}
+
+async function buildModelStartRequest(identifier) {
+  const model = await resolveModel(identifier);
+  const details = await getModelGgufDetails(model);
+  const payload = {
+    model: model.filename,
+  };
+
+  if (Number.isInteger(details.context_length) && details.context_length > 0) {
+    payload.context = details.context_length;
+  }
+
+  return {
+    model,
+    details,
+    payload,
+  };
+}
+
+app.use(express.static(path.join(__dirname, 'dist')));
 
 function err(res, status, message) {
   return res.status(status).json({ detail: message });
 }
 
-async function getRunningModels() {
-  const response = await ollama('/api/ps');
-  if (!response.ok) {
-    throw new Error(response.statusText);
-  }
-  const data = await response.json();
-  return data.models || [];
-}
+async function controllerRequest(endpoint, options = {}) {
+  const response = await fetch(`${CONTROLLER_URL}${endpoint}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+  });
 
-async function getResolvedActiveModel() {
-  const runningModels = await getRunningModels();
-  const runningNames = new Set(runningModels.map((model) => model.name));
-
-  if (activeModel && runningNames.has(activeModel)) {
-    return activeModel;
-  }
-
-  activeModel = runningModels[0]?.name || '';
-  return activeModel;
-}
-
-function clearModelInspectionCache() {
-  modelInspectionCache.clear();
-}
-
-function extractOllamaErrorText(detail) {
-  const raw = String(detail || '').trim();
-  if (!raw) {
-    return '';
-  }
-
+  const text = await response.text();
+  let payload = null;
   try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed?.error === 'string') {
-      return parsed.error;
-    }
-    if (typeof parsed?.detail === 'string') {
-      return parsed.detail;
-    }
+    payload = text ? JSON.parse(text) : null;
   } catch {
-    // Non-JSON payload, keep raw text.
+    payload = text;
   }
 
-  return raw;
+  if (!response.ok) {
+    const detail = typeof payload === 'object' && payload?.detail ? payload.detail : payload || response.statusText;
+    throw new Error(String(detail));
+  }
+
+  return payload;
 }
 
-function inferModelIssue(detail, architecture) {
-  const message = extractOllamaErrorText(detail).toLowerCase();
-  const normalizedArchitecture = String(architecture || '').trim().toLowerCase();
-
-  if (UNSUPPORTED_ARCHITECTURES.has(normalizedArchitecture) || /unknown model architecture/.test(message)) {
-    return 'unsupported-architecture';
-  }
-
-  if (
-    /bad manifest/.test(message)
-    || /manifest filepath/.test(message)
-    || /no such file or directory/.test(message)
-    || /open .*\.ollama\/models\/blobs/.test(message)
-    || /file does not exist/.test(message)
-  ) {
-    return 'corrupted-model';
-  }
-
-  return null;
+async function getRuntimeStatus() {
+  return controllerRequest('/status', { method: 'GET' });
 }
 
-async function inspectModel(model) {
-  const cached = modelInspectionCache.get(model);
-  if (cached && (Date.now() - cached.timestamp) < MODEL_INSPECTION_TTL_MS) {
-    return cached.value;
+async function ensureRuntimeReady(preferredModel) {
+  let runtimeStatus = await getRuntimeStatus();
+  if (runtimeStatus?.running && runtimeStatus?.active_model) {
+    return runtimeStatus;
   }
 
-  let value;
-  try {
-    const response = await ollama('/api/show', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model }),
-      signal: AbortSignal.timeout(MODEL_INSPECTION_TIMEOUT_MS),
-    });
+  const modelToStart = preferredModel || runtimeStatus?.active_filename || runtimeStatus?.active_model;
+  if (!modelToStart) {
+    return runtimeStatus;
+  }
 
-    if (!response.ok) {
-      const errorText = extractOllamaErrorText(await response.text());
-      value = {
-        architecture: '',
-        issue: inferModelIssue(errorText, ''),
-        errorText,
+  const startRequest = await buildModelStartRequest(modelToStart);
+  await controllerRequest('/start', {
+    method: 'POST',
+    body: JSON.stringify(startRequest.payload),
+  });
+
+  return getRuntimeStatus();
+}
+
+function toModelId(filename) {
+  return path.basename(filename, path.extname(filename));
+}
+
+async function listLocalModels() {
+  await fs.promises.mkdir(MODEL_STORAGE_DIR, { recursive: true });
+  const entries = await fs.promises.readdir(MODEL_STORAGE_DIR, { withFileTypes: true });
+  const files = await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.gguf'))
+    .map(async (entry) => {
+      const fullPath = path.join(MODEL_STORAGE_DIR, entry.name);
+      const stat = await fs.promises.stat(fullPath);
+      return {
+        name: toModelId(entry.name),
+        filename: entry.name,
+        path: fullPath,
+        size: stat.size,
+        modified_at: Math.floor(stat.mtimeMs / 1000),
       };
-    } else {
-      const data = await response.json();
-      const architecture = data?.model_info?.['general.architecture'] || '';
-      value = {
-        architecture,
-        issue: inferModelIssue('', architecture),
-        errorText: '',
-      };
-    }
-  } catch (error) {
-    value = {
-      architecture: '',
-      issue: 'inspection-timeout',
-      errorText: error?.name === 'TimeoutError' ? 'Inspection du modèle expirée' : String(error?.message || error),
-    };
-  }
+    }));
 
-  modelInspectionCache.set(model, { timestamp: Date.now(), value });
-  return value;
+  return files.sort((left, right) => left.name.localeCompare(right.name, 'fr', { sensitivity: 'base' }));
 }
 
-async function filterVisibleModels(models) {
-  const inspected = await Promise.all(
-    models.map(async (model) => ({
-      model,
-      inspection: await inspectModel(model.name),
-    }))
-  );
-
-  return inspected
-    .filter(({ inspection }) => inspection.issue !== 'unsupported-architecture' && inspection.issue !== 'corrupted-model' && inspection.issue !== 'inspection-timeout')
-    .map(({ model }) => model);
-}
-
-function describeLoadFailure(model, errorText, inspection) {
-  const detail = extractOllamaErrorText(errorText);
-  const architecture = inspection?.architecture || '';
-  const issue = inspection?.issue || inferModelIssue(detail, architecture);
-
-  if (issue === 'unsupported-architecture') {
-    return `Le modèle ${model} utilise l’architecture ${architecture || 'inconnue'}, non supportée par cette version d’Ollama IPEX-LLM.`;
+async function resolveModel(identifier) {
+  const models = await listLocalModels();
+  const needle = String(identifier || '').trim();
+  if (!needle) {
+    throw new Error('model requis');
   }
 
-  if (issue === 'corrupted-model') {
-    return `Le modèle ${model} est corrompu ou incomplet dans ~/.ollama/models. Supprime-le puis retélécharge-le.`;
+  const exactFilename = models.find((item) => item.filename.toLowerCase() === needle.toLowerCase());
+  if (exactFilename) {
+    return exactFilename;
   }
 
-  return detail;
-}
+  const exactId = models.find((item) => item.name.toLowerCase() === needle.toLowerCase());
+  if (exactId) {
+    return exactId;
+  }
 
-function normalizeModelName(name) {
-  return String(name || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._:/-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/(^[-.:/]+|[-.:/]+$)/g, '');
+  throw new Error(`Modèle introuvable : ${needle}`);
 }
 
 function filenameFromUrl(value) {
@@ -205,377 +588,418 @@ function filenameFromUrl(value) {
   return decodeURIComponent(path.basename(pathname));
 }
 
-async function downloadFileWithDigest(url, destinationPath) {
+function ensureGgufUrl(url) {
+  return /^https?:\/\/.+\.gguf(?:\?.*)?$/i.test(String(url || '').trim());
+}
+
+function parseOllamaLibraryReference(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    throw new Error('Référence Ollama requise');
+  }
+
+  let normalized = raw;
+  if (/^https?:\/\//i.test(normalized)) {
+    const parsed = new URL(normalized);
+    const pathname = parsed.pathname.replace(/^\/+/u, '');
+    if (!pathname.startsWith('library/')) {
+      throw new Error('Lien Ollama invalide. Utilise un lien de bibliothèque ou un nom du type gemma3n:e4b.');
+    }
+    normalized = pathname.slice('library/'.length);
+  }
+
+  normalized = normalized.replace(/^library\//u, '');
+  const slashIndex = normalized.lastIndexOf('/');
+  const colonIndex = normalized.lastIndexOf(':');
+  const hasExplicitTag = colonIndex > slashIndex;
+  const modelPart = hasExplicitTag ? normalized.slice(0, colonIndex) : normalized;
+  const tag = hasExplicitTag ? normalized.slice(colonIndex + 1) : 'latest';
+  const repository = modelPart.includes('/') ? modelPart : `library/${modelPart}`;
+  const displayName = modelPart.replace(/^library\//u, '');
+  const safeName = `${displayName.replace(/[\/]/gu, '-')}-${tag}`.replace(/[^a-zA-Z0-9._-]/gu, '-');
+
+  return {
+    repository,
+    tag,
+    safeName,
+  };
+}
+
+async function downloadToModelsDir(url, name) {
   const response = await fetch(url, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'LIA-Model-Manager',
+      'User-Agent': 'LIA-Model-Loader',
     },
   });
 
   if (!response.ok || !response.body) {
-    throw new Error(`Téléchargement HF impossible (${response.status} ${response.statusText})`);
+    throw new Error(`Téléchargement impossible (${response.status} ${response.statusText})`);
   }
 
-  const hash = crypto.createHash('sha256');
-  const source = Readable.fromWeb(response.body);
-  const digestStream = new Transform({
-    transform(chunk, encoding, callback) {
-      hash.update(chunk);
-      callback(null, chunk);
-    },
-  });
+  await fs.promises.mkdir(MODEL_STORAGE_DIR, { recursive: true });
+  const safeBase = String(name || filenameFromUrl(url)).trim();
+  const targetFilename = safeBase.toLowerCase().endsWith('.gguf') ? safeBase : `${safeBase}.gguf`;
+  const targetPath = path.join(MODEL_STORAGE_DIR, targetFilename);
 
-  await pipeline(source, digestStream, fs.createWriteStream(destinationPath));
-  return `sha256:${hash.digest('hex')}`;
+  if (fs.existsSync(targetPath)) {
+    throw new Error(`Le fichier existe déjà : ${targetFilename}`);
+  }
+
+  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(targetPath));
+  return {
+    filename: targetFilename,
+    model: toModelId(targetFilename),
+    path: targetPath,
+  };
 }
 
-async function uploadBlobToOllama(digest, filePath) {
-  const response = await ollama(`/api/blobs/${digest}`, {
-    method: 'POST',
+async function importFromOllamaLibrary(reference, localName) {
+  const parsed = parseOllamaLibraryReference(reference);
+  const manifestResponse = await fetch(`${OLLAMA_REGISTRY_BASE_URL}/v2/${parsed.repository}/manifests/${parsed.tag}`, {
     headers: {
-      'Content-Type': 'application/octet-stream',
+      Accept: 'application/vnd.docker.distribution.manifest.v2+json',
+      'User-Agent': 'LIA-Model-Loader',
     },
-    body: fs.createReadStream(filePath),
-    duplex: 'half',
   });
 
-  if (!response.ok && response.status !== 201) {
-    const text = await response.text();
-    throw new Error(text || `Upload blob échoué (${response.status} ${response.statusText})`);
+  if (!manifestResponse.ok) {
+    throw new Error(`Manifest Ollama introuvable (${manifestResponse.status} ${manifestResponse.statusText})`);
+  }
+
+  const manifest = await manifestResponse.json();
+  const modelLayer = Array.isArray(manifest.layers)
+    ? manifest.layers.find((layer) => layer.mediaType === 'application/vnd.ollama.image.model')
+    : null;
+
+  if (!modelLayer?.digest) {
+    throw new Error('Le manifest Ollama ne contient pas de couche modèle exploitable.');
+  }
+
+  const blobResponse = await fetch(`${OLLAMA_REGISTRY_BASE_URL}/v2/${parsed.repository}/blobs/${modelLayer.digest}`, {
+    redirect: 'follow',
+    headers: {
+      'User-Agent': 'LIA-Model-Loader',
+    },
+  });
+
+  if (!blobResponse.ok || !blobResponse.body) {
+    throw new Error(`Téléchargement Ollama impossible (${blobResponse.status} ${blobResponse.statusText})`);
+  }
+
+  await fs.promises.mkdir(MODEL_STORAGE_DIR, { recursive: true });
+  const baseName = String(localName || parsed.safeName).trim();
+  const targetFilename = baseName.toLowerCase().endsWith('.gguf') ? baseName : `${baseName}.gguf`;
+  const targetPath = path.join(MODEL_STORAGE_DIR, targetFilename);
+
+  if (fs.existsSync(targetPath)) {
+    throw new Error(`Le fichier existe déjà : ${targetFilename}`);
+  }
+
+  await pipeline(Readable.fromWeb(blobResponse.body), fs.createWriteStream(targetPath));
+  return {
+    filename: targetFilename,
+    model: toModelId(targetFilename),
+    path: targetPath,
+  };
+}
+
+function proxyModelPayload(runtimeStatus) {
+  if (!runtimeStatus?.running || !runtimeStatus?.active_model) {
+    return [];
+  }
+
+  return [{
+    id: PROXY_MODEL_ID,
+    object: 'model',
+    owned_by: 'lia',
+    permission: [],
+    active_model: runtimeStatus.active_model,
+    backend: runtimeStatus.backend,
+  }];
+}
+
+async function proxyOpenAiRequest(req, res, endpoint) {
+  try {
+    const preferredModel = typeof req.body?.model === 'string' && req.body.model !== PROXY_MODEL_ID
+      ? req.body.model
+      : undefined;
+    const runtimeStatus = await ensureRuntimeReady(preferredModel);
+    if (!runtimeStatus?.running || !runtimeStatus?.active_model) {
+      return err(res, 503, 'Aucun modèle actif côté llama.cpp');
+    }
+
+    const payload = { ...(req.body || {}) };
+    const upstreamModel = runtimeStatus.active_filename || runtimeStatus.active_model;
+    if (!payload.model || payload.model === PROXY_MODEL_ID) {
+      payload.model = upstreamModel;
+    }
+
+    const response = await fetch(`${LLAMA_SERVER_BASE_URL}${endpoint}`, {
+      method: req.method,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    res.status(response.status);
+    response.headers.forEach((value, key) => {
+      const lower = key.toLowerCase();
+      if (!['content-length', 'transfer-encoding', 'connection'].includes(lower)) {
+        res.setHeader(key, value);
+      }
+    });
+
+    if (!response.body) {
+      res.end(await response.text());
+      return;
+    }
+
+    await pipeline(Readable.fromWeb(response.body), res);
+  } catch (error) {
+    if (!res.headersSent) {
+      err(res, 502, error.message);
+    } else {
+      res.end();
+    }
   }
 }
 
-// ---------------------------------------------------------------------------
-// Static frontend (built by Vite into /model-manager/dist)
-// ---------------------------------------------------------------------------
+app.get('/health', async (req, res) => {
+  try {
+    const runtimeStatus = await getRuntimeStatus();
+    res.json({ ok: true, runtime: runtimeStatus });
+  } catch (error) {
+    res.status(502).json({ ok: false, detail: error.message });
+  }
+});
 
-app.use(express.static(path.join(__dirname, 'dist')));
-
-// ---------------------------------------------------------------------------
-// Routes
-// ---------------------------------------------------------------------------
-
-// GET /api/version
 app.get('/api/version', async (req, res) => {
   try {
-    const r = await ollama('/api/version');
-    if (!r.ok) return err(res, 502, r.statusText);
-    const data = await r.json();
+    const runtime = await getRuntimeStatus();
     res.json({
-      version: data.version,
-      device: 'Intel Arc GPU (IPEX WSL2 · Level-Zero)',
-      model_dir: '~/.ollama/models',
+      version: runtime?.backend_label ? `llama.cpp · ${runtime.backend_label}` : 'llama.cpp',
+      device: runtime?.backend_label || 'Runtime indisponible',
+      model_dir: MODEL_STORAGE_DIR,
+      runtime_url: `${LLAMA_SERVER_BASE_URL}/v1`,
     });
-  } catch (e) {
-    err(res, 502, e.message);
+  } catch (error) {
+    err(res, 502, error.message);
   }
 });
 
-// GET /api/models/available  →  tous les modèles connus d'Ollama
 app.get('/api/models/available', async (req, res) => {
   try {
-    const [tagsRes, runningModels] = await Promise.all([
-      ollama('/api/tags'),
-      getRunningModels(),
-    ]);
-    if (!tagsRes.ok) return err(res, 502, tagsRes.statusText);
-
-    const data = await tagsRes.json();
-    const runningNames = new Set(runningModels.map((model) => model.name));
-    const visibleModels = await filterVisibleModels(data.models || []);
-    const files = visibleModels
-      .filter((model) => !runningNames.has(model.name))
-      .map((m) => ({
-      name: m.name,
-      size: m.size,
-      modified_at: Math.floor(new Date(m.modified_at).getTime() / 1000),
+    const [runtime, models] = await Promise.all([getRuntimeStatus(), listLocalModels()]);
+    const runningActiveModel = runtime?.running ? runtime.active_model : '';
+    const files = models
+      .filter((item) => item.name !== runningActiveModel)
+      .map((item) => ({
+        name: item.name,
+        filename: item.filename,
+        size: item.size,
+        modified_at: item.modified_at,
       }));
     res.json({ files });
-  } catch (e) {
-    err(res, 502, e.message);
+  } catch (error) {
+    err(res, 502, error.message);
   }
 });
 
-// GET /api/models  →  modèles actuellement chargés en VRAM
 app.get('/api/models', async (req, res) => {
   try {
-    const r = await ollama('/api/ps');
-    if (!r.ok) return err(res, 502, r.statusText);
-    const data = await r.json();
-    const models = (data.models || []).map((m) => ({
-      id: m.name,
-      model: m.name,
-      size_vram: m.size_vram,
-      expires_at: m.expires_at,
-    }));
-    res.json({ models });
-  } catch (e) {
-    err(res, 502, e.message);
+    const runtime = await getRuntimeStatus();
+    if (!runtime?.running || !runtime?.active_model) {
+      return res.json({ models: [] });
+    }
+
+    const model = await resolveModel(runtime.active_model);
+    res.json({
+      models: [{
+        id: PROXY_MODEL_ID,
+        model: runtime.active_model,
+        size_vram: null,
+        expires_at: runtime.started_at || null,
+        filename: model.filename,
+      }],
+    });
+  } catch (error) {
+    err(res, 502, error.message);
   }
 });
 
-// GET /api/models/active
 app.get('/api/models/active', async (req, res) => {
   try {
-    const resolved = await getResolvedActiveModel();
-    res.json({ active_model: resolved });
-  } catch {
-    res.json({ active_model: activeModel });
+    const runtime = await getRuntimeStatus();
+    res.json({ active_model: runtime?.running ? (runtime.active_model || '') : '' });
+  } catch (error) {
+    err(res, 502, error.message);
   }
 });
 
-// GET /api/models/status
 app.get('/api/models/status', async (req, res) => {
   try {
-    const [tagsRes, psRes] = await Promise.all([
-      ollama('/api/tags'),
-      ollama('/api/ps'),
-    ]);
-    const tags = tagsRes.ok ? await tagsRes.json() : { models: [] };
-    const ps   = psRes.ok  ? await psRes.json()   : { models: [] };
-    const visibleModels = await filterVisibleModels(tags.models || []);
+    const [runtime, models] = await Promise.all([getRuntimeStatus(), listLocalModels()]);
     res.json({
-      total_models: visibleModels.length,
-      running_models: (ps.models || []).length,
-      gpu: { device: 'Intel Arc GPU (IPEX WSL2 · Level-Zero)' },
-      models: (ps.models || []).map((m) => ({
-        model: m.name,
-        device: 'Intel Arc GPU',
-        approx_memory_bytes: m.size_vram || 0,
-      })),
+      total_models: models.length,
+      running_models: runtime?.running ? 1 : 0,
+      gpu: { device: runtime?.backend_label || 'Runtime indisponible' },
+      models: runtime?.running && runtime?.active_model ? [{
+        model: runtime.active_model,
+        device: runtime.backend_label,
+        approx_memory_bytes: 0,
+      }] : [],
     });
-  } catch (e) {
-    err(res, 502, e.message);
+  } catch (error) {
+    err(res, 502, error.message);
   }
 });
 
-// POST /api/models/download  →  ollama pull
+app.get('/api/models/details/:model', async (req, res) => {
+  try {
+    const model = await resolveModel(decodeURIComponent(req.params.model));
+    const details = await getModelGgufDetails(model);
+    res.json({
+      model: {
+        name: model.name,
+        filename: model.filename,
+        path: model.path,
+        size: model.size,
+        modified_at: model.modified_at,
+      },
+      gguf: details,
+    });
+  } catch (error) {
+    err(res, 502, error.message);
+  }
+});
+
 app.post('/api/models/download', async (req, res) => {
-  const name = req.body.ollama_name || req.body.url;
-  if (!name) return err(res, 400, 'ollama_name requis');
+  const { url, name, ollama_name: ollamaName } = req.body || {};
+
   try {
-    // stream:true → on consomme la réponse NDJSON jusqu'au status "success"
-    const r = await ollama('/api/pull', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, stream: true }),
-    });
-    if (!r.ok) {
-      const t = await r.text();
-      return err(res, r.status, t);
-    }
-    // Consume NDJSON stream until done
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let lastStatus = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop(); // incomplete last line
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const j = JSON.parse(line);
-          if (j.status) lastStatus = j.status;
-          if (j.status === 'success') {
-            clearModelInspectionCache();
-            return res.json({ filename: name, status: 'ok' });
-          }
-          if (j.error) return err(res, 500, j.error);
-        } catch {
-          // skip malformed line
-        }
+    let file;
+    if (ollamaName) {
+      file = await importFromOllamaLibrary(ollamaName, name);
+    } else {
+      if (!url || !ensureGgufUrl(url)) {
+        return err(res, 400, 'URL GGUF invalide');
       }
+      file = await downloadToModelsDir(url, name || filenameFromUrl(url));
     }
-    if (lastStatus === 'success' || buf.includes('"success"')) {
-      clearModelInspectionCache();
-      return res.json({ filename: name, status: 'ok' });
-    }
-    err(res, 500, `Pull terminé avec statut : ${lastStatus || 'inconnu'}`);
-  } catch (e) {
-    err(res, 502, e.message);
+    res.json({ filename: file.model, status: 'ok' });
+  } catch (error) {
+    err(res, 502, error.message);
   }
 });
 
-// POST /api/models/load  →  warmup via generate keep_alive=-1
 app.post('/api/models/load', async (req, res) => {
-  const model = req.body.model;
-  if (!model) return err(res, 400, 'model requis');
   try {
-    const r = await ollama('/api/generate', {
+    const startRequest = await buildModelStartRequest(req.body?.model);
+    await controllerRequest('/start', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt: '', keep_alive: -1, stream: false }),
+      body: JSON.stringify(startRequest.payload),
     });
-    if (!r.ok) {
-      const t = await r.text();
-      const inspection = await inspectModel(model);
-      return err(res, r.status, describeLoadFailure(model, t, inspection));
-    }
-    activeModel = model;
-    res.json({ model, status: 'loaded' });
-  } catch (e) {
-    err(res, 502, e.message);
+    res.json({
+      model: startRequest.model.name,
+      status: 'loaded',
+      context_applied: startRequest.payload.context || null,
+      architecture: startRequest.details.architecture || null,
+    });
+  } catch (error) {
+    err(res, 502, error.message);
   }
 });
 
-// POST /api/models/select  →  mise à jour de l'état in-memory
 app.post('/api/models/select', async (req, res) => {
-  const model = req.body.model;
-  if (!model) return err(res, 400, 'model requis');
   try {
-    const runningModels = await getRunningModels();
-    if (!runningModels.some((item) => item.name === model)) {
-      if (activeModel === model) activeModel = '';
-      return err(res, 409, 'Ce modèle n’est pas chargé en mémoire et ne peut pas être activé.');
-    }
-  } catch (e) {
-    return err(res, 502, e.message);
+    const startRequest = await buildModelStartRequest(req.body?.model);
+    await controllerRequest('/start', {
+      method: 'POST',
+      body: JSON.stringify(startRequest.payload),
+    });
+    res.json({
+      active_model: startRequest.model.name,
+      context_applied: startRequest.payload.context || null,
+      architecture: startRequest.details.architecture || null,
+    });
+  } catch (error) {
+    err(res, 502, error.message);
   }
-  activeModel = model;
-  res.json({ active_model: model });
 });
 
-// POST /api/models/unload  →  generate keep_alive=0 pour éjecter de la VRAM
 app.post('/api/models/unload', async (req, res) => {
-  const model = req.body.model;
-  if (!model) return err(res, 400, 'model requis');
   try {
-    const response = await ollama('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt: '', keep_alive: 0, stream: false }),
-    });
-    if (!response.ok) {
-      const t = await response.text();
-      return err(res, response.status, t);
-    }
-    if (activeModel === model) activeModel = '';
-    res.json({ model, status: 'unloaded' });
-  } catch (e) {
-    err(res, 502, e.message);
+    const runtime = await getRuntimeStatus();
+    await controllerRequest('/stop', { method: 'POST', body: JSON.stringify({}) });
+    res.json({ model: runtime?.active_model || '', status: 'unloaded' });
+  } catch (error) {
+    err(res, 502, error.message);
   }
 });
 
-// DELETE /api/models/files/:filename  →  ollama delete
 app.delete('/api/models/files/:filename', async (req, res) => {
-  const filename = decodeURIComponent(req.params.filename);
   try {
-    const r = await ollama('/api/delete', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: filename }),
-    });
-    if (!r.ok) {
-      const t = await r.text();
-      return err(res, r.status, t);
+    const model = await resolveModel(decodeURIComponent(req.params.filename));
+    const runtime = await getRuntimeStatus();
+    if (runtime?.active_model === model.name) {
+      await controllerRequest('/stop', { method: 'POST', body: JSON.stringify({}) });
     }
-    clearModelInspectionCache();
-    if (activeModel === filename) activeModel = '';
-    res.json({ filename, status: 'deleted' });
-  } catch (e) {
-    err(res, 502, e.message);
+    await fs.promises.rm(model.path, { force: true });
+    res.json({ filename: model.name, status: 'deleted' });
+  } catch (error) {
+    err(res, 502, error.message);
   }
 });
 
-// POST /api/models/import-hf  →  ollama create avec Modelfile FROM <url_gguf>
-// Télécharge le GGUF, le pousse vers /api/blobs, puis crée le modèle via files.
 app.post('/api/models/import-hf', async (req, res) => {
-  const { url, name } = req.body;
-  if (!url) return err(res, 400, 'url requis');
-  if (!name) return err(res, 400, 'name requis');
-
-  const cleanUrl = url.trim();
-  const modelName = normalizeModelName(name);
-  const fileName = filenameFromUrl(cleanUrl);
-
-  if (!modelName) {
-    return err(res, 400, 'nom de modèle invalide');
+  const { url, name } = req.body || {};
+  if (!url || !ensureGgufUrl(url)) {
+    return err(res, 400, 'URL Hugging Face GGUF invalide');
   }
 
-  if (!/\.gguf(?:\?.*)?$/i.test(cleanUrl)) {
-    return err(res, 400, 'URL HuggingFace GGUF invalide');
+  if (!name) {
+    return err(res, 400, 'name requis');
   }
-
-  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'lia-hf-'));
-  const tempFile = path.join(tempDir, fileName || 'model.gguf');
 
   try {
-    const digest = await downloadFileWithDigest(cleanUrl, tempFile);
-    await uploadBlobToOllama(digest, tempFile);
-
-    const r = await ollama('/api/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: modelName,
-        files: {
-          [fileName || 'model.gguf']: digest,
-        },
-        stream: true,
-      }),
-    });
-    if (!r.ok) {
-      const t = await r.text();
-      return err(res, r.status, t);
-    }
-
-    // Consommer le stream NDJSON jusqu'à success
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let lastStatus = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const j = JSON.parse(line);
-          if (j.status) lastStatus = j.status;
-          if (j.status === 'success') {
-            clearModelInspectionCache();
-            return res.json({ filename: modelName, status: 'ok' });
-          }
-          if (j.error) return err(res, 500, j.error);
-        } catch { /* skip malformed line */ }
-      }
-    }
-    res.json({ filename: modelName, status: lastStatus || 'ok' });
-  } catch (e) {
-    err(res, 502, e.message);
-  } finally {
-    fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    const file = await downloadToModelsDir(url, name);
+    res.json({ filename: file.model, status: 'ok' });
+  } catch (error) {
+    err(res, 502, error.message);
   }
 });
 
-// POST /api/cache/drop  →  vide le page cache Linux (drop_caches)
-// Nécessite que le container soit lancé avec --privileged ET tourne en root (USER root)
-app.post('/api/cache/drop', (req, res) => {
-  exec('sync && echo 3 | tee /proc/sys/vm/drop_caches > /dev/null', { shell: '/bin/sh' }, (error) => {
-    if (error) {
-      return res.status(500).json({ ok: false, error: error.message });
-    }
-    res.json({ ok: true });
-  });
+app.post('/api/cache/drop', async (req, res) => {
+  res.status(501).json({ ok: false, error: 'Non applicable sur le runtime Windows llama.cpp.' });
 });
 
-// SPA fallback
+app.get('/v1/models', async (req, res) => {
+  try {
+    const runtime = await ensureRuntimeReady();
+    res.json({ object: 'list', data: proxyModelPayload(runtime) });
+  } catch (error) {
+    err(res, 502, error.message);
+  }
+});
+
+app.post('/v1/chat/completions', async (req, res) => {
+  await proxyOpenAiRequest(req, res, '/v1/chat/completions');
+});
+
+app.post('/v1/completions', async (req, res) => {
+  await proxyOpenAiRequest(req, res, '/v1/completions');
+});
+
+app.post('/v1/embeddings', async (req, res) => {
+  await proxyOpenAiRequest(req, res, '/v1/embeddings');
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
-// ---------------------------------------------------------------------------
-// Start
-// ---------------------------------------------------------------------------
-
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Model Manager] UI: http://0.0.0.0:${PORT}  →  Ollama: ${OLLAMA}`);
+  console.log(`[Model Loader] UI: http://0.0.0.0:${PORT} -> controller: ${CONTROLLER_URL}`);
 });

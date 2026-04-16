@@ -1,0 +1,27 @@
+FROM node:20-alpine AS frontend-build
+WORKDIR /build
+
+COPY model-manager/package.json ./package.json
+RUN npm install
+
+COPY model-manager/ ./
+RUN VITE_API_BASE_URL="" npm run build
+
+WORKDIR /srv
+COPY model-manager/server-package.json ./package.json
+RUN npm install --omit=dev
+
+FROM node:20-alpine
+WORKDIR /app
+
+ENV NODE_ENV=production \
+    MODEL_MANAGER_PORT=3002 \
+    MODEL_STORAGE_DIR=/models \
+    PROXY_MODEL_ID=lia-local
+
+COPY model-manager/server.js /app/server.js
+COPY --from=frontend-build /srv/node_modules /app/node_modules
+COPY --from=frontend-build /build/dist /app/dist
+
+EXPOSE 3002
+CMD ["node", "/app/server.js"]

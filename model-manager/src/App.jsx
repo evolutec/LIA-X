@@ -18,6 +18,10 @@ function App() {
   const [hfModelName, setHfModelName] = useState("");
   const [pendingModelAction, setPendingModelAction] = useState(null);
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState("");
+  const [selectedModelDetails, setSelectedModelDetails] = useState(null);
 
   useEffect(() => {
     refreshAllModelState();
@@ -399,7 +403,7 @@ function App() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(extractErrorMessage(data.detail || res.statusText));
-      setStatus(`Modèle chargé : ${data.model}`);
+      setStatus(`Modèle chargé : ${data.model}${data.context_applied ? ` · contexte ${formatCount(data.context_applied)}` : ""}`);
       await refreshAllModelState({ silent: true });
     } catch (err) {
       setAvailableFiles(previousAvailableFiles);
@@ -431,7 +435,7 @@ function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(extractErrorMessage(data.detail || res.statusText));
       setActiveModel(data.active_model || "");
-      setStatus(`Modèle actif : ${data.active_model}`);
+      setStatus(`Modèle actif : ${data.active_model}${data.context_applied ? ` · contexte ${formatCount(data.context_applied)}` : ""}`);
       await refreshAllModelState({ silent: true });
     } catch (err) {
       setActiveModel(previousActiveModel);
@@ -623,6 +627,85 @@ function App() {
     return formatShortDate(timestamp * 1000);
   }
 
+  function formatCount(value) {
+    if (value == null || value === "") {
+      return "—";
+    }
+
+    const numericValue = Number(value);
+    if (Number.isFinite(numericValue)) {
+      return new Intl.NumberFormat("fr-FR").format(numericValue);
+    }
+
+    return String(value);
+  }
+
+  function formatTensorShape(dimensions) {
+    if (!Array.isArray(dimensions) || dimensions.length === 0) {
+      return "[]";
+    }
+
+    return `[${dimensions.map((dimension) => formatCount(dimension)).join(", ")}]`;
+  }
+
+  function buildTensorGroups(tensors) {
+    const groups = new Map();
+
+    tensors.forEach((tensor) => {
+      const blockMatch = /^blk\.(\d+)(?:\.|$)/.exec(tensor.name);
+      const groupKey = blockMatch ? `blk.${blockMatch[1]}` : tensor.name.split(".")[0];
+      const group = groups.get(groupKey) || { name: groupKey, tensors: [] };
+      group.tensors.push(tensor);
+      groups.set(groupKey, group);
+    });
+
+    return Array.from(groups.values()).sort((left, right) => {
+      const leftBlock = /^blk\.(\d+)$/u.exec(left.name);
+      const rightBlock = /^blk\.(\d+)$/u.exec(right.name);
+
+      if (leftBlock && rightBlock) {
+        return Number(leftBlock[1]) - Number(rightBlock[1]);
+      }
+
+      if (leftBlock) {
+        return 1;
+      }
+
+      if (rightBlock) {
+        return -1;
+      }
+
+      return left.name.localeCompare(right.name, "fr", { sensitivity: "base" });
+    });
+  }
+
+  async function handleOpenModelDetails(modelName) {
+    setDetailsOpen(true);
+    setDetailsLoading(true);
+    setDetailsError("");
+    setSelectedModelDetails(null);
+
+    try {
+      const res = await fetch(`${apiBase}/api/models/details/${encodeURIComponent(modelName)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(extractErrorMessage(data.detail || res.statusText));
+      }
+      setSelectedModelDetails(data);
+    } catch (err) {
+      setDetailsError(extractErrorMessage(err.message || err));
+    } finally {
+      setDetailsLoading(false);
+    }
+  }
+
+  function handleCloseModelDetails() {
+    setDetailsOpen(false);
+    setDetailsLoading(false);
+    setDetailsError("");
+    setSelectedModelDetails(null);
+  }
+
   const unifiedModelRows = (() => {
     const rows = new Map();
 
@@ -670,16 +753,18 @@ function App() {
     });
   })();
 
+  const tensorGroups = buildTensorGroups(selectedModelDetails?.gguf?.tensors || []);
+
   return (
     <div className="app-shell">
       <header className="app-header">
         <div>
-          <h1>⚡ Model Manager — Ollama IPEX</h1>
-          <p className="hero-subtitle">Pilotage local des modèles, mémoire et imports GGUF.</p>
+          <h1>⚡ Model Loader — llama.cpp</h1>
+          <p className="hero-subtitle">Pilotage local des modèles GGUF, du runtime hôte et du proxy OpenAI-compatible.</p>
         </div>
         <div className="backend-badge">
           <span className={`dot ${version ? "" : "offline"}`}></span>
-          <span>{version ? `Connecté · Ollama ${version.version ?? ""}` : "Ollama hors ligne"}</span>
+          <span>{version ? `Runtime prêt · ${version.version ?? "llama.cpp"}` : "Runtime hors ligne"}</span>
         </div>
       </header>
 
@@ -693,8 +778,8 @@ function App() {
         <section className="hero-panel">
           <div className="hero-copy">
             <div className="eyebrow">Console locale</div>
-            <h2>Une interface plus directe pour télécharger, charger et surveiller les modèles.</h2>
-            <p>Un seul bouton de téléchargement, une table unique, et les actions système regroupées en tête.</p>
+            <h2>Charge un GGUF, démarre llama.cpp et expose un endpoint stable aux interfaces web.</h2>
+            <p>Le runtime tourne sur Windows, tandis que ce panneau pilote le modèle actif et le proxy OpenAI-compatible.</p>
           </div>
           <div className="hero-actions">
             <button className="btn btn-warning" onClick={handleDropCache} disabled={loading} title="Vide le cache Linux pour restituer de la RAM libre">
@@ -707,15 +792,15 @@ function App() {
         </section>
 
         <div className="card status-card">
-          <div className="card-title">📊 Statut système</div>
+          <div className="card-title">📊 Statut du runtime</div>
           <div className="card-subtitle">{formatSyncTime(lastSyncedAt)}</div>
           <div className="status-grid status-grid-hero">
             <div className="status-item status-item-glow">
-              <label>Version Ollama</label>
+              <label>Runtime</label>
               <div className="value">{version?.version ?? "—"}</div>
             </div>
             <div className="status-item">
-              <label>GPU</label>
+              <label>Backend</label>
               <div className="value">{version?.device ?? "—"}</div>
             </div>
             <div className="status-item">
@@ -723,47 +808,30 @@ function App() {
               <div className="value">{activeModel || "—"}</div>
             </div>
             <div className="status-item">
-              <label>Stockage</label>
+              <label>Répertoire GGUF</label>
               <div className="value">{version?.model_dir ?? "—"}</div>
-            </div>
-          </div>
-        </div>
-
-        <div className="card detail-card">
-          <div className="card-header-row">
-            <div>
-              <div className="card-title">📈 Statut détaillé</div>
-              <div className="card-subtitle card-subtitle-inline">Vue runtime, GPU et empreinte mémoire des modèles chargés.</div>
             </div>
           </div>
           {statusInfo ? (
             <>
+              <div className="card-subtitle section-spacer">Vue synthétique du runtime hôte et du nombre de modèles réellement servis.</div>
               <div className="status-grid status-grid-detail">
                 <div className="status-item">
                   <label>Total modèles</label>
                   <div className="value">{statusInfo.total_models}</div>
                 </div>
                 <div className="status-item">
-                  <label>GPU runtime</label>
-                  <div className="value">{statusInfo.gpu?.device ?? "N/A"}</div>
-                </div>
-                <div className="status-item">
-                  <label>En mémoire</label>
+                  <label>Modèles en mémoire</label>
                   <div className="value">{statusInfo.running_models ?? 0}</div>
                 </div>
-              </div>
-              {statusInfo.models?.length > 0 ? (
-                <div className="detail-list">
-                  {statusInfo.models.map((item) => (
-                    <div key={String(item.model)} className="detail-pill">
-                      <div className="detail-pill-name">{String(item.model)}</div>
-                      <div className="detail-pill-meta">{String(item.device ?? "—")} · {formatBytes(item.approx_memory_bytes)}</div>
-                    </div>
-                  ))}
+                <div className="status-item">
+                  <label>Proxy exposé</label>
+                  <div className="value">lia-local</div>
                 </div>
-              ) : (
+              </div>
+              {!(statusInfo.models?.length > 0) ? (
                 <div className="empty-state compact-empty-state">Aucun modèle actuellement en mémoire.</div>
-              )}
+              ) : null}
             </>
           ) : (
             <div className="empty-state">Statut non disponible. Utilise Rafraîchir.</div>
@@ -771,8 +839,8 @@ function App() {
         </div>
 
         <div className="card download-card">
-          <div className="card-title">⬇️ Télécharger un modèle</div>
-          <div className="card-subtitle">Nom Ollama ou lien GGUF, puis téléchargement.</div>
+          <div className="card-title">⬇️ Importer un modèle GGUF</div>
+          <div className="card-subtitle">Import direct depuis Hugging Face ou depuis la bibliothèque Ollama, puis copie dans le répertoire local.</div>
           {downloadProgress > 0 && (
             <div className="progress-bar">
               <div className="progress-fill" style={{ width: `${downloadProgress}%` }}></div>
@@ -781,13 +849,13 @@ function App() {
           )}
           <div className="download-grid">
             <label className="field-block">
-              <span className="field-label">Nom Ollama</span>
+              <span className="field-label">Nom local</span>
               <input
                 type="text"
-                value={ollamaName}
-                onChange={(e) => setOllamaName(e.target.value)}
-                placeholder="qwen2.5:1.5b"
-                aria-label="Nom du modèle Ollama"
+                value={hfModelName}
+                onChange={(e) => setHfModelName(e.target.value)}
+                placeholder="qwen2.5-1.5b-q4_k_m"
+                aria-label="Nom local du modèle"
               />
             </label>
             <label className="field-block">
@@ -800,10 +868,26 @@ function App() {
                 aria-label="URL GGUF HuggingFace"
               />
             </label>
+            <label className="field-block download-grid-span">
+              <span className="field-label">Référence Ollama Library</span>
+              <input
+                type="text"
+                value={ollamaName}
+                onChange={(e) => setOllamaName(e.target.value)}
+                placeholder="gemma3n:e4b ou https://ollama.com/library/gemma3n:e4b"
+                aria-label="Référence Ollama Library"
+              />
+            </label>
           </div>
+          <p className="hint import-hint-centered">
+            Tu peux utiliser un lien GGUF Hugging Face ou un identifiant Ollama Library. Parcourir la bibliothèque : <a href="https://ollama.com/library" target="_blank" rel="noopener noreferrer">ollama.com/library</a>
+          </p>
           <div className="download-actions">
             <button className="btn btn-primary btn-download" onClick={handleDownloadUrl} disabled={loading}>
-              {loading ? <><span className="spinner" /> Téléchargement…</> : "⬇️ Télécharger"}
+              {loading ? <><span className="spinner" /> Import…</> : "⬇️ Importer"}
+            </button>
+            <button className="btn btn-secondary btn-download" onClick={handleDownloadAndLoadUrl} disabled={loading}>
+              {loading ? <><span className="spinner" /> Import…</> : "⚡ Importer et charger"}
             </button>
           </div>
         </div>
@@ -812,14 +896,13 @@ function App() {
           <div className="card-header-row">
             <div>
               <div className="card-title">🧠 Modèles</div>
-              <div className="card-subtitle card-subtitle-inline">Les modèles chargés sont mis en évidence directement dans la table.</div>
+              <div className="card-subtitle card-subtitle-inline">Un seul modèle est servi à la fois par llama.cpp. Le proxy l’expose aux autres conteneurs sous l’identifiant stable <strong>lia-local</strong>.</div>
             </div>
             <div className="auto-sync-label">Mise à jour auto</div>
           </div>
           {unifiedModelRows.length === 0 ? (
             <div className="empty-state">
-              Aucun modèle. Téléchargez-en un ci-dessus ou via
-              <code>wsl -d Ubuntu-24.04 -- bash -c 'cd ~/ollama-ipex && ./ollama pull qwen2.5:0.5b'</code>
+              Aucun modèle GGUF local. Importe un fichier ci-dessus, puis charge-le pour démarrer llama-server.
             </div>
           ) : (
             <div className="table-wrap">
@@ -832,6 +915,7 @@ function App() {
                     <th>VRAM</th>
                     <th>Modifié</th>
                     <th>Expire</th>
+                    <th>Infos</th>
                     <th>Action</th>
                   </tr>
                 </thead>
@@ -863,6 +947,17 @@ function App() {
                       <td>{formatBytes(row.vramSize)}</td>
                       <td>{formatUnixDate(row.modifiedAt)}</td>
                       <td>{formatShortDate(row.expiresAt)}</td>
+                      <td>
+                        <button
+                          className="btn btn-secondary btn-icon"
+                          onClick={() => handleOpenModelDetails(row.name)}
+                          disabled={loading || Boolean(pendingModelAction)}
+                          title={`Afficher les détails GGUF de ${row.name}`}
+                          aria-label={`Afficher les détails GGUF de ${row.name}`}
+                        >
+                          ℹ️
+                        </button>
+                      </td>
                       <td>
                         <div className="table-actions">
                           {row.loaded ? (
@@ -911,23 +1006,141 @@ function App() {
         </div>
 
         {/* Links */}
-        <div className="card">
+        <div className="card resource-card">
           <div className="card-title">🔗 Ressources</div>
           <div className="resource-links">
-            <a href="https://ollama.com/library" target="_blank" rel="noopener noreferrer" className="btn btn-outline">
-              🦙 Ollama Library
+            <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener noreferrer" className="btn btn-outline">
+              🧱 llama.cpp
             </a>
             <a href="https://huggingface.co/models?library=gguf" target="_blank" rel="noopener noreferrer" className="btn btn-outline">
               🤗 Hugging Face GGUF
             </a>
+            <a href="https://ollama.com/library" target="_blank" rel="noopener noreferrer" className="btn btn-outline">
+              📚 Ollama Library
+            </a>
             <a href="http://localhost:3001" target="_blank" rel="noopener noreferrer" className="btn btn-outline">
               💬 AnythingLLM
             </a>
+            <a href="http://localhost:3003" target="_blank" rel="noopener noreferrer" className="btn btn-outline">
+              🌐 Open WebUI
+            </a>
           </div>
           <p className="hint">
-            Modèles recommandés pour Arc 140V&nbsp;: <code>qwen2.5:0.5b</code>, <code>qwen2.5:1.5b</code>, <code>llama3.2:1b</code>, <code>phi3.5:mini</code>
+            Le proxy OpenAI-compatible de ce conteneur est publié sur <code>/v1</code> et présenté aux autres services sous l’identifiant <code>lia-local</code>.
           </p>
         </div>
+
+        {detailsOpen && (
+          <div className="modal-backdrop" onClick={handleCloseModelDetails}>
+            <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+              <div className="modal-header-row">
+                <div>
+                  <div className="card-title">🔬 Détails du modèle</div>
+                  <div className="card-subtitle card-subtitle-inline">
+                    {selectedModelDetails?.model?.filename || "Lecture des métadonnées GGUF..."}
+                  </div>
+                </div>
+                <button className="btn btn-secondary btn-close-modal" onClick={handleCloseModelDetails}>
+                  Fermer
+                </button>
+              </div>
+
+              {detailsLoading ? (
+                <div className="empty-state modal-empty-state"><span className="spinner" /> Lecture du fichier GGUF...</div>
+              ) : detailsError ? (
+                <div className="notification error">{detailsError}</div>
+              ) : selectedModelDetails ? (
+                <div className="modal-content-grid">
+                  <div className="status-grid status-grid-detail">
+                    <div className="status-item status-item-glow">
+                      <label>Architecture</label>
+                      <div className="value">{selectedModelDetails.gguf?.architecture || "—"}</div>
+                    </div>
+                    <div className="status-item">
+                      <label>Contexte détecté</label>
+                      <div className="value">{formatCount(selectedModelDetails.gguf?.context_length)}</div>
+                    </div>
+                    <div className="status-item">
+                      <label>Version GGUF</label>
+                      <div className="value">{formatCount(selectedModelDetails.gguf?.version)}</div>
+                    </div>
+                    <div className="status-item">
+                      <label>KV count</label>
+                      <div className="value">{formatCount(selectedModelDetails.gguf?.kv_count)}</div>
+                    </div>
+                    <div className="status-item">
+                      <label>Tensor count</label>
+                      <div className="value">{formatCount(selectedModelDetails.gguf?.tensor_count)}</div>
+                    </div>
+                    <div className="status-item">
+                      <label>Taille fichier</label>
+                      <div className="value">{formatBytes(selectedModelDetails.model?.size)}</div>
+                    </div>
+                  </div>
+
+                  <div className="modal-section">
+                    <div className="card-title">🧾 Métadonnées GGUF</div>
+                    <div className="table-wrap modal-table-wrap">
+                      <table className="model-table metadata-table">
+                        <thead>
+                          <tr>
+                            <th>Clé</th>
+                            <th>Type</th>
+                            <th>Valeur</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(selectedModelDetails.gguf?.metadata || []).map((entry) => (
+                            <tr key={entry.key}>
+                              <td className="metadata-key">{entry.key}</td>
+                              <td className="metadata-type">{entry.type}</td>
+                              <td className="metadata-value-cell">
+                                <pre className="metadata-value">{entry.value_display}</pre>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="modal-section">
+                    <div className="card-title">🧱 Tenseurs</div>
+                    <div className="tensor-groups">
+                      {tensorGroups.map((group) => (
+                        <section key={group.name} className="tensor-group-card">
+                          <div className="tensor-group-title">{group.name} <span>{group.tensors.length}</span></div>
+                          <div className="table-wrap modal-table-wrap">
+                            <table className="model-table tensor-table">
+                              <thead>
+                                <tr>
+                                  <th>Nom</th>
+                                  <th>Shape</th>
+                                  <th>Type</th>
+                                  <th>Offset</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {group.tensors.map((tensor) => (
+                                  <tr key={tensor.name}>
+                                    <td className="metadata-key">{tensor.name}</td>
+                                    <td>{formatTensorShape(tensor.dimensions)}</td>
+                                    <td>{tensor.type}</td>
+                                    <td>{formatCount(tensor.offset)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </section>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

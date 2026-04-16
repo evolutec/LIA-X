@@ -1,25 +1,25 @@
 <div align="center">
 
-<h1>LIA</h1>
+<h1>LIA2</h1>
 
-<p><strong>Local Intelligence Assistant for Intel Arc on Windows</strong></p>
+<p><strong>Local Intelligence Assistant 2 for Windows with llama.cpp</strong></p>
 
 <p>
-  Déploie une stack IA locale complète sur Windows avec <strong>Ollama IPEX-LLM</strong>, <strong>AnythingLLM</strong>, <strong>Open WebUI</strong> et un <strong>Model Manager</strong> dédié,<br>
-  le tout accéléré par <strong>GPU Intel Arc</strong> via <strong>WSL2 Ubuntu</strong>.
+  Déploie une stack IA locale complète sur Windows avec <strong>llama.cpp</strong>, <strong>AnythingLLM</strong>, <strong>Open WebUI</strong> et un <strong>Model Loader</strong> dédié,<br>
+  avec un runtime natif Windows piloté par PowerShell et un proxy OpenAI local prêt à l'emploi.
 </p>
 
 <p>
   <img alt="Windows 11" src="https://img.shields.io/badge/Windows-11-0078D4?style=for-the-badge&logo=windows&logoColor=white">
-  <img alt="WSL2 Ubuntu" src="https://img.shields.io/badge/WSL2-Ubuntu%2024.04-E95420?style=for-the-badge&logo=ubuntu&logoColor=white">
+  <img alt="llama.cpp" src="https://img.shields.io/badge/llama.cpp-native-111111?style=for-the-badge">
+  <img alt="Vulkan" src="https://img.shields.io/badge/Vulkan-preferred-A41E22?style=for-the-badge&logo=vulkan&logoColor=white">
   <img alt="Docker Desktop" src="https://img.shields.io/badge/Docker-Desktop-2496ED?style=for-the-badge&logo=docker&logoColor=white">
-  <img alt="Intel Arc" src="https://img.shields.io/badge/Intel-Arc%20GPU-0071C5?style=for-the-badge&logo=intel&logoColor=white">
-  <img alt="Ollama IPEX-LLM" src="https://img.shields.io/badge/Ollama-IPEX--LLM-111111?style=for-the-badge">
+  <img alt="OpenAI Proxy" src="https://img.shields.io/badge/OpenAI-Compatible%20Proxy-10A37F?style=for-the-badge">
 </p>
 
 <p>
   <a href="#quick-start"><img alt="Quick Start" src="https://img.shields.io/badge/Quick%20Start-Ready-2EA043?style=flat-square"></a>
-  <a href="#architecture"><img alt="Architecture" src="https://img.shields.io/badge/Architecture-WSL2%20%2B%20Docker-1F6FEB?style=flat-square"></a>
+  <a href="#architecture"><img alt="Architecture" src="https://img.shields.io/badge/Architecture-Windows%20Native%20%2B%20Docker-1F6FEB?style=flat-square"></a>
   <a href="#included-services"><img alt="Services" src="https://img.shields.io/badge/Services-3001%20%7C%203002%20%7C%203003-8250DF?style=flat-square"></a>
 </p>
 
@@ -29,21 +29,21 @@
   <tr>
     <td width="50%" valign="top">
       <h3>One command bootstrap</h3>
-      <p>Un seul script PowerShell installe WSL2, prépare Ollama IPEX-LLM, configure Docker et démarre les interfaces locales.</p>
+      <p>Un seul script PowerShell installe le runtime local, prépare llama.cpp, construit le Model Loader et démarre les interfaces.</p>
     </td>
     <td width="50%" valign="top">
-      <h3>Intel Arc focused</h3>
-      <p>Le projet cible explicitement une exécution locale optimisée pour Intel Arc avec Level-Zero et DXCore via WSL2.</p>
+      <h3>Windows-native runtime</h3>
+      <p>L'inférence tourne nativement sur Windows via llama-server, sans dépendance WSL2 dans l'architecture active.</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <h3>Multiple frontends</h3>
-      <p>AnythingLLM, Open WebUI et une interface Model Manager cohabitent sur la même stack.</p>
+      <p>AnythingLLM, Open WebUI et le Model Loader cohabitent sur des conteneurs séparés au-dessus d'un même runtime local.</p>
     </td>
     <td width="50%" valign="top">
-      <h3>Local-first workflow</h3>
-      <p>Pull de modèles, import GGUF Hugging Face, chargement VRAM et tests d'inférence sans dépendance cloud.</p>
+      <h3>Model workflow local-first</h3>
+      <p>Import GGUF Hugging Face, import depuis Ollama Library, chargement mémoire et proxy OpenAI sans dépendance cloud.</p>
     </td>
   </tr>
 </table>
@@ -63,36 +63,37 @@
 - [Project Structure](#project-structure)
 - [Technical Notes](#technical-notes)
 - [Useful Commands](#useful-commands)
-- [Screenshots](#screenshots)
 - [Troubleshooting](#troubleshooting)
+- [Positioning](#positioning)
 
 ---
 
 ## Overview
 
-LIA est un projet d'intégration local-first conçu pour transformer une machine Windows équipée d'un GPU Intel Arc en station IA locale utilisable immédiatement. Le dépôt relie Windows, WSL2, Ollama IPEX-LLM et Docker dans une architecture cohérente, avec une attention particulière portée à l'expérience d'installation et à la fiabilité du démarrage.
+LIA est un projet d'intégration local-first conçu pour transformer une machine Windows en station IA locale cohérente, avec un accent fort sur l'installation, la reprise après redémarrage et la simplicité d'usage. La stack actuelle remplace l'ancienne architecture Ollama/IPEX/WSL2 par un runtime [llama.cpp](runtime/llama.cpp/README.md) natif Windows, exposé via un contrôleur hôte et consommé par des interfaces Docker séparées.
 
 Le projet assemble cinq briques principales :
 
-- Ollama IPEX-LLM dans WSL2 Ubuntu-24.04 pour l'inférence GPU.
-- AnythingLLM pour le chat et les usages documentaires.
-- Open WebUI comme interface alternative connectée à Ollama.
-- Un Model Manager React + Express pour piloter les modèles.
-- Un script d'orchestration PowerShell pour déployer toute la stack.
+- un runtime [llama.cpp](runtime/llama.cpp/README.md) natif Windows, orienté Vulkan ;
+- un contrôleur PowerShell hôte pour démarrer, arrêter et superviser [llama-host-controller.ps1](llama-host-controller.ps1) ;
+- un Model Loader React + Express pour gérer les GGUF et exposer un proxy OpenAI compatible ;
+- AnythingLLM pour le chat et les usages documentaires ;
+- Open WebUI comme interface alternative branchée sur le proxy local.
 
 ---
 
 ## Why LIA
 
-Le besoin de départ est simple : faire fonctionner une stack LLM locale propre sur Windows avec un GPU Intel Arc, sans se battre à chaque redémarrage avec WSL2, la connectivité Docker, les variables d'environnement ou la configuration d'AnythingLLM.
+Le besoin visé est simple : obtenir une stack LLM locale propre sur Windows, sans recoller manuellement runtime GPU, scripts de lancement, configuration d'interfaces et sélection de modèles à chaque redémarrage.
 
 LIA encapsule cette complexité dans un projet unique afin de fournir :
 
 - un bootstrap reproductible ;
-- une configuration réseau WSL2 cohérente ;
-- une exécution Ollama IPEX-LLM adaptée au matériel Intel Arc ;
-- plusieurs interfaces locales prêtes à l'emploi ;
-- une gestion de modèles plus simple que la ligne de commande seule.
+- une détection matérielle côté script ;
+- un runtime local stable autour de llama.cpp ;
+- une préférence claire pour Vulkan sur Windows ;
+- plusieurs interfaces prêtes à l'emploi ;
+- une gestion de modèles centralisée et plus simple que la ligne de commande seule.
 
 ---
 
@@ -104,15 +105,15 @@ cd lia
 .\pro-ipex.ps1
 ```
 
-Si WSL2 n'est pas encore présent sur la machine, le script doit être lancé dans un terminal administrateur afin de laisser l'installation se faire correctement.
+Le point d'entrée principal est [pro-ipex.ps1](pro-ipex.ps1). Le script prépare le runtime, télécharge les binaires officiels de llama.cpp si nécessaire, construit l'image du Model Loader puis démarre les services.
 
-Une fois la stack démarrée, les services suivants sont exposés :
+Une fois la stack active, les services suivants sont exposés :
 
 - http://localhost:3001
 - http://localhost:3002
 - http://localhost:3003
 
-Le point d'entrée principal est [pro-ipex.ps1](pro-ipex.ps1).
+Le runtime local de génération écoute sur http://127.0.0.1:12434 et le contrôleur hôte sur http://127.0.0.1:13579.
 
 ---
 
@@ -120,10 +121,13 @@ Le point d'entrée principal est [pro-ipex.ps1](pro-ipex.ps1).
 
 | Service | URL | Rôle |
 |---|---|---|
-| AnythingLLM | http://localhost:3001 | Interface principale pour le chat et les workflows RAG |
-| Model Manager | http://localhost:3002 | Téléchargement, import, chargement et suppression des modèles Ollama |
-| Open WebUI | http://localhost:3003 | Interface alternative orientée Ollama |
-| Ollama API | http://localhost:11434 | API locale exposée depuis WSL2 |
+| AnythingLLM | http://localhost:3001 | Interface principale pour le chat, la documentation et les workflows RAG |
+| Model Loader | http://localhost:3002 | Gestion des modèles GGUF, contrôle du runtime et proxy OpenAI local |
+| Open WebUI | http://localhost:3003 | Interface alternative connectée au proxy local |
+| llama.cpp runtime | http://127.0.0.1:12434 | Runtime natif Windows basé sur llama-server |
+| Host controller | http://127.0.0.1:13579 | API locale de contrôle du runtime |
+
+Le proxy OpenAI du Model Loader expose un identifiant de modèle stable : `lia-local`.
 
 ---
 
@@ -131,21 +135,22 @@ Le point d'entrée principal est [pro-ipex.ps1](pro-ipex.ps1).
 
 ```mermaid
 flowchart LR
-    A[Windows 11<br/>PowerShell] --> B[WSL2<br/>Ubuntu 24.04]
-    A --> C[Docker Desktop<br/>WSL2 backend]
+    A[Windows 11<br/>PowerShell] --> B[pro-ipex.ps1<br/>bootstrap]
+    B --> C[llama-host-controller.ps1<br/>:13579]
+    C --> D[llama-server<br/>Windows native<br/>Vulkan préféré<br/>:12434]
 
-    B --> D[Ollama IPEX-LLM<br/>Intel Arc GPU<br/>Level-Zero / DXCore<br/>:11434]
+    A --> E[Docker Desktop]
+    E --> F[AnythingLLM<br/>:3001]
+    E --> G[Model Loader<br/>React + Express<br/>:3002]
+    E --> H[Open WebUI<br/>:3003]
 
-    C --> E[AnythingLLM<br/>:3001]
-    C --> F[Model Manager<br/>React + Express<br/>:3002]
-    C --> G[Open WebUI<br/>:3003]
-
-    E --> D
-    F --> D
+    F --> G
+    H --> G
+    G --> C
     G --> D
 ```
 
-Le flux est volontairement simple : Ollama tourne dans WSL2 pour exploiter correctement le GPU Intel Arc, tandis que les interfaces applicatives tournent dans Docker et consomment l'API Ollama via host.docker.internal.
+Le flux est volontairement simple : l'inférence reste sur l'hôte Windows, tandis que les interfaces applicatives tournent dans des conteneurs séparés. Le Model Loader sert à la fois d'interface d'administration, de passerelle vers le contrôleur hôte et de proxy OpenAI compatible pour AnythingLLM et Open WebUI.
 
 ---
 
@@ -154,13 +159,15 @@ Le flux est volontairement simple : Ollama tourne dans WSL2 pour exploiter corre
 | Fonctionnalité | Détail |
 |---|---|
 | Bootstrap en une commande | Une exécution de [pro-ipex.ps1](pro-ipex.ps1) prépare l'environnement et démarre la stack |
-| Auto-configuration WSL2 | Ajuste la connectivité nécessaire entre Windows, WSL2 et Docker |
-| Ollama IPEX-LLM | Installation et démarrage automatiques dans Ubuntu-24.04 |
-| Auto-config AnythingLLM | Provider Ollama et modèle par défaut injectés automatiquement |
-| Open WebUI inclus | Interface alternative lancée sur un conteneur séparé |
-| Model Manager intégré | UI dédiée pour gérer les modèles locaux |
+| Runtime natif Windows | L'inférence repose sur `llama-server.exe` au lieu d'une couche WSL2 |
+| Préférence Vulkan | Le script privilégie Vulkan sur Windows et évite l'installation SYCL dans le flux actif |
+| Binaires officiels llama.cpp | Téléchargement des releases officielles avant toute tentative de build local |
+| Auto-config AnythingLLM | Provider OpenAI-compatible et modèle `lia-local` injectés automatiquement |
+| Auto-config Open WebUI | Configuration persistée pour pointer vers le proxy du Model Loader |
+| Model Loader intégré | UI dédiée pour lister, importer, charger, décharger et sélectionner les modèles |
 | Import GGUF Hugging Face | Import direct depuis une URL de fichier `.gguf` |
-| Détection du modèle existant | Sélection automatique d'un modèle raisonnable quand c'est possible |
+| Import Ollama Library | Import via référence de bibliothèque ou URL `ollama.com/library` |
+| Runtime partagé | AnythingLLM et Open WebUI réutilisent le même runtime sans le relancer inutilement |
 
 ---
 
@@ -170,40 +177,45 @@ Le flux est volontairement simple : Ollama tourne dans WSL2 pour exploiter corre
 
 Exécuter [pro-ipex.ps1](pro-ipex.ps1).
 
-### 2. Télécharger ou importer un modèle
+### 2. Importer un modèle
 
-Tu peux utiliser le Model Manager, tirer un modèle Ollama classique, ou importer un fichier GGUF direct depuis Hugging Face.
+Utilise le Model Loader pour :
 
-Exemple :
+- importer un fichier GGUF depuis Hugging Face ;
+- importer depuis Ollama Library ;
+- sélectionner un modèle local déjà présent ;
+- charger ou décharger le modèle dans le runtime.
+
+Exemples de références utiles dans le Model Loader :
+
+- `https://huggingface.co/.../resolve/main/model.gguf`
+- `gemma3n:e4b`
+- `https://ollama.com/library/gemma3n:e4b`
+
+### 3. Tester le proxy local
 
 ```powershell
-wsl -d Ubuntu-24.04 -- bash -c 'cd ~/ollama-ipex && OLLAMA_HOST=127.0.0.1:11434 ./ollama pull qwen2.5:0.5b'
+Invoke-WebRequest -Uri "http://127.0.0.1:3002/health" -UseBasicParsing
 ```
 
-### 3. Tester l'inférence locale
+### 4. Utiliser les interfaces
 
-```powershell
-wsl -d Ubuntu-24.04 -- bash -c 'cd ~/ollama-ipex && OLLAMA_HOST=127.0.0.1:11434 ./ollama run qwen2.5:0.5b "Say: OK" --nowordwrap'
-```
-
-### 4. Basculer entre les interfaces
-
-- AnythingLLM pour le workflow applicatif principal.
-- Model Manager pour administrer les modèles.
-- Open WebUI pour une interaction plus directe avec Ollama.
+- AnythingLLM pour le workflow applicatif principal ;
+- Model Loader pour piloter le runtime et les modèles ;
+- Open WebUI pour une interface de chat alternative.
 
 ---
 
 ## Recommended Models
 
-Pour une machine légère orientée réactivité sur Arc 140V, les modèles suivants sont de bons candidats :
+Pour une machine légère orientée réactivité, les modèles GGUF quantifiés suivants sont de bons candidats :
 
-- `qwen2.5:0.5b`
-- `qwen2.5:1.5b`
-- `llama3.2:1b`
-- `phi3.5:mini`
+- `gemma-3n-E4B-it-Q4_K_M.gguf`
+- `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`
+- `Llama-3.2-1B-Instruct-Q4_K_M.gguf`
+- `Phi-3.5-mini-instruct-Q4_K_M.gguf`
 
-Le script préfère automatiquement un modèle raisonnable s'il en détecte plusieurs déjà présents.
+Le projet fonctionne mieux avec des formats GGUF adaptés à la mémoire disponible, et le script tente de réutiliser une configuration existante quand elle est déjà présente.
 
 ---
 
@@ -211,17 +223,24 @@ Le script préfère automatiquement un modèle raisonnable s'il en détecte plus
 
 ```text
 .
-├── pro-ipex.ps1
 ├── Dockerfile.anythingllm
-├── patch-ollama-client.js
+├── Dockerfile.model-loader
+├── evolution vers llama.cpp.MD
+├── llama-host-controller.ps1
+├── pro-ipex.ps1
 ├── README.md
-└── model-manager/
-    ├── server.js
-    ├── package.json
-    ├── server-package.json
-    └── src/
-        ├── App.jsx
-        └── App.css
+├── model-manager/
+│   ├── index.html
+│   ├── package.json
+│   ├── server-package.json
+│   ├── server.js
+│   ├── src/
+│   │   ├── App.css
+│   │   ├── App.jsx
+│   │   └── main.jsx
+│   └── vite.config.js
+├── models/
+└── runtime/
 ```
 
 ---
@@ -230,46 +249,56 @@ Le script préfère automatiquement un modèle raisonnable s'il en détecte plus
 
 ### Orchestration script
 
-Le script [pro-ipex.ps1](pro-ipex.ps1) gère l'installation WSL2, la configuration réseau, le téléchargement d'Ollama IPEX-LLM, le démarrage de l'inférence GPU, le build Docker et l'ouverture automatique des interfaces.
+Le script [pro-ipex.ps1](pro-ipex.ps1) gère le téléchargement des binaires llama.cpp, la normalisation de la configuration runtime, le démarrage du contrôleur hôte, le build de [Dockerfile.model-loader](Dockerfile.model-loader) et le lancement des conteneurs applicatifs.
 
-### Docker image
+### Host controller
 
-Le fichier [Dockerfile.anythingllm](Dockerfile.anythingllm) construit une image basée sur mintplexlabs/anythingllm:latest, y ajoute le frontend du Model Manager, le bridge Express et le wrapper de démarrage qui fait coexister le tout.
+Le contrôleur [llama-host-controller.ps1](llama-host-controller.ps1) expose une API locale simple pour :
 
-### Model Manager
+- lire l'état du runtime ;
+- démarrer ou arrêter `llama-server.exe` ;
+- réutiliser le modèle déjà chargé quand c'est pertinent ;
+- éviter les redémarrages inutiles lors du changement d'interface.
+
+### Model Loader
 
 L'interface [model-manager/src/App.jsx](model-manager/src/App.jsx) permet :
 
 - de lister les modèles disponibles ;
-- de charger et décharger les modèles en VRAM ;
-- de sélectionner le modèle actif ;
-- d'importer un fichier GGUF Hugging Face via URL directe.
+- de suivre le statut du runtime ;
+- de charger et décharger les modèles ;
+- d'importer depuis Hugging Face ou Ollama Library ;
+- d'exposer un point d'accès OpenAI compatible pour les autres interfaces.
 
-Le backend [model-manager/server.js](model-manager/server.js) traduit les appels du frontend vers l'API native d'Ollama.
+Le backend [model-manager/server.js](model-manager/server.js) traduit les actions du frontend vers le contrôleur hôte, le runtime llama.cpp et les routes OpenAI compatibles `/v1/models`, `/v1/chat/completions`, `/v1/completions` et `/v1/embeddings`.
+
+### Container images
+
+- [Dockerfile.model-loader](Dockerfile.model-loader) construit l'image active du Model Loader.
+- [Dockerfile.anythingllm](Dockerfile.anythingllm) reste dans le dépôt mais n'est pas la voie principale utilisée par le script actuel, qui démarre l'image upstream `mintplexlabs/anythingllm:latest`.
 
 ---
 
 ## Useful Commands
 
 ```powershell
-# Logs Ollama dans WSL2
-wsl -d Ubuntu-24.04 -- bash -c 'tail -f ~/ollama-ipex/serve.log'
+# Vérifier la santé du Model Loader
+Invoke-WebRequest -Uri "http://127.0.0.1:3002/health" -UseBasicParsing
 
-# Lister les modèles disponibles
-wsl -d Ubuntu-24.04 -- bash -c 'cd ~/ollama-ipex && ./ollama list'
+# Vérifier le runtime llama.cpp
+Invoke-WebRequest -Uri "http://127.0.0.1:12434/health" -UseBasicParsing
 
-# Vérifier les processus Ollama
-wsl -d Ubuntu-24.04 -- bash -c 'ps aux | grep ollama | grep -v grep'
-
-# Tester une génération rapide
-wsl -d Ubuntu-24.04 -- bash -c 'cd ~/ollama-ipex && OLLAMA_HOST=127.0.0.1:11434 ./ollama run qwen2.5:0.5b "Say: OK" --nowordwrap'
+# Logs du conteneur Model Loader
+docker logs -f model-loader
 
 # Logs du conteneur AnythingLLM
 docker logs -f anythingllm
 
-# Arrêter toute la stack
-docker stop anythingllm open-webui
-wsl -d Ubuntu-24.04 -- bash -c 'pkill -f ollama'
+# Logs du conteneur Open WebUI
+docker logs -f open-webui
+
+# Relancer proprement la stack via le script principal
+.\pro-ipex.ps1
 ```
 
 ---
@@ -278,15 +307,16 @@ wsl -d Ubuntu-24.04 -- bash -c 'pkill -f ollama'
 
 | Problème | Vérification utile |
 |---|---|
-| Ollama ne répond pas | Vérifier la configuration WSL2, les logs et l'ouverture du port `11434` |
-| AnythingLLM ne voit pas les modèles | Vérifier que le conteneur joint bien `host.docker.internal:11434` |
-| GPU inactif | Confirmer le chargement via les logs Ollama et le backend Level-Zero |
-| Réseau WSL2 ou Docker instable | Redémarrer Docker Desktop puis relancer le script |
+| Le runtime ne répond pas | Vérifier `http://127.0.0.1:12434/health` et les logs dans `runtime/llama-server.stdout.log` |
+| Le contrôleur hôte ne démarre pas | Vérifier `http://127.0.0.1:13579` et relancer [pro-ipex.ps1](pro-ipex.ps1) |
+| AnythingLLM ou Open WebUI ne voient pas le modèle | Vérifier que le Model Loader expose bien `lia-local` sur `http://model-loader:3002/v1` |
+| Le GPU n'est pas exploité | Vérifier que le backend actif remonté par le Model Loader est bien `vulkan` |
+| L'interface n'affiche pas les derniers changements | Rebuilder l'image du Model Loader puis forcer un rafraîchissement du navigateur |
 
 ---
 
 ## Positioning
 
-LIA n'est pas un framework généraliste. C'est un dépôt d'intégration ciblé pour obtenir une stack IA locale propre, reproductible et exploitable sur Windows avec Intel Arc, sans passer du temps à recoller manuellement WSL2, Ollama et Docker.
+LIA n'est pas un framework généraliste. C'est un dépôt d'intégration ciblé pour obtenir une stack IA locale propre, reproductible et exploitable sur Windows, avec un runtime llama.cpp natif, un proxy OpenAI local et des interfaces prêtes à l'emploi.
 
-Si l'objectif est de transformer une machine personnelle en station locale de chat, de test de modèles et d'expérimentation autour d'Ollama, ce dépôt est construit exactement pour ce cas.
+Si l'objectif est de transformer une machine personnelle en station locale de chat, de test de modèles GGUF et d'expérimentation multi-interface, ce dépôt est construit exactement pour ce cas.

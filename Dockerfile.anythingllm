@@ -27,10 +27,6 @@ RUN printf '#!/bin/bash\nnode /model-manager/server.js &\nexec /bin/bash /usr/lo
 # ============================================================
 FROM mintplexlabs/anythingllm:latest
 
-# Patch Ollama client (no-op — conservé pour compatibilité)
-COPY patch-ollama-client.js /tmp/patch-ollama-client.js
-RUN node /tmp/patch-ollama-client.js
-
 # Copier le bridge server, ses node_modules et le frontend buildé
 COPY model-manager/server.js /model-manager/server.js
 COPY --from=frontend-build /srv/node_modules /model-manager/node_modules
