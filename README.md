@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="./model-manager/public/logo.svg" width="150" alt="LIA Logo" />
+
 <h1>LIA2</h1>
 
 <p><strong>Local Intelligence Assistant 2 for Windows with llama.cpp</strong></p>

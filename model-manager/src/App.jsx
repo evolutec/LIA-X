@@ -514,18 +514,6 @@ function App() {
     }
   }
 
-  async function handleDropCache() {
-    setStatus("Vidage du cache mémoire Linux en cours...");
-    try {
-      const res = await fetch(`${apiBase}/api/cache/drop`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || res.statusText);
-      setStatus("Cache mémoire vidé. La RAM libre a été restituée.");
-    } catch (err) {
-      setStatus(`Échec vider cache : ${err.message}`);
-    }
-  }
-
   function handleHFUrlChange(url) {
     setHuggingfaceUrl(url);
     // Auto-dériver le nom du modèle depuis l'URL si le champ est vide
@@ -758,9 +746,12 @@ function App() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <div>
-          <h1>⚡ Model Loader — llama.cpp</h1>
-          <p className="hero-subtitle">Pilotage local des modèles GGUF, du runtime hôte et du proxy OpenAI-compatible.</p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <img src="/logo.svg" alt="LIA Logo" width="48" height="48" />
+          <div>
+            <h1 style={{ margin: 0 }}>LIA</h1>
+            <p className="hero-subtitle" style={{ margin: 0 }}>LOCAL INTELLIGENT ASSISTANT</p>
+          </div>
         </div>
         <div className="backend-badge">
           <span className={`dot ${version ? "" : "offline"}`}></span>
@@ -779,15 +770,7 @@ function App() {
           <div className="hero-copy">
             <div className="eyebrow">Console locale</div>
             <h2>Charge un GGUF, démarre llama.cpp et expose un endpoint stable aux interfaces web.</h2>
-            <p>Le runtime tourne sur Windows, tandis que ce panneau pilote le modèle actif et le proxy OpenAI-compatible.</p>
-          </div>
-          <div className="hero-actions">
-            <button className="btn btn-warning" onClick={handleDropCache} disabled={loading} title="Vide le cache Linux pour restituer de la RAM libre">
-              🧹 Vider cache
-            </button>
-            <button className="btn btn-secondary" onClick={() => refreshAllModelState({ silent: false })} disabled={loading}>
-              ↻ Rafraîchir
-            </button>
+            <p>Le runtime tourne sur Windows, tandis que ce panneau pilote le modèle actif et le proxy OpenAI compatible.</p>
           </div>
         </section>
 
