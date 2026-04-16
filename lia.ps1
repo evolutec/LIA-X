@@ -344,8 +344,52 @@ function Resolve-LlamaServerBinary([string]$buildDir) {
     return $binary
 }
 
+function Stop-LlamaServerProcess {
+    $procs = Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue
+    if ($procs) {
+        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+        # Attendre libération du port
+        for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Milliseconds 500
+            $still = Get-NetTCPConnection -LocalPort $llamaPort -ErrorAction SilentlyContinue
+            if (-not $still) { break }
+        }
+    }
+}
+
+function Stop-ExistingController {
+    $connections = Get-NetTCPConnection -LocalPort $controllerPort -State Listen -ErrorAction SilentlyContinue
+    foreach ($conn in @($connections)) {
+        Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+    }
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 500
+        $still = Get-NetTCPConnection -LocalPort $controllerPort -ErrorAction SilentlyContinue
+        if (-not $still) { break }
+    }
+}
+
 function Ensure-ControllerRunning {
-    if (-not (Wait-HttpOk -url "http://127.0.0.1:$controllerPort/health" -maxTries 1 -delay 1)) {
+    $controllerOk = $false
+    if (Wait-HttpOk -url "http://127.0.0.1:$controllerPort/health" -maxTries 1 -delay 1) {
+        try {
+            $currentStatus = Invoke-RestMethod -Uri "http://127.0.0.1:$controllerPort/status" -Method Get -TimeoutSec 5 -ErrorAction Stop
+            if ([string]$currentStatus.models_dir -ieq $modelsDir) {
+                $controllerOk = $true
+            } else {
+                INFO "Contrôleur existant avec chemin différent ($($currentStatus.models_dir)), redémarrage..."
+                Stop-LlamaServerProcess
+                Stop-ExistingController
+            }
+        } catch {
+            Stop-LlamaServerProcess
+            Stop-ExistingController
+        }
+    } else {
+        Stop-LlamaServerProcess
+    }
+
+    if (-not $controllerOk) {
         INFO "Démarrage du contrôleur hôte"
         Start-Process powershell.exe -ArgumentList @(
             '-ExecutionPolicy', 'Bypass',
@@ -356,7 +400,7 @@ function Ensure-ControllerRunning {
         ) -WindowStyle Hidden | Out-Null
     }
 
-    if (-not (Wait-HttpOk -url "http://127.0.0.1:$controllerPort/health" -maxTries 20 -delay 1)) {
+    if (-not (Wait-HttpOk -url "http://127.0.0.1:$controllerPort/health" -maxTries 40 -delay 2)) {
         FAIL "Le contrôleur hôte ne répond pas."
     }
 

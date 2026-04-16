@@ -1,5 +1,8 @@
+model-manager/node_modules/
+model-manager/dist/
 models/
 runtime/
 model-manager/node_modules/
 model-manager/dist/
-
+models/
+runtime/
