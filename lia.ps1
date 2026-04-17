@@ -15,10 +15,12 @@ $llamaPort         = 12434
 $loaderPort        = 3002
 $anythingPort      = 3001
 $openWebUiPort     = 3003
+$libreChatPort     = 3004
 $dockerNetwork     = "lia-network"
 $modelLoaderImage  = "lia-model-loader:latest"
 $anythingllmImage  = "mintplexlabs/anythingllm:latest"
 $openWebUiImage    = "ghcr.io/open-webui/open-webui:main"
+$libreChatImage    = "ghcr.io/danny-avila/librechat:latest"
 
 function Confirm-Command([string]$cmd) {
     [bool](Get-Command $cmd -ErrorAction SilentlyContinue)
@@ -162,16 +164,30 @@ function Get-LlamaServerBinaryFromDirectory([string]$directoryPath) {
 
 function Try-DownloadLlamaCppRelease($plan) {
     $candidates = @(Get-LlamaReleaseCandidates $plan)
+    $releaseRoot = Join-Path $runtimeDir 'llama-releases'
+    Ensure-Directory $releaseRoot
 
+    # Priorité 1 : réutiliser un binaire déjà téléchargé localement (par backend, le plus récent en premier)
+    foreach ($candidate in $candidates) {
+        $localDirs = Get-ChildItem -Path $releaseRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "^.+-$([regex]::Escape($candidate.backend))$" } |
+            Sort-Object Name -Descending
+        foreach ($dir in $localDirs) {
+            $localBinary = Get-LlamaServerBinaryFromDirectory $dir.FullName
+            if ($localBinary) {
+                INFO "Binaire llama.cpp existant réutilisé : $($dir.Name)"
+                return @{ backend = $candidate.backend; label = $candidate.label; binaryPath = $localBinary; source = 'release'; buildDir = $dir.FullName }
+            }
+        }
+    }
+
+    # Priorité 2 : télécharger la dernière release GitHub
     try {
         $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest' -Headers @{ 'User-Agent' = 'LIA-setup' }
     } catch {
         WARN "Impossible de recuperer la derniere release llama.cpp."
         return $null
     }
-
-    $releaseRoot = Join-Path $runtimeDir 'llama-releases'
-    Ensure-Directory $releaseRoot
 
     foreach ($candidate in $candidates) {
         $asset = $release.assets | Where-Object { $_.name -match $candidate.assetPattern } | Select-Object -First 1
@@ -181,12 +197,6 @@ function Try-DownloadLlamaCppRelease($plan) {
 
         $releaseDir = Join-Path $releaseRoot ("{0}-{1}" -f $release.tag_name, $candidate.backend)
         $archivePath = Join-Path $releaseRoot $asset.name
-        $existingBinary = Get-LlamaServerBinaryFromDirectory $releaseDir
-
-        if ($existingBinary) {
-            INFO "Utilisation du binaire llama.cpp deja present : $($asset.name)"
-            return @{ backend = $candidate.backend; label = $candidate.label; binaryPath = $existingBinary; source = 'release'; buildDir = $releaseDir }
-        }
 
         INFO "Telechargement du binaire officiel llama.cpp : $($asset.name)"
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archivePath -Headers @{ 'User-Agent' = 'LIA-setup' }
@@ -240,11 +250,12 @@ function Get-InterfaceChoice {
     Write-Host "`nInterfaces disponibles :" -ForegroundColor White
     Write-Host "  1) Open WebUI" -ForegroundColor Gray
     Write-Host "  2) AnythingLLM" -ForegroundColor Gray
-    Write-Host "  3) Les deux" -ForegroundColor Gray
+    Write-Host "  3) LibreChat" -ForegroundColor Gray
+    Write-Host "  4) Tous" -ForegroundColor Gray
 
     do {
-        $choice = (Read-Host "Choix [1/2/3]").Trim()
-    } while ($choice -notin @('1', '2', '3'))
+        $choice = (Read-Host "Choix [1/2/3/4]").Trim()
+    } while ($choice -notin @('1', '2', '3', '4'))
 
     return $choice
 }
@@ -374,10 +385,13 @@ function Ensure-ControllerRunning {
     if (Wait-HttpOk -url "http://127.0.0.1:$controllerPort/health" -maxTries 1 -delay 1) {
         try {
             $currentStatus = Invoke-RestMethod -Uri "http://127.0.0.1:$controllerPort/status" -Method Get -TimeoutSec 5 -ErrorAction Stop
-            if ([string]$currentStatus.models_dir -ieq $modelsDir) {
+            $modelsMatch = [string]$currentStatus.models_dir -ieq $modelsDir
+            $supportsMulti = $currentStatus.PSObject.Properties['instances'] -ne $null
+            if ($modelsMatch -and $supportsMulti) {
                 $controllerOk = $true
             } else {
-                INFO "Contrôleur existant avec chemin différent ($($currentStatus.models_dir)), redémarrage..."
+                $reason = if (-not $modelsMatch) { "chemin different ($($currentStatus.models_dir))" } else { "format legacy (redemarrage requis)" }
+                INFO "Contrôleur existant incompatible ($reason), redémarrage..."
                 Stop-LlamaServerProcess
                 Stop-ExistingController
             }
@@ -391,7 +405,8 @@ function Ensure-ControllerRunning {
 
     if (-not $controllerOk) {
         INFO "Démarrage du contrôleur hôte"
-        Start-Process powershell.exe -ArgumentList @(
+        $pwshExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+        Start-Process $pwshExe -ArgumentList @(
             '-ExecutionPolicy', 'Bypass',
             '-File', $controllerScript,
             '-Port', $controllerPort,
@@ -418,18 +433,66 @@ function Write-RuntimeConfig([string]$backend, [string]$backendLabel, [string]$b
         proxy_model_id = 'lia-local'
         default_context = 8192
         default_gpu_layers = if ($backend -eq 'cpu') { 0 } else { 999 }
+        server_port_start = 12434
+        server_port_end = 12444
+        max_instances = 6
     }
 
     $config | ConvertTo-Json -Depth 5 | Set-Content -Path $runtimeConfigPath -Encoding UTF8
 }
 
-function Get-DefaultModel {
-    $firstModel = Get-ChildItem -Path $modelsDir -Filter *.gguf -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First 1
-    if (-not $firstModel) {
+function Get-DefaultModelFromState {
+    if (-not (Test-Path $runtimeStatePath)) {
         return $null
     }
 
-    return $firstModel.Name
+    try {
+        $state = Get-Content -Path $runtimeStatePath -Raw | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+
+    $instances = @($state.instances) | Where-Object {
+        $_ -and $_.filename -and ($_.running -ne $false)
+    }
+
+    if (-not $instances -or $instances.Count -eq 0) {
+        return $null
+    }
+
+    $latestInstance = $instances |
+        Sort-Object {
+            try {
+                [datetime]::Parse([string]$_.started_at)
+            } catch {
+                [datetime]::MinValue
+            }
+        } -Descending |
+        Select-Object -First 1
+
+    if (-not $latestInstance) {
+        return $null
+    }
+
+    return [string]$latestInstance.filename
+}
+
+function Get-DefaultModel {
+    $stateModel = Get-DefaultModelFromState
+    if ($stateModel) {
+        return $stateModel
+    }
+
+    $candidateModels = Get-ChildItem -Path $modelsDir -Filter *.gguf -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.BaseName -notmatch 'deepseek' } |
+        Sort-Object Length, Name
+
+    $smallestModel = $candidateModels | Select-Object -First 1
+    if (-not $smallestModel) {
+        return $null
+    }
+
+    return $smallestModel.Name
 }
 
 function Start-DefaultRuntime {
@@ -467,78 +530,78 @@ function Remove-Container([string]$name) {
     docker rm $name 2>$null | Out-Null
 }
 
-function Sync-AnythingLLMConfiguration {
-    $python = @'
-import sqlite3
-
-conn = sqlite3.connect('/app/server/storage/anythingllm.db')
-cur = conn.cursor()
-
-cur.execute(
-    """
-    UPDATE workspaces
-    SET
-        chatProvider = ?,
-        chatModel = ?,
-        agentProvider = ?,
-        agentModel = ?
-    """,
-    ('generic-openai', 'lia-local', 'generic-openai', 'lia-local')
-)
-
-conn.commit()
-print(cur.rowcount)
-'@
-
-    docker exec anythingllm python3 -c $python | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        WARN "Synchronisation AnythingLLM non appliquee."
+function Ensure-ContainerOnNetwork([string]$name, [string]$network) {
+    $inspect = docker inspect $name --format '{{json .NetworkSettings.Networks}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $inspect) {
         return
     }
 
-    OK "AnythingLLM synchronise sur le proxy OpenAI local"
+    try {
+        $networkState = $inspect | ConvertFrom-Json
+    } catch {
+        return
+    }
+
+    $attachedNetworks = @($networkState.PSObject.Properties.Name)
+
+    if ($attachedNetworks -notcontains $network) {
+        docker network connect $network $name | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            FAIL "Impossible de rattacher $name au réseau Docker $network."
+        }
+    }
 }
 
-function Sync-OpenWebUiConfiguration {
-    $python = @'
-import json
-import sqlite3
 
-conn = sqlite3.connect('/app/backend/data/webui.db')
-cur = conn.cursor()
-row = cur.execute('SELECT id, data FROM config LIMIT 1').fetchone()
+function Start-LibreChatContainer {
+    Remove-Container 'librechat'
 
-if row:
-    config_id, raw = row
-    data = json.loads(raw)
-    openai = data.setdefault('openai', {})
-    openai['enable'] = True
-    openai['api_base_urls'] = ['http://model-loader:3002/v1']
-    openai['api_keys'] = ['not-used']
-    api_configs = openai.setdefault('api_configs', {})
-    slot = api_configs.setdefault('0', {})
-    slot['enable'] = True
-    slot['connection_type'] = 'external'
-    slot['auth_type'] = 'bearer'
-    ollama = data.setdefault('ollama', {})
-    ollama['enable'] = False
-    ollama['base_urls'] = []
-    ollama['api_configs'] = {'0': {'enable': False}}
-    data['direct'] = {'enable': False}
-    cur.execute('UPDATE config SET data = ?, version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (json.dumps(data), 0, config_id))
-    conn.commit()
-    print(config_id)
-else:
-    print('0')
-'@
-
-    docker exec open-webui python -c $python | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        WARN "Synchronisation Open WebUI non appliquee."
-        return
+    $existing = docker inspect librechat 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $state = $existing | ConvertFrom-Json
+        if ($state[0].State.Running -eq $true -and $state[0].State.Status -eq 'running') {
+            OK "LibreChat déjà en fonctionnement"
+            return
+        }
+        Remove-Container 'librechat'
     }
 
-    OK "Open WebUI synchronise sur le proxy OpenAI local"
+    # Démarrer MongoDB requis pour LibreChat
+    Remove-Container 'librechat-mongo'
+    docker run -d `
+        --name librechat-mongo `
+        --network $dockerNetwork `
+        -v librechat-mongo:/data/db `
+        --restart unless-stopped `
+        mongo:6
+
+    # Build de l'image LibreChat personnalisée LIA avec configuration préintégrée
+    docker build -t lia-librechat -f "$rootDir\Dockerfile.librechat" $rootDir
+    if ($LASTEXITCODE -ne 0) {
+        FAIL "Build du conteneur LibreChat impossible."
+    }
+
+    $args = @(
+        'run', '-d',
+        '--name', 'librechat',
+        '--network', $dockerNetwork,
+        '-p', ("{0}:3080" -f $libreChatPort),
+        '--add-host', 'host.docker.internal:host-gateway',
+        '-v', 'librechat-data:/app/api/data',
+        '--restart', 'unless-stopped',
+        'lia-librechat'
+    )
+
+    docker @args | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        FAIL "Démarrage LibreChat impossible."
+    }
+
+    if (-not (Wait-HttpOk -url "http://127.0.0.1:$libreChatPort" -maxTries 40 -delay 3)) {
+        WARN "LibreChat met plus de temps à répondre."
+    } else {
+        OK "LibreChat prêt sur http://localhost:$libreChatPort"
+    }
 }
 
 function Start-ModelLoaderContainer {
@@ -547,6 +610,16 @@ function Start-ModelLoaderContainer {
     docker build -t $modelLoaderImage -f "$rootDir\Dockerfile.model-loader" $rootDir
     if ($LASTEXITCODE -ne 0) {
         FAIL "Build du conteneur Model Loader impossible."
+    }
+
+    $existing = docker inspect model-loader 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $state = $existing | ConvertFrom-Json
+        if ($state[0].State.Running -eq $true -and $state[0].State.Status -eq 'running') {
+            OK "Model Loader déjà en fonctionnement"
+            return
+        }
+        Remove-Container 'model-loader'
     }
 
     $args = @(
@@ -560,6 +633,11 @@ function Start-ModelLoaderContainer {
         '-e', 'MODEL_STORAGE_DIR=/models',
         '-e', 'PROXY_MODEL_ID=lia-local',
         '-v', ("{0}:/models" -f $modelsDir),
+        '--restart', 'unless-stopped',
+        '--health-cmd', 'wget --no-verbose --tries=1 --spider http://localhost:3002/health || exit 1',
+        '--health-interval', '15s',
+        '--health-timeout', '3s',
+        '--health-retries', '2',
         $modelLoaderImage
     )
 
@@ -567,6 +645,8 @@ function Start-ModelLoaderContainer {
     if ($LASTEXITCODE -ne 0) {
         FAIL "Démarrage du conteneur Model Loader impossible."
     }
+
+    Ensure-ContainerOnNetwork 'model-loader' $dockerNetwork
 
     if (-not (Wait-HttpOk -url "http://127.0.0.1:$loaderPort/health" -maxTries 30 -delay 2)) {
         FAIL "Le Model Loader ne répond pas."
@@ -578,6 +658,22 @@ function Start-ModelLoaderContainer {
 function Start-AnythingLLMContainer {
     Remove-Container 'anythingllm'
 
+    $existing = docker inspect anythingllm 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $state = $existing | ConvertFrom-Json
+        if ($state[0].State.Running -eq $true -and $state[0].State.Status -eq 'running') {
+            OK "AnythingLLM déjà en fonctionnement"
+            return
+        }
+        Remove-Container 'anythingllm'
+    }
+
+    # Build de l'image AnythingLLM personnalisée LIA avec configuration préintégrée
+    docker build -t lia-anythingllm -f "$rootDir\Dockerfile.anythingllm" $rootDir
+    if ($LASTEXITCODE -ne 0) {
+        FAIL "Build du conteneur AnythingLLM impossible."
+    }
+
     $args = @(
         'run', '-d',
         '--name', 'anythingllm',
@@ -585,16 +681,8 @@ function Start-AnythingLLMContainer {
         '-p', ("{0}:3001" -f $anythingPort),
         '--add-host', 'host.docker.internal:host-gateway',
         '-v', 'anythingllm-storage:/app/server/storage',
-        '-e', 'STORAGE_DIR=/app/server/storage',
-        '-e', 'LLM_PROVIDER=generic-openai',
-        '-e', 'GENERIC_OPEN_AI_BASE_PATH=http://model-loader:3002/v1',
-        '-e', 'GENERIC_OPEN_AI_MODEL_PREF=lia-local',
-        '-e', 'GENERIC_OPEN_AI_API_KEY=not-used',
-        '-e', 'GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=8192',
-        '-e', 'EMBEDDING_ENGINE=native',
-        '-e', 'NO_PROXY=model-loader,localhost,127.0.0.1,host.docker.internal',
-        '-e', 'no_proxy=model-loader,localhost,127.0.0.1,host.docker.internal',
-        $anythingllmImage
+        '--restart', 'unless-stopped',
+        'lia-anythingllm'
     )
 
     docker @args | Out-Null
@@ -607,12 +695,26 @@ function Start-AnythingLLMContainer {
     } else {
         OK "AnythingLLM prêt sur http://localhost:$anythingPort"
     }
-
-    Sync-AnythingLLMConfiguration
 }
 
 function Start-OpenWebUiContainer {
     Remove-Container 'open-webui'
+
+    $existing = docker inspect open-webui 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $state = $existing | ConvertFrom-Json
+        if ($state[0].State.Running -eq $true -and $state[0].State.Status -eq 'running') {
+            OK "Open WebUI déjà en fonctionnement"
+            return
+        }
+        Remove-Container 'open-webui'
+    }
+
+    # Build de l'image Open WebUI personnalisée LIA avec configuration préintégrée
+    docker build -t lia-openwebui -f "$rootDir\Dockerfile.openwebui" $rootDir
+    if ($LASTEXITCODE -ne 0) {
+        FAIL "Build du conteneur Open WebUI impossible."
+    }
 
     $args = @(
         'run', '-d',
@@ -621,15 +723,8 @@ function Start-OpenWebUiContainer {
         '-p', ("{0}:8080" -f $openWebUiPort),
         '--add-host', 'host.docker.internal:host-gateway',
         '-v', 'open-webui-data:/app/backend/data',
-        '-e', 'WEBUI_AUTH=False',
-        '-e', 'WEBUI_SECRET_KEY=lia-local-secret',
-        '-e', 'ENABLE_OLLAMA_API=false',
-        '-e', 'ENABLE_OPENAI_API=true',
-        '-e', 'OPENAI_API_BASE_URL=http://model-loader:3002/v1',
-        '-e', 'OPENAI_API_BASE_URLS=http://model-loader:3002/v1',
-        '-e', 'OPENAI_API_KEYS=not-used',
-        '-e', 'OPENAI_API_KEY=not-used',
-        $openWebUiImage
+        '--restart', 'unless-stopped',
+        'lia-openwebui'
     )
 
     docker @args | Out-Null
@@ -642,8 +737,6 @@ function Start-OpenWebUiContainer {
     } else {
         OK "Open WebUI prêt sur http://localhost:$openWebUiPort"
     }
-
-    Sync-OpenWebUiConfiguration
 }
 
 Ensure-Directory $runtimeDir
@@ -702,22 +795,27 @@ Step "5/6" "Conteneurs applicatifs"
 Ensure-DockerNetwork $dockerNetwork
 Start-ModelLoaderContainer
 
-switch ($interfaceChoice) {
-    "1" { Start-OpenWebUiContainer }
-    "2" { Start-AnythingLLMContainer }
-    "3" {
-        Start-AnythingLLMContainer
-        Start-OpenWebUiContainer
+    switch ($interfaceChoice) {
+        "1" { Start-OpenWebUiContainer }
+        "2" { Start-AnythingLLMContainer }
+        "3" { Start-LibreChatContainer }
+        "4" {
+            Start-AnythingLLMContainer
+            Start-OpenWebUiContainer
+            Start-LibreChatContainer
+        }
     }
-}
 
 Step "6/6" "Ouverture navigateur"
 $tabs = @("http://localhost:$loaderPort")
-if ($interfaceChoice -in @("2", "3")) {
+if ($interfaceChoice -in @("2", "4")) {
     $tabs += "http://localhost:$anythingPort"
 }
-if ($interfaceChoice -in @("1", "3")) {
+if ($interfaceChoice -in @("1", "4")) {
     $tabs += "http://localhost:$openWebUiPort"
+}
+if ($interfaceChoice -in @("3", "4")) {
+    $tabs += "http://localhost:$libreChatPort"
 }
 
 Open-Tabs $tabs
@@ -730,11 +828,9 @@ Write-Host "  Model Loader -> http://localhost:$loaderPort" -ForegroundColor Whi
 if ($interfaceChoice -in @("2", "3")) {
     Write-Host "  AnythingLLM  -> http://localhost:$anythingPort" -ForegroundColor White
 }
-if ($interfaceChoice -in @("1", "3")) {
+if ($interfaceChoice -in @("1", "4")) {
     Write-Host "  Open WebUI   -> http://localhost:$openWebUiPort" -ForegroundColor White
 }
-Write-Host "  Backend       -> $($buildResult.label)" -ForegroundColor DarkCyan
-Write-Host "  Runtime hote  -> http://127.0.0.1:$llamaPort/v1" -ForegroundColor DarkCyan
-Write-Host "  Proxy OpenAI  -> http://localhost:$loaderPort/v1" -ForegroundColor DarkCyan
-Write-Host "  Modeles GGUF  -> $modelsDir" -ForegroundColor Gray
-Write-Host "  $sep" -ForegroundColor Cyan
+if ($interfaceChoice -in @("3", "4")) {
+    Write-Host "  LibreChat    -> http://localhost:$libreChatPort" -ForegroundColor White
+}

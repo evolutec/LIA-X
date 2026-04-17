@@ -1,0 +1,17 @@
+FROM ghcr.io/open-webui/open-webui:main
+
+# Configuration LIA préintégrée
+ENV WEBUI_AUTH=False
+ENV WEBUI_SECRET_KEY=lia-local-secret
+ENV ENABLE_OLLAMA_API=false
+ENV ENABLE_OPENAI_API=true
+ENV OPENAI_API_BASE_URL=http://model-loader:3002/v1
+ENV OPENAI_API_BASE_URLS=http://model-loader:3002/v1
+ENV OPENAI_API_KEYS=not-used
+ENV OPENAI_API_KEY=not-used
+
+# Health check intégré
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/api/health || exit 1
+
+EXPOSE 8080

@@ -1,39 +1,14 @@
-# ============================================================
-# Stage 1 — Build du frontend React + dépendances Express
-# (tout npm dans ce stage, l'image AnythingLLM n'a pas npm)
-# ============================================================
-FROM node:20-alpine AS frontend-build
-WORKDIR /build
-
-# Dépendances Vite/React
-COPY model-manager/package.json ./
-RUN npm install
-
-# Build frontend avec VITE_API_BASE_URL="" (appels relatifs)
-COPY model-manager/ ./
-RUN VITE_API_BASE_URL="" npm run build
-
-# Dépendances Express dans un sous-dossier séparé
-WORKDIR /srv
-COPY model-manager/server-package.json ./package.json
-RUN npm install --omit=dev
-
-# Créer le wrapper de démarrage dans le stage build (le COPY s'exécute en root)
-RUN printf '#!/bin/bash\nnode /model-manager/server.js &\nexec /bin/bash /usr/local/bin/docker-entrypoint.sh\n' \
-    > /start.sh && chmod +x /start.sh
-
-# ============================================================
-# Stage 2 — Image finale AnythingLLM + Model Manager
-# ============================================================
 FROM mintplexlabs/anythingllm:latest
 
-# Copier le bridge server, ses node_modules et le frontend buildé
-COPY model-manager/server.js /model-manager/server.js
-COPY --from=frontend-build /srv/node_modules /model-manager/node_modules
-COPY --from=frontend-build /build/dist /model-manager/dist
-COPY --from=frontend-build /start.sh /model-manager/start.sh
+# Configuration LIA préintégrée
+ENV STORAGE_DIR=/app/server/storage
+ENV LLM_PROVIDER=generic-openai
+ENV GENERIC_OPEN_AI_BASE_PATH=http://model-loader:3002/v1
+ENV GENERIC_OPEN_AI_MODEL_PREF=lia-local
+ENV GENERIC_OPEN_AI_API_KEY=not-used
+ENV GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=8192
+ENV EMBEDDING_ENGINE=native
+ENV NO_PROXY=model-loader,localhost,127.0.0.1,host.docker.internal
+ENV no_proxy=model-loader,localhost,127.0.0.1,host.docker.internal
 
-# Forcer root pour que Node (server.js) puisse écrire dans /proc/sys (drop_caches)
-# AnythingLLM gère lui-même les permissions internes via son entrypoint
-USER root
-ENTRYPOINT ["/model-manager/start.sh"]
+EXPOSE 3001

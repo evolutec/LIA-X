@@ -2,240 +2,137 @@
 
 <img src="./model-manager/public/logo.svg" width="150" alt="LIA Logo" />
 
-<h1>LIA2</h1>
+<h1>LIA-X</h1>
 
-<p><strong>Local Intelligence Assistant 2 for Windows with llama.cpp</strong></p>
+<p><strong>Local Intelligence Assistant pour Windows, Docker et llama.cpp</strong></p>
 
 <p>
-  Déploie une stack IA locale complète sur Windows avec <strong>llama.cpp</strong>, <strong>AnythingLLM</strong>, <strong>Open WebUI</strong> et un <strong>Model Loader</strong> dédié,<br>
-  avec un runtime natif Windows piloté par PowerShell et un proxy OpenAI local prêt à l'emploi.
+  Stack IA locale orientée Windows avec un runtime <strong>llama.cpp</strong>, un contrôleur hôte PowerShell,
+  un <strong>Model Loader</strong> GGUF, et les frontends <strong>AnythingLLM</strong>, <strong>Open WebUI</strong> et <strong>LibreChat</strong>.
 </p>
 
 <p>
   <img alt="Windows 11" src="https://img.shields.io/badge/Windows-11-0078D4?style=for-the-badge&logo=windows&logoColor=white">
-  <img alt="llama.cpp" src="https://img.shields.io/badge/llama.cpp-native-111111?style=for-the-badge">
-  <img alt="Vulkan" src="https://img.shields.io/badge/Vulkan-preferred-A41E22?style=for-the-badge&logo=vulkan&logoColor=white">
   <img alt="Docker Desktop" src="https://img.shields.io/badge/Docker-Desktop-2496ED?style=for-the-badge&logo=docker&logoColor=white">
-  <img alt="OpenAI Proxy" src="https://img.shields.io/badge/OpenAI-Compatible%20Proxy-10A37F?style=for-the-badge">
-</p>
-
-<p>
-  <a href="#quick-start"><img alt="Quick Start" src="https://img.shields.io/badge/Quick%20Start-Ready-2EA043?style=flat-square"></a>
-  <a href="#architecture"><img alt="Architecture" src="https://img.shields.io/badge/Architecture-Windows%20Native%20%2B%20Docker-1F6FEB?style=flat-square"></a>
-  <a href="#included-services"><img alt="Services" src="https://img.shields.io/badge/Services-3001%20%7C%203002%20%7C%203003-8250DF?style=flat-square"></a>
+  <img alt="llama.cpp" src="https://img.shields.io/badge/llama.cpp-native-111111?style=for-the-badge">
+  <img alt="Multi-LLM" src="https://img.shields.io/badge/Multi--LLM-parallel-2EA043?style=for-the-badge">
+  <img alt="LibreChat" src="https://img.shields.io/badge/LibreChat-ready-7C3AED?style=for-the-badge">
 </p>
 
 </div>
 
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <h3>One command bootstrap</h3>
-      <p>Un seul script PowerShell installe le runtime local, prépare llama.cpp, construit le Model Loader et démarre les interfaces.</p>
-    </td>
-    <td width="50%" valign="top">
-      <h3>Windows-native runtime</h3>
-      <p>L'inférence tourne nativement sur Windows via llama-server, sans dépendance WSL2 dans l'architecture active.</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <h3>Multiple frontends</h3>
-      <p>AnythingLLM, Open WebUI et le Model Loader cohabitent sur des conteneurs séparés au-dessus d'un même runtime local.</p>
-    </td>
-    <td width="50%" valign="top">
-      <h3>Model workflow local-first</h3>
-      <p>Import GGUF Hugging Face, import depuis Ollama Library, chargement mémoire et proxy OpenAI sans dépendance cloud.</p>
-    </td>
-  </tr>
-</table>
+## Table des matières
 
----
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Why LIA](#why-lia)
-- [Quick Start](#quick-start)
-- [Included Services](#included-services)
+- [Vue d'ensemble](#vue-densemble)
+- [Nouveautés de cette version](#nouveautés-de-cette-version)
+- [Services inclus](#services-inclus)
 - [Architecture](#architecture)
-- [Feature Highlights](#feature-highlights)
-- [Usage Flow](#usage-flow)
-- [Recommended Models](#recommended-models)
-- [Project Structure](#project-structure)
-- [Technical Notes](#technical-notes)
-- [Useful Commands](#useful-commands)
-- [Troubleshooting](#troubleshooting)
-- [Positioning](#positioning)
+- [Flux d'utilisation](#flux-dutilisation)
+- [Fonctionnalités clés](#fonctionnalités-clés)
+- [Structure du projet](#structure-du-projet)
+- [Notes techniques](#notes-techniques)
+- [Commandes utiles](#commandes-utiles)
+- [Dépannage](#dépannage)
 
----
+## Vue d'ensemble
 
-## Overview
+LIA-X est une stack IA locale pensée pour Windows. La couche applicative s'exécute dans Docker, tandis que le script PowerShell sert de bootstrap pour l'installation des prérequis, la préparation du runtime et la configuration initiale.
 
-LIA est un projet d'intégration local-first conçu pour transformer une machine Windows en station IA locale cohérente, avec un accent fort sur l'installation, la reprise après redémarrage et la simplicité d'usage. La stack actuelle remplace l'ancienne architecture Ollama/IPEX/WSL2 par un runtime [llama.cpp](runtime/llama.cpp/README.md) natif Windows, exposé via un contrôleur hôte et consommé par des interfaces Docker séparées.
+Le runtime d'inférence reste piloté sur l'hôte Windows via [llama-host-controller.ps1](llama-host-controller.ps1), et les conteneurs accèdent au service local par `host.docker.internal`. Cette séparation garde une base simple à maintenir tout en permettant plusieurs interfaces web au-dessus du même socle de modèles.
 
-Le projet assemble cinq briques principales :
+## Nouveautés de cette version
 
-- un runtime [llama.cpp](runtime/llama.cpp/README.md) natif Windows, orienté Vulkan ;
-- un contrôleur PowerShell hôte pour démarrer, arrêter et superviser [llama-host-controller.ps1](llama-host-controller.ps1) ;
-- un Model Loader React + Express pour gérer les GGUF et exposer un proxy OpenAI compatible ;
-- AnythingLLM pour le chat et les usages documentaires ;
-- Open WebUI comme interface alternative branchée sur le proxy local.
+- Plusieurs modèles GGUF peuvent maintenant être chargés en parallèle. Le contrôleur hôte gère plusieurs instances `llama-server`, attribue un port libre dans la plage `12434-12444`, et conserve l'état de chaque instance dans [runtime/host-runtime-state.json](runtime/host-runtime-state.json).
+- Le Model Loader expose un proxy OpenAI-compatible stable via l'identifiant `lia-local`, tout en affichant l'état des modèles chargés, les métadonnées GGUF et le modèle actif.
+- LibreChat a été ajouté comme frontend supplémentaire, avec une image Docker dédiée, une configuration préintégrée et un backend MongoDB associé.
+- Les frontends AnythingLLM, Open WebUI et LibreChat sont désormais déployés comme conteneurs Docker distincts sur un même réseau applicatif.
+- Le script [lia.ps1](lia.ps1) sert désormais au bootstrap et à l'installation. Le fonctionnement quotidien passe par Docker et par les services exposés localement.
+- Le contrôleur hôte détecte automatiquement le meilleur backend disponible, avec priorité CUDA pour NVIDIA, Vulkan pour AMD/Intel, puis CPU en repli.
 
----
-
-## Why LIA
-
-Le besoin visé est simple : obtenir une stack LLM locale propre sur Windows, sans recoller manuellement runtime GPU, scripts de lancement, configuration d'interfaces et sélection de modèles à chaque redémarrage.
-
-LIA encapsule cette complexité dans un projet unique afin de fournir :
-
-- un bootstrap reproductible ;
-- une détection matérielle côté script ;
-- un runtime local stable autour de llama.cpp ;
-- une préférence claire pour Vulkan sur Windows ;
-- plusieurs interfaces prêtes à l'emploi ;
-- une gestion de modèles centralisée et plus simple que la ligne de commande seule.
-
----
-
-## Quick Start
-
-```powershell
-git clone https://github.com/ton-user/lia.git
-cd lia
-.\pro-ipex.ps1
-```
-
-Le point d'entrée principal est [pro-ipex.ps1](pro-ipex.ps1). Le script prépare le runtime, télécharge les binaires officiels de llama.cpp si nécessaire, construit l'image du Model Loader puis démarre les services.
-
-Une fois la stack active, les services suivants sont exposés :
-
-- http://localhost:3001
-- http://localhost:3002
-- http://localhost:3003
-
-Le runtime local de génération écoute sur http://127.0.0.1:12434 et le contrôleur hôte sur http://127.0.0.1:13579.
-
----
-
-## Included Services
+## Services inclus
 
 | Service | URL | Rôle |
 |---|---|---|
-| AnythingLLM | http://localhost:3001 | Interface principale pour le chat, la documentation et les workflows RAG |
-| Model Loader | http://localhost:3002 | Gestion des modèles GGUF, contrôle du runtime et proxy OpenAI local |
-| Open WebUI | http://localhost:3003 | Interface alternative connectée au proxy local |
-| llama.cpp runtime | http://127.0.0.1:12434 | Runtime natif Windows basé sur llama-server |
-| Host controller | http://127.0.0.1:13579 | API locale de contrôle du runtime |
+| Model Loader | http://localhost:3002 | UI et API de contrôle des modèles GGUF, import, métadonnées et proxy OpenAI local |
+| AnythingLLM | http://localhost:3001 | Interface de chat et de workflow documentaire |
+| Open WebUI | http://localhost:3003 | Interface de chat alternative branchée sur `lia-local` |
+| LibreChat | http://localhost:3004 | Frontend OpenAI-compatible supplémentaire |
+| Host controller | http://127.0.0.1:13579 | Pilotage des instances `llama-server` |
+| llama-server | http://127.0.0.1:12434-12444 | Une instance par modèle chargé, selon les ports disponibles |
+| LibreChat MongoDB | interne Docker | Stockage de LibreChat |
 
-Le proxy OpenAI du Model Loader expose un identifiant de modèle stable : `lia-local`.
-
----
+Le proxy OpenAI du Model Loader publie un modèle stable nommé `lia-local`. Les interfaces Docker ne pointent pas directement vers un modèle brut, elles parlent à ce proxy qui redirige vers l'instance active.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A[Windows 11<br/>PowerShell] --> B[pro-ipex.ps1<br/>bootstrap]
-    B --> C[llama-host-controller.ps1<br/>:13579]
-    C --> D[llama-server<br/>Windows native<br/>Vulkan préféré<br/>:12434]
+    W[Windows 11] --> B[lia.ps1\nbootstrap / installation]
+    B --> C[llama-host-controller.ps1\n:13579]
+    C --> R[Instances llama-server\n:12434-12444\n1 modèle par instance]
 
-    A --> E[Docker Desktop]
-    E --> F[AnythingLLM<br/>:3001]
-    E --> G[Model Loader<br/>React + Express<br/>:3002]
-    E --> H[Open WebUI<br/>:3003]
+    W --> D[Docker Desktop]
+    D --> M[Model Loader\n:3002]
+    D --> A[AnythingLLM\n:3001]
+    D --> O[Open WebUI\n:3003]
+    D --> L[LibreChat\n:3004]
+    D --> G[librechat-mongo]
 
-    F --> G
-    H --> G
-    G --> C
-    G --> D
+    M -->|host.docker.internal| C
+    M -->|host.docker.internal| R
+    A --> M
+    O --> M
+    L --> M
 ```
 
-Le flux est volontairement simple : l'inférence reste sur l'hôte Windows, tandis que les interfaces applicatives tournent dans des conteneurs séparés. Le Model Loader sert à la fois d'interface d'administration, de passerelle vers le contrôleur hôte et de proxy OpenAI compatible pour AnythingLLM et Open WebUI.
+Le point important est le suivant : un seul modèle est servi par instance `llama-server`, mais plusieurs instances peuvent coexister en mémoire en parallèle. Cela permet de garder plusieurs modèles chargés et d'alterner entre eux sans repartir de zéro à chaque fois.
 
----
+## Flux d'utilisation
 
-## Feature Highlights
+1. Lancer [lia.ps1](lia.ps1) pour installer les prérequis, préparer les images et initialiser la stack.
+2. Ouvrir Docker Desktop si ce n'est pas déjà fait.
+3. Aller sur [Model Loader](http://localhost:3002) pour importer un modèle GGUF depuis Hugging Face ou Ollama Library.
+4. Charger un modèle, puis en charger d'autres si besoin. Chaque modèle occupe sa propre instance `llama-server` sur un port libre.
+5. Utiliser le proxy `lia-local` depuis AnythingLLM, Open WebUI ou LibreChat.
 
-| Fonctionnalité | Détail |
-|---|---|
-| Bootstrap en une commande | Une exécution de [pro-ipex.ps1](pro-ipex.ps1) prépare l'environnement et démarre la stack |
-| Runtime natif Windows | L'inférence repose sur `llama-server.exe` au lieu d'une couche WSL2 |
-| Préférence Vulkan | Le script privilégie Vulkan sur Windows et évite l'installation SYCL dans le flux actif |
-| Binaires officiels llama.cpp | Téléchargement des releases officielles avant toute tentative de build local |
-| Auto-config AnythingLLM | Provider OpenAI-compatible et modèle `lia-local` injectés automatiquement |
-| Auto-config Open WebUI | Configuration persistée pour pointer vers le proxy du Model Loader |
-| Model Loader intégré | UI dédiée pour lister, importer, charger, décharger et sélectionner les modèles |
-| Import GGUF Hugging Face | Import direct depuis une URL de fichier `.gguf` |
-| Import Ollama Library | Import via référence de bibliothèque ou URL `ollama.com/library` |
-| Runtime partagé | AnythingLLM et Open WebUI réutilisent le même runtime sans le relancer inutilement |
-
----
-
-## Usage Flow
-
-### 1. Démarrer la stack
-
-Exécuter [pro-ipex.ps1](pro-ipex.ps1).
-
-### 2. Importer un modèle
-
-Utilise le Model Loader pour :
-
-- importer un fichier GGUF depuis Hugging Face ;
-- importer depuis Ollama Library ;
-- sélectionner un modèle local déjà présent ;
-- charger ou décharger le modèle dans le runtime.
-
-Exemples de références utiles dans le Model Loader :
+Exemples de références acceptées dans le Model Loader :
 
 - `https://huggingface.co/.../resolve/main/model.gguf`
 - `gemma3n:e4b`
 - `https://ollama.com/library/gemma3n:e4b`
 
-### 3. Tester le proxy local
+## Fonctionnalités clés
 
-```powershell
-Invoke-WebRequest -Uri "http://127.0.0.1:3002/health" -UseBasicParsing
-```
+- Le Model Loader liste les modèles locaux, affiche leur statut, importe des fichiers GGUF, supprime des modèles et extrait des métadonnées détaillées.
+- [model-manager/server.js](model-manager/server.js) expose les routes `/health`, `/api/version`, `/api/models/available`, `/api/models/status`, `/api/models/details/:model`, `/api/models/load`, `/api/models/select`, `/api/models/unload` et les routes OpenAI compatibles `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`.
+- [model-manager/src/App.jsx](model-manager/src/App.jsx) présente l'état runtime, les modèles en mémoire, les métadonnées GGUF et les raccourcis vers les différents frontends.
+- [llama-host-controller.ps1](llama-host-controller.ps1) gère plusieurs instances, persiste l'état, détecte les backends disponibles et surveille les ports actifs pour éviter les doublons.
+- [Dockerfile.librechat](Dockerfile.librechat) injecte la configuration LibreChat pour pointer vers `http://model-loader:3002/v1`.
+- [Dockerfile.openwebui](Dockerfile.openwebui) configure Open WebUI pour utiliser le même proxy OpenAI local.
+- [Dockerfile.anythingllm](Dockerfile.anythingllm) conserve la configuration de démarrage adaptée à la stack LIA-X.
+- Le Model Loader conserve un identifiant de proxy stable, `lia-local`, ce qui simplifie la configuration côté frontend.
 
-### 4. Utiliser les interfaces
-
-- AnythingLLM pour le workflow applicatif principal ;
-- Model Loader pour piloter le runtime et les modèles ;
-- Open WebUI pour une interface de chat alternative.
-
----
-
-## Recommended Models
-
-Pour une machine légère orientée réactivité, les modèles GGUF quantifiés suivants sont de bons candidats :
-
-- `gemma-3n-E4B-it-Q4_K_M.gguf`
-- `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`
-- `Llama-3.2-1B-Instruct-Q4_K_M.gguf`
-- `Phi-3.5-mini-instruct-Q4_K_M.gguf`
-
-Le projet fonctionne mieux avec des formats GGUF adaptés à la mémoire disponible, et le script tente de réutiliser une configuration existante quand elle est déjà présente.
-
----
-
-## Project Structure
+## Structure du projet
 
 ```text
 .
 ├── Dockerfile.anythingllm
+├── Dockerfile.librechat
 ├── Dockerfile.model-loader
-├── evolution vers llama.cpp.MD
+├── Dockerfile.openwebui
+├── lia.ps1
 ├── llama-host-controller.ps1
-├── pro-ipex.ps1
+├── librechat.yaml
+├── notes.md
 ├── README.md
 ├── model-manager/
 │   ├── index.html
 │   ├── package.json
+│   ├── package-lock.json
 │   ├── server-package.json
 │   ├── server.js
+│   ├── public/
+│   │   └── logo.svg
 │   ├── src/
 │   │   ├── App.css
 │   │   ├── App.jsx
@@ -245,50 +142,52 @@ Le projet fonctionne mieux avec des formats GGUF adaptés à la mémoire disponi
 └── runtime/
 ```
 
----
+## Notes techniques
 
-## Technical Notes
+### Bootstrap et installation
 
-### Orchestration script
+Le script [lia.ps1](lia.ps1) vérifie les prérequis, installe Docker Desktop si nécessaire, prépare le réseau Docker `lia-network`, télécharge ou réutilise les binaires `llama.cpp`, puis construit et lance les conteneurs applicatifs.
 
-Le script [pro-ipex.ps1](pro-ipex.ps1) gère le téléchargement des binaires llama.cpp, la normalisation de la configuration runtime, le démarrage du contrôleur hôte, le build de [Dockerfile.model-loader](Dockerfile.model-loader) et le lancement des conteneurs applicatifs.
+### Contrôleur hôte
 
-### Host controller
+[llama-host-controller.ps1](llama-host-controller.ps1) est le point de vérité pour l'exécution locale des modèles. Il :
 
-Le contrôleur [llama-host-controller.ps1](llama-host-controller.ps1) expose une API locale simple pour :
-
-- lire l'état du runtime ;
-- démarrer ou arrêter `llama-server.exe` ;
-- réutiliser le modèle déjà chargé quand c'est pertinent ;
-- éviter les redémarrages inutiles lors du changement d'interface.
+- détecte automatiquement le meilleur backend disponible avec fallback CUDA, Vulkan ou CPU ;
+- autorise plusieurs instances `llama-server` en parallèle ;
+- assigne un port libre à chaque instance ;
+- garde l'état des processus actifs ;
+- expose les informations de runtime aux autres services.
 
 ### Model Loader
 
-L'interface [model-manager/src/App.jsx](model-manager/src/App.jsx) permet :
+[model-manager/server.js](model-manager/server.js) traduit les actions du frontend vers le contrôleur hôte et vers le runtime local. Il :
 
-- de lister les modèles disponibles ;
-- de suivre le statut du runtime ;
-- de charger et décharger les modèles ;
-- d'importer depuis Hugging Face ou Ollama Library ;
-- d'exposer un point d'accès OpenAI compatible pour les autres interfaces.
+- importe des modèles depuis Hugging Face ou Ollama Library ;
+- lit les métadonnées GGUF et le contexte détecté ;
+- gère le chargement, le déchargement et la sélection des modèles ;
+- expose un proxy OpenAI-compatible pour les autres interfaces ;
+- applique un circuit breaker côté requêtes vers le contrôleur.
 
-Le backend [model-manager/server.js](model-manager/server.js) traduit les actions du frontend vers le contrôleur hôte, le runtime llama.cpp et les routes OpenAI compatibles `/v1/models`, `/v1/chat/completions`, `/v1/completions` et `/v1/embeddings`.
+### Frontends Docker
 
-### Container images
+- [Dockerfile.anythingllm](Dockerfile.anythingllm) est utilisé pour construire le conteneur AnythingLLM avec la configuration LIA.
+- [Dockerfile.openwebui](Dockerfile.openwebui) configure Open WebUI pour parler au Model Loader local.
+- [Dockerfile.librechat](Dockerfile.librechat) et [librechat.yaml](librechat.yaml) définissent l'intégration LibreChat vers le même proxy.
 
-- [Dockerfile.model-loader](Dockerfile.model-loader) construit l'image active du Model Loader.
-- [Dockerfile.anythingllm](Dockerfile.anythingllm) reste dans le dépôt mais n'est pas la voie principale utilisée par le script actuel, qui démarre l'image upstream `mintplexlabs/anythingllm:latest`.
-
----
-
-## Useful Commands
+## Commandes utiles
 
 ```powershell
+# Bootstrap et installation
+.\lia.ps1
+
 # Vérifier la santé du Model Loader
 Invoke-WebRequest -Uri "http://127.0.0.1:3002/health" -UseBasicParsing
 
-# Vérifier le runtime llama.cpp
-Invoke-WebRequest -Uri "http://127.0.0.1:12434/health" -UseBasicParsing
+# Vérifier le runtime et les instances actives
+Invoke-WebRequest -Uri "http://127.0.0.1:13579/status" -UseBasicParsing
+
+# Vérifier le statut détaillé des modèles
+Invoke-WebRequest -Uri "http://127.0.0.1:3002/api/models/status" -UseBasicParsing
 
 # Logs du conteneur Model Loader
 docker logs -f model-loader
@@ -299,26 +198,19 @@ docker logs -f anythingllm
 # Logs du conteneur Open WebUI
 docker logs -f open-webui
 
-# Relancer proprement la stack via le script principal
-.\pro-ipex.ps1
+# Logs du conteneur LibreChat
+docker logs -f librechat
+
+# Logs de MongoDB pour LibreChat
+docker logs -f librechat-mongo
 ```
 
----
+## Dépannage
 
-## Troubleshooting
+- Si `lia-local` ne retourne rien, vérifier [http://127.0.0.1:13579/status](http://127.0.0.1:13579/status) puis [http://127.0.0.1:3002/api/models/status](http://127.0.0.1:3002/api/models/status).
+- Si un modèle ne s'ouvre pas, vérifier qu'un fichier `.gguf` valide est bien présent dans le répertoire modèles et que la plage de ports `12434-12444` n'est pas saturée.
+- Si LibreChat ne démarre pas, consulter `docker logs -f librechat` puis `docker logs -f librechat-mongo`.
+- Si un frontend Docker ne voit pas le proxy local, vérifier que le conteneur `model-loader` est bien présent sur `lia-network`.
+- Si Docker Desktop n'est pas démarré, relancer Docker puis exécuter à nouveau [lia.ps1](lia.ps1).
 
-| Problème | Vérification utile |
-|---|---|
-| Le runtime ne répond pas | Vérifier `http://127.0.0.1:12434/health` et les logs dans `runtime/llama-server.stdout.log` |
-| Le contrôleur hôte ne démarre pas | Vérifier `http://127.0.0.1:13579` et relancer [pro-ipex.ps1](pro-ipex.ps1) |
-| AnythingLLM ou Open WebUI ne voient pas le modèle | Vérifier que le Model Loader expose bien `lia-local` sur `http://model-loader:3002/v1` |
-| Le GPU n'est pas exploité | Vérifier que le backend actif remonté par le Model Loader est bien `vulkan` |
-| L'interface n'affiche pas les derniers changements | Rebuilder l'image du Model Loader puis forcer un rafraîchissement du navigateur |
-
----
-
-## Positioning
-
-LIA n'est pas un framework généraliste. C'est un dépôt d'intégration ciblé pour obtenir une stack IA locale propre, reproductible et exploitable sur Windows, avec un runtime llama.cpp natif, un proxy OpenAI local et des interfaces prêtes à l'emploi.
-
-Si l'objectif est de transformer une machine personnelle en station locale de chat, de test de modèles GGUF et d'expérimentation multi-interface, ce dépôt est construit exactement pour ce cas.
+LIA-X reste un socle local-first pour le chat, l'import de modèles GGUF, les tests multi-modèles et l'expérimentation multi-interfaces sur Windows.

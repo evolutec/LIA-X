@@ -5,6 +5,35 @@ const fs = require('fs');
 const path = require('path');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
+const Agent = require('agentkeepalive');
+
+const httpAgent = new Agent({
+  maxSockets: 32,
+  maxFreeSockets: 8,
+  timeout: 120000,
+  freeSocketTimeout: 30000,
+});
+
+const httpsAgent = new Agent.HttpsAgent({
+  maxSockets: 32,
+  maxFreeSockets: 8,
+  timeout: 120000,
+  freeSocketTimeout: 30000,
+});
+
+// Circuit Breaker état global
+const CIRCUIT_BREAKER = {
+  open: false,
+  failures: 0,
+  lastFailure: 0,
+  resetTimeout: 10000,
+  maxFailures: 5
+};
+
+// Cache global pour /status
+let STATUS_CACHE = null;
+let STATUS_CACHE_TTL = 0;
+const STATUS_CACHE_MAX_AGE = 800;
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -491,32 +520,75 @@ function err(res, status, message) {
 }
 
 async function controllerRequest(endpoint, options = {}) {
-  const response = await fetch(`${CONTROLLER_URL}${endpoint}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
-  });
+  // Vérifier état Circuit Breaker
+  if (CIRCUIT_BREAKER.open) {
+    if (Date.now() - CIRCUIT_BREAKER.lastFailure > CIRCUIT_BREAKER.resetTimeout) {
+      // Demi-ouvert: autoriser 1 requête de test
+      CIRCUIT_BREAKER.open = false;
+    } else {
+      throw new Error(`Circuit Breaker ouvert. Prochaine tentative dans ${Math.ceil((CIRCUIT_BREAKER.resetTimeout - (Date.now() - CIRCUIT_BREAKER.lastFailure)) / 1000)}s`);
+    }
+  }
 
-  const text = await response.text();
-  let payload = null;
+  const controllerUrl = new URL(`${CONTROLLER_URL}${endpoint}`);
+  const agent = controllerUrl.protocol === 'https:' ? httpsAgent : httpAgent;
+
+  // Compatibilité NodeJS < 18: AbortController manuel
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeout || 15000);
+  
   try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {
-    payload = text;
-  }
+    const response = await fetch(`${CONTROLLER_URL}${endpoint}`, {
+      ...options,
+      agent,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+      },
+    });
 
-  if (!response.ok) {
-    const detail = typeof payload === 'object' && payload?.detail ? payload.detail : payload || response.statusText;
-    throw new Error(String(detail));
-  }
+    const text = await response.text();
+    let payload = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = text;
+    }
 
-  return payload;
+    if (!response.ok) {
+      const detail = typeof payload === 'object' && payload?.detail ? payload.detail : payload || response.statusText;
+      // Incrémenter compteur échecs Circuit Breaker
+      CIRCUIT_BREAKER.failures += 1;
+      CIRCUIT_BREAKER.lastFailure = Date.now();
+      if (CIRCUIT_BREAKER.failures >= CIRCUIT_BREAKER.maxFailures) {
+        CIRCUIT_BREAKER.open = true;
+      }
+      throw new Error(String(detail));
+    }
+
+    // Réinitialiser Circuit Breaker en cas de succès
+    CIRCUIT_BREAKER.failures = 0;
+    CIRCUIT_BREAKER.open = false;
+
+    return payload;
+  
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function getRuntimeStatus() {
-  return controllerRequest('/status', { method: 'GET' });
+  const now = Date.now();
+  if (STATUS_CACHE && now < STATUS_CACHE_TTL) {
+    return STATUS_CACHE;
+  }
+
+  const status = await controllerRequest('/status', { method: 'GET', timeout: 5000 });
+  STATUS_CACHE = status;
+  STATUS_CACHE_TTL = now + STATUS_CACHE_MAX_AGE;
+
+  return status;
 }
 
 async function ensureRuntimeReady(preferredModel) {

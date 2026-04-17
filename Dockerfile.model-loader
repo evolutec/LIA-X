@@ -1,27 +1,46 @@
-FROM node:20-alpine AS frontend-build
-WORKDIR /build
+FROM node:20-bullseye-slim
 
-COPY model-manager/package.json ./package.json
-RUN npm install
-
-COPY model-manager/ ./
-RUN VITE_API_BASE_URL="" npm run build
-
-WORKDIR /srv
-COPY model-manager/server-package.json ./package.json
-RUN npm install --omit=dev
-
-FROM node:20-alpine
 WORKDIR /app
 
-ENV NODE_ENV=production \
-    MODEL_MANAGER_PORT=3002 \
-    MODEL_STORAGE_DIR=/models \
-    PROXY_MODEL_ID=lia-local
+# Install dependencies
+RUN apt-get update && apt-get install -y curl unzip && rm -rf /var/lib/apt/lists/*
 
-COPY model-manager/server.js /app/server.js
-COPY --from=frontend-build /srv/node_modules /app/node_modules
-COPY --from=frontend-build /build/dist /app/dist
+# Install llama-server Linux
+RUN apt-get update && apt-get install -y git build-essential cmake python3 && \
+    git clone https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp && \
+    cd /tmp/llama.cpp && \
+    mkdir build && cd build && \
+    cmake .. -DLLAMA_AVX2=ON -DLLAMA_NATIVE=ON && \
+    make -j$(nproc) && \
+    cp bin/llama-server /usr/local/bin/ && \
+    rm -rf /tmp/llama.cpp && \
+    apt-get remove -y git build-essential cmake python3 && \
+    apt-get autoremove -y && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy sources
+COPY model-manager/ /app/model-manager/
+
+# Build frontend
+RUN cd /app/model-manager && \
+    npm install && \
+    VITE_API_BASE_URL="" npm run build && \
+    npm prune --omit=dev
+
+# Configuration
+ENV NODE_ENV=production
+ENV MODEL_MANAGER_PORT=3002
+ENV MODEL_STORAGE_DIR=/models
+ENV PROXY_MODEL_ID=lia-local
+ENV CONTROLLER_PORT=13579
+ENV LLAMA_PORT=12434
+ENV DOCKER_INTERNAL=true
 
 EXPOSE 3002
-CMD ["node", "/app/server.js"]
+EXPOSE 13579
+EXPOSE 12434
+
+VOLUME [ "/models" ]
+
+# Start command
+CMD ["node", "/app/model-manager/server.js"]

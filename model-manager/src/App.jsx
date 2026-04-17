@@ -22,6 +22,8 @@ function App() {
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState("");
   const [selectedModelDetails, setSelectedModelDetails] = useState(null);
+  const [sortColumn, setSortColumn] = useState("name");
+  const [sortDirection, setSortDirection] = useState("asc");
 
   useEffect(() => {
     refreshAllModelState();
@@ -694,6 +696,15 @@ function App() {
     setSelectedModelDetails(null);
   }
 
+  function handleSortClick(column) {
+    if (sortColumn === column) {
+      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+    } else {
+      setSortColumn(column);
+      setSortDirection("asc");
+    }
+  }
+
   const unifiedModelRows = (() => {
     const rows = new Map();
 
@@ -730,15 +741,40 @@ function App() {
       });
     });
 
-    return Array.from(rows.values()).sort((left, right) => {
-      if (left.active !== right.active) {
-        return left.active ? -1 : 1;
+    let result = Array.from(rows.values());
+
+    result.sort((a, b) => {
+      let valueA, valueB;
+      let compareResult = 0;
+
+      switch (sortColumn) {
+        case "name":
+          compareResult = a.name.localeCompare(b.name, "fr", { sensitivity: "base" });
+          break;
+        case "status":
+          if (a.active !== b.active) compareResult = a.active ? -1 : 1;
+          else if (a.loaded !== b.loaded) compareResult = a.loaded ? -1 : 1;
+          break;
+        case "diskSize":
+          compareResult = (a.diskSize || 0) - (b.diskSize || 0);
+          break;
+        case "vramSize":
+          compareResult = (a.vramSize || 0) - (b.vramSize || 0);
+          break;
+        case "modifiedAt":
+          compareResult = (a.modifiedAt || 0) - (b.modifiedAt || 0);
+          break;
+        case "expiresAt":
+          compareResult = new Date(a.expiresAt || 0) - new Date(b.expiresAt || 0);
+          break;
+        default:
+          compareResult = 0;
       }
-      if (left.loaded !== right.loaded) {
-        return left.loaded ? -1 : 1;
-      }
-      return left.name.localeCompare(right.name, "fr", { sensitivity: "base" });
+
+      return sortDirection === "asc" ? compareResult : -compareResult;
     });
+
+    return result;
   })();
 
   const tensorGroups = buildTensorGroups(selectedModelDetails?.gguf?.tensors || []);
@@ -783,14 +819,6 @@ function App() {
               <div className="value">{version?.version ?? "—"}</div>
             </div>
             <div className="status-item">
-              <label>Backend</label>
-              <div className="value">{version?.device ?? "—"}</div>
-            </div>
-            <div className="status-item">
-              <label>Modèle actif</label>
-              <div className="value">{activeModel || "—"}</div>
-            </div>
-            <div className="status-item">
               <label>Répertoire GGUF</label>
               <div className="value">{version?.model_dir ?? "—"}</div>
             </div>
@@ -800,12 +828,8 @@ function App() {
               <div className="card-subtitle section-spacer">Vue synthétique du runtime hôte et du nombre de modèles réellement servis.</div>
               <div className="status-grid status-grid-detail">
                 <div className="status-item">
-                  <label>Total modèles</label>
-                  <div className="value">{statusInfo.total_models}</div>
-                </div>
-                <div className="status-item">
                   <label>Modèles en mémoire</label>
-                  <div className="value">{statusInfo.running_models ?? 0}</div>
+                  <div className="value">{statusInfo.running_models ?? 0}/{statusInfo.total_models}</div>
                 </div>
                 <div className="status-item">
                   <label>Proxy exposé</label>
@@ -892,12 +916,24 @@ function App() {
               <table className="model-table">
                 <thead>
                   <tr>
-                    <th>Nom</th>
-                    <th>État</th>
-                    <th>Taille</th>
-                    <th>VRAM</th>
-                    <th>Modifié</th>
-                    <th>Expire</th>
+                    <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick("name")}>
+                      Nom {sortColumn === "name" ? (sortDirection === "asc" ? " ↑" : " ↓") : ""}
+                    </th>
+                    <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick("status")}>
+                      État {sortColumn === "status" ? (sortDirection === "asc" ? " ↑" : " ↓") : ""}
+                    </th>
+                    <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick("diskSize")}>
+                      Taille {sortColumn === "diskSize" ? (sortDirection === "asc" ? " ↑" : " ↓") : ""}
+                    </th>
+                    <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick("vramSize")}>
+                      VRAM {sortColumn === "vramSize" ? (sortDirection === "asc" ? " ↑" : " ↓") : ""}
+                    </th>
+                    <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick("modifiedAt")}>
+                      Modifié {sortColumn === "modifiedAt" ? (sortDirection === "asc" ? " ↑" : " ↓") : ""}
+                    </th>
+                    <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick("expiresAt")}>
+                      Expire {sortColumn === "expiresAt" ? (sortDirection === "asc" ? " ↑" : " ↓") : ""}
+                    </th>
                     <th>Infos</th>
                     <th>Action</th>
                   </tr>
@@ -1006,6 +1042,9 @@ function App() {
             </a>
             <a href="http://localhost:3003" target="_blank" rel="noopener noreferrer" className="btn btn-outline">
               🌐 Open WebUI
+            </a>
+            <a href="http://localhost:3080" target="_blank" rel="noopener noreferrer" className="btn btn-outline">
+              💬 LibreChat
             </a>
           </div>
           <p className="hint">

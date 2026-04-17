@@ -1,0 +1,27 @@
+FROM ghcr.io/danny-avila/librechat:latest
+
+# Configuration LIA préintégrée
+COPY librechat.yaml /app/librechat.yaml
+
+# Variables d'environnement optimisées pour LIA
+ENV MONGO_URI=mongodb://librechat-mongo:27017/LibreChat
+ENV JWT_SECRET=7b9d6f2a3c8e5b1d4f7a9c3e8b2d5f1a7c9e3b6d2f8a5c1e4b7d9f3a8c2e5b1d
+ENV JWT_REFRESH_SECRET=5a8c2e6b9d3f5a7c1e4b8d2f6a9c3e7b5d1a4f8c2e6b9d3f5a7c1e4b8d2f6a9c
+ENV ALLOW_EMAIL_LOGIN=true
+ENV ALLOW_REGISTRATION=true
+ENV ALLOW_SOCIAL_LOGIN=false
+ENV OPENAI_API_KEY=not-used
+ENV OPENAI_BASE_URL=http://model-loader:3002/v1
+ENV OPENAI_MODELS_FETCH=true
+ENV AUTO_FETCH_MODELS=true
+ENV CUSTOM_MODELS=[{"user":"system","name":"lia-local","displayName":"LIA Local LLM","modelName":"lia-local","icon":"llama"}]
+ENV ENABLE_OPENAI=true
+ENV OPENAI_PROXY_ENABLED=true
+ENV DEBUG_OPENAI=true
+ENV DISABLE_TELEMETRY=true
+
+# Health check intégré
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3080/api/health || exit 1
+
+EXPOSE 3080
