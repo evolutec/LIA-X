@@ -33,14 +33,37 @@ const CIRCUIT_BREAKER = {
 // Cache global pour /status
 let STATUS_CACHE = null;
 let STATUS_CACHE_TTL = 0;
-const STATUS_CACHE_MAX_AGE = 800;
+let STATUS_INFLIGHT = null;
+let STATUS_INFLIGHT_ID = 0;
+const STATUS_CACHE_MAX_AGE = 2000;
+
+function invalidateStatusCache() {
+  STATUS_CACHE = null;
+  STATUS_CACHE_TTL = 0;
+  STATUS_INFLIGHT = null;
+  STATUS_INFLIGHT_ID += 1;
+}
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
+function logRequest(method, path, payload) {
+  console.log('[model-manager] incoming', method, path, payload || 'no payload');
+}
+
+function logError(path, error) {
+  console.error('[model-manager] error', path, error?.stack || error);
+}
+
+app.use((req, res, next) => {
+  logRequest(req.method, req.originalUrl, req.body);
+  next();
+});
+
 const CONTROLLER_URL = (process.env.LLAMA_HOST_CONTROL_URL || 'http://host.docker.internal:13579').replace(/\/$/, '');
 const LLAMA_SERVER_BASE_URL = (process.env.LLAMA_SERVER_BASE_URL || 'http://host.docker.internal:12434').replace(/\/$/, '');
 const MODEL_STORAGE_DIR = process.env.MODEL_STORAGE_DIR || path.join(__dirname, 'models');
+const RUNTIME_STATE_PATH = process.env.RUNTIME_STATE_PATH || '/runtime/host-runtime-state.json';
 const PORT = Number(process.env.MODEL_MANAGER_PORT || 3002);
 const PROXY_MODEL_ID = process.env.PROXY_MODEL_ID || 'lia-local';
 const OLLAMA_REGISTRY_BASE_URL = 'https://registry.ollama.ai';
@@ -516,10 +539,12 @@ async function buildModelStartRequest(identifier) {
 app.use(express.static(path.join(__dirname, 'dist')));
 
 function err(res, status, message) {
+  logError(res.req?.originalUrl || 'unknown', message);
   return res.status(status).json({ detail: message });
 }
 
 async function controllerRequest(endpoint, options = {}) {
+  logRequest('CONTROLLER', endpoint, options.body ? JSON.parse(options.body) : null);
   // Vérifier état Circuit Breaker
   if (CIRCUIT_BREAKER.open) {
     if (Date.now() - CIRCUIT_BREAKER.lastFailure > CIRCUIT_BREAKER.resetTimeout) {
@@ -552,24 +577,41 @@ async function controllerRequest(endpoint, options = {}) {
     let payload = null;
     try {
       payload = text ? JSON.parse(text) : null;
-    } catch {
-      payload = text;
+    } catch (parseError) {
+      // Gérer le cas où le backend .NET retourne un Hashtable non sérialisable
+      // Détecter l'erreur spécifique System.Collections.Hashtable
+      if (text.includes('System.Collections.Hashtable') && text.includes('Keys must be strings')) {
+        payload = {
+          detail: 'Erreur de sérialisation coté backend: Le contrôleur .NET a retourné un dictionnaire avec des clés non-string. Ceci est une erreur du runtime hôte.'
+        };
+      } else {
+        payload = text;
+      }
     }
+
+    logRequest('CONTROLLER-RAW-RESPONSE', endpoint, { status: response.status, text, payload });
 
     if (!response.ok) {
       const detail = typeof payload === 'object' && payload?.detail ? payload.detail : payload || response.statusText;
-      // Incrémenter compteur échecs Circuit Breaker
       CIRCUIT_BREAKER.failures += 1;
       CIRCUIT_BREAKER.lastFailure = Date.now();
       if (CIRCUIT_BREAKER.failures >= CIRCUIT_BREAKER.maxFailures) {
         CIRCUIT_BREAKER.open = true;
       }
+      logError(endpoint, `Controller response ${response.status}: ${detail}`);
       throw new Error(String(detail));
     }
+
+    logRequest('CONTROLLER-RESPONSE', endpoint, { status: response.status, payload });
 
     // Réinitialiser Circuit Breaker en cas de succès
     CIRCUIT_BREAKER.failures = 0;
     CIRCUIT_BREAKER.open = false;
+
+    // Invalidate the cached runtime status after state-changing controller calls.
+    if (['/start', '/stop', '/restart'].includes(endpoint)) {
+      invalidateStatusCache();
+    }
 
     return payload;
   
@@ -584,11 +626,137 @@ async function getRuntimeStatus() {
     return STATUS_CACHE;
   }
 
-  const status = await controllerRequest('/status', { method: 'GET', timeout: 5000 });
-  STATUS_CACHE = status;
-  STATUS_CACHE_TTL = now + STATUS_CACHE_MAX_AGE;
+  if (STATUS_INFLIGHT) {
+    return STATUS_INFLIGHT;
+  }
 
-  return status;
+  const statusRequestId = ++STATUS_INFLIGHT_ID;
+  STATUS_INFLIGHT = (async () => {
+    try {
+      const status = await controllerRequest('/status', { method: 'GET', timeout: 30000 });
+      if (statusRequestId === STATUS_INFLIGHT_ID) {
+        STATUS_CACHE = status;
+        STATUS_CACHE_TTL = Date.now() + STATUS_CACHE_MAX_AGE;
+        STATUS_INFLIGHT = null;
+      }
+      return status;
+    } catch (error) {
+      if (STATUS_CACHE) {
+        STATUS_CACHE_TTL = Date.now() + 5000;
+        console.warn('[model-manager] getRuntimeStatus falling back to stale cache after controller error', error?.message || error);
+        return STATUS_CACHE;
+      }
+
+      throw error;
+    } finally {
+      if (statusRequestId === STATUS_INFLIGHT_ID) {
+        STATUS_INFLIGHT = null;
+      }
+    }
+  })();
+
+  return STATUS_INFLIGHT;
+}
+
+async function readRuntimeStateFallback() {
+  try {
+    const raw = await fs.promises.readFile(RUNTIME_STATE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.length > 0 ? parsed[0] : null;
+    }
+
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function hasUsefulRuntimeState(runtime) {
+  if (!runtime || typeof runtime !== 'object') {
+    return false;
+  }
+
+  const instances = Array.isArray(runtime.instances)
+    ? runtime.instances
+    : runtime.instances
+      ? [runtime.instances]
+      : [];
+
+  return Boolean(runtime.active_model || runtime.active_filename || instances.length > 0);
+}
+
+function resolveActiveModel(runtime) {
+  if (runtime?.active_model) {
+    return runtime.active_model;
+  }
+
+  const instances = Array.isArray(runtime?.instances)
+    ? runtime.instances
+    : runtime?.instances
+      ? [runtime.instances]
+      : [];
+
+  const activeFlaggedInstance = instances.find((instance) => Boolean(instance.active));
+  if (activeFlaggedInstance) {
+    return activeFlaggedInstance.model;
+  }
+
+  const runningInstance = instances.find((instance) => Boolean(instance.running));
+
+  return runningInstance?.model || '';
+}
+
+function buildLoadedModelList(runtime) {
+  const instances = Array.isArray(runtime?.instances)
+    ? runtime.instances
+    : runtime?.instances
+      ? [runtime.instances]
+      : [];
+  const activeModel = resolveActiveModel(runtime);
+
+  const loaded = instances
+    .map((instance) => ({
+      id: instance.proxy_id || `${PROXY_MODEL_ID}-${instance.port}`,
+      model: instance.model,
+      filename: instance.filename,
+      port: instance.port,
+      running: Boolean(instance.running),
+      size_vram: instance.estimated_vram_bytes ?? null,
+      expires_at: instance.started_at || null,
+      active: activeModel ? instance.model === activeModel : Boolean(instance.active),
+    }))
+    .filter((item) => Boolean(item.model));
+
+  if (loaded.length === 0 && activeModel) {
+    loaded.push({
+      id: `${PROXY_MODEL_ID}-${runtime?.server_port ?? '0'}`,
+      model: activeModel,
+      filename: runtime?.active_filename || `${activeModel}.gguf`,
+      port: runtime?.server_port ?? null,
+      running: Boolean(runtime?.running),
+      size_vram: null,
+      expires_at: runtime?.started_at || null,
+      active: true,
+    });
+  }
+
+  return loaded;
+}
+
+async function getRuntimeSnapshot() {
+  const fallbackRuntime = await readRuntimeStateFallback();
+
+  try {
+    const runtime = await getRuntimeStatus();
+    return { runtime, source: 'controller' };
+  } catch (error) {
+    if (hasUsefulRuntimeState(fallbackRuntime)) {
+      return { runtime: fallbackRuntime, source: 'runtime_state', detail: error.message };
+    }
+
+    throw error;
+  }
 }
 
 async function ensureRuntimeReady(preferredModel) {
@@ -777,18 +945,35 @@ async function importFromOllamaLibrary(reference, localName) {
 }
 
 function proxyModelPayload(runtimeStatus) {
-  if (!runtimeStatus?.running || !runtimeStatus?.active_model) {
-    return [];
+  const activeModel = resolveActiveModel(runtimeStatus);
+  const loadedModels = buildLoadedModelList(runtimeStatus);
+
+  const data = [];
+  if (activeModel) {
+    data.push({
+      id: PROXY_MODEL_ID,
+      object: 'model',
+      owned_by: 'lia',
+      permission: [],
+      active_model: activeModel,
+      backend: runtimeStatus?.backend,
+    });
   }
 
-  return [{
-    id: PROXY_MODEL_ID,
-    object: 'model',
-    owned_by: 'lia',
-    permission: [],
-    active_model: runtimeStatus.active_model,
-    backend: runtimeStatus.backend,
-  }];
+  for (const model of loadedModels) {
+    data.push({
+      id: model.model,
+      object: 'model',
+      owned_by: 'lia',
+      permission: [],
+      active_model: activeModel,
+      backend: runtimeStatus?.backend,
+      filename: model.filename,
+      running: model.running,
+    });
+  }
+
+  return data.filter((entry, index, array) => array.findIndex((item) => item.id === entry.id) === index);
 }
 
 async function proxyOpenAiRequest(req, res, endpoint) {
@@ -841,9 +1026,14 @@ async function proxyOpenAiRequest(req, res, endpoint) {
 app.get('/health', async (req, res) => {
   try {
     const runtimeStatus = await getRuntimeStatus();
-    res.json({ ok: true, runtime: runtimeStatus });
+    res.json({ ok: true, controller_ok: true, runtime: runtimeStatus });
   } catch (error) {
-    res.status(502).json({ ok: false, detail: error.message });
+    res.json({
+      ok: true,
+      controller_ok: false,
+      detail: error.message,
+      runtime: STATUS_CACHE,
+    });
   }
 });
 
@@ -863,8 +1053,10 @@ app.get('/api/version', async (req, res) => {
 
 app.get('/api/models/available', async (req, res) => {
   try {
-    const [runtime, models] = await Promise.all([getRuntimeStatus(), listLocalModels()]);
-    const runningActiveModel = runtime?.running ? runtime.active_model : '';
+    const snapshot = await getRuntimeSnapshot();
+    const runtime = snapshot.runtime;
+    const runningActiveModel = resolveActiveModel(runtime);
+    const models = await listLocalModels();
     const files = models
       .filter((item) => item.name !== runningActiveModel)
       .map((item) => ({
@@ -873,7 +1065,7 @@ app.get('/api/models/available', async (req, res) => {
         size: item.size,
         modified_at: item.modified_at,
       }));
-    res.json({ files });
+    res.json({ files, source: snapshot.source });
   } catch (error) {
     err(res, 502, error.message);
   }
@@ -881,20 +1073,32 @@ app.get('/api/models/available', async (req, res) => {
 
 app.get('/api/models', async (req, res) => {
   try {
-    const runtime = await getRuntimeStatus();
-    if (!runtime?.running || !runtime?.active_model) {
-      return res.json({ models: [] });
-    }
+    const snapshot = await getRuntimeSnapshot();
+    const runtime = snapshot.runtime;
+    const loadedModels = buildLoadedModelList(runtime);
 
-    const model = await resolveModel(runtime.active_model);
     res.json({
-      models: [{
-        id: PROXY_MODEL_ID,
-        model: runtime.active_model,
-        size_vram: null,
-        expires_at: runtime.started_at || null,
-        filename: model.filename,
-      }],
+      active_model: resolveActiveModel(runtime),
+      models: loadedModels,
+      source: snapshot.source,
+      detail: snapshot.detail || null,
+    });
+  } catch (error) {
+    err(res, 502, error.message);
+  }
+});
+
+app.get('/api/modeles', async (req, res) => {
+  try {
+    const snapshot = await getRuntimeSnapshot();
+    const runtime = snapshot.runtime;
+    const loadedModels = buildLoadedModelList(runtime);
+
+    res.json({
+      active_model: resolveActiveModel(runtime),
+      models: loadedModels,
+      source: snapshot.source,
+      detail: snapshot.detail || null,
     });
   } catch (error) {
     err(res, 502, error.message);
@@ -903,8 +1107,12 @@ app.get('/api/models', async (req, res) => {
 
 app.get('/api/models/active', async (req, res) => {
   try {
-    const runtime = await getRuntimeStatus();
-    res.json({ active_model: runtime?.running ? (runtime.active_model || '') : '' });
+    const snapshot = await getRuntimeSnapshot();
+    res.json({
+      active_model: resolveActiveModel(snapshot.runtime),
+      source: snapshot.source,
+      detail: snapshot.detail || null,
+    });
   } catch (error) {
     err(res, 502, error.message);
   }
@@ -912,16 +1120,19 @@ app.get('/api/models/active', async (req, res) => {
 
 app.get('/api/models/status', async (req, res) => {
   try {
-    const [runtime, models] = await Promise.all([getRuntimeStatus(), listLocalModels()]);
+    const [snapshot, models] = await Promise.all([getRuntimeSnapshot(), listLocalModels()]);
+    const runtime = snapshot.runtime;
+    const loadedModels = buildLoadedModelList(runtime);
     res.json({
       total_models: models.length,
-      running_models: runtime?.running ? 1 : 0,
+      running_models: loadedModels.filter((item) => item.running).length,
       gpu: { device: runtime?.backend_label || 'Runtime indisponible' },
-      models: runtime?.running && runtime?.active_model ? [{
-        model: runtime.active_model,
-        device: runtime.backend_label,
-        approx_memory_bytes: 0,
-      }] : [],
+      models: loadedModels.filter((item) => item.running).map((item) => ({
+        model: item.model,
+        device: runtime?.backend_label || 'Runtime indisponible',
+        approx_memory_bytes: item.size_vram ?? 0,
+      })),
+      source: snapshot.source,
     });
   } catch (error) {
     err(res, 502, error.message);
@@ -969,13 +1180,16 @@ app.post('/api/models/download', async (req, res) => {
 app.post('/api/models/load', async (req, res) => {
   try {
     const startRequest = await buildModelStartRequest(req.body?.model);
+    const payload = { ...startRequest.payload, activate: false };
+    console.log('[model-manager] /api/models/load', { model: startRequest.model.name, payload });
     await controllerRequest('/start', {
       method: 'POST',
-      body: JSON.stringify(startRequest.payload),
+      body: JSON.stringify(payload),
     });
     res.json({
       model: startRequest.model.name,
       status: 'loaded',
+      active: false,
       context_applied: startRequest.payload.context || null,
       architecture: startRequest.details.architecture || null,
     });
@@ -987,6 +1201,7 @@ app.post('/api/models/load', async (req, res) => {
 app.post('/api/models/select', async (req, res) => {
   try {
     const startRequest = await buildModelStartRequest(req.body?.model);
+    console.log('[model-manager] /api/models/select', { model: startRequest.model.name, payload: startRequest.payload });
     await controllerRequest('/start', {
       method: 'POST',
       body: JSON.stringify(startRequest.payload),
@@ -1003,9 +1218,15 @@ app.post('/api/models/select', async (req, res) => {
 
 app.post('/api/models/unload', async (req, res) => {
   try {
+    const modelName = String(req.body?.model || '').trim();
+    if (!modelName) {
+      return err(res, 400, 'model requis');
+    }
+
+    console.log('[model-manager] /api/models/unload', { model: modelName });
     const runtime = await getRuntimeStatus();
-    await controllerRequest('/stop', { method: 'POST', body: JSON.stringify({}) });
-    res.json({ model: runtime?.active_model || '', status: 'unloaded' });
+    await controllerRequest('/stop', { method: 'POST', body: JSON.stringify({ model: modelName }) });
+    res.json({ model: modelName, status: 'unloaded' });
   } catch (error) {
     err(res, 502, error.message);
   }
@@ -1016,7 +1237,7 @@ app.delete('/api/models/files/:filename', async (req, res) => {
     const model = await resolveModel(decodeURIComponent(req.params.filename));
     const runtime = await getRuntimeStatus();
     if (runtime?.active_model === model.name) {
-      await controllerRequest('/stop', { method: 'POST', body: JSON.stringify({}) });
+      await controllerRequest('/stop', { method: 'POST', body: JSON.stringify({ model: model.name }) });
     }
     await fs.promises.rm(model.path, { force: true });
     res.json({ filename: model.name, status: 'deleted' });
@@ -1049,7 +1270,8 @@ app.post('/api/cache/drop', async (req, res) => {
 
 app.get('/v1/models', async (req, res) => {
   try {
-    const runtime = await ensureRuntimeReady();
+    const snapshot = await getRuntimeSnapshot();
+    const runtime = snapshot.runtime;
     res.json({ object: 'list', data: proxyModelPayload(runtime) });
   } catch (error) {
     err(res, 502, error.message);

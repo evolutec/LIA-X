@@ -1,0 +1,297 @@
+    running: true,
+    gpu: {
+      available_bytes: null,
+      label: 'Intel(R) Arc(TM) 140V GPU (16GB)',
+      total_bytes: 17179869184,
+      used_bytes: null,
+      vendor: 'generic'
+    }
+  }
+}
+[model-manager] incoming GET /api/version {}
+[model-manager] incoming GET /api/modeles {}
+[model-manager] incoming GET /api/models/active {}
+[model-manager] incoming GET /api/models/status {}
+[model-manager] incoming GET /api/models/available {}
+[model-manager] incoming GET /health {}
+[model-manager] incoming GET /health {}
+[model-manager] incoming GET /health {}
+[model-manager] incoming GET /api/version {}
+[model-manager] incoming GET /api/models/available {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming GET /api/modeles {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming GET /api/models/active {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming GET /api/models/status {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming CONTROLLER-RAW-RESPONSE /status {
+  status: 200,
+  text: '{"backend":"vulkan","active_path":"","running":true,"default_gpu_layers":999,"server_port_end":12444,"instances":{"active":true,"last_error":"","model":"llama3.2-1b","started_at":"04/17/2026 23:57:00","server_base_url":"http://127.0.0.1:12436/v1","estimated_vram_bytes":null,"proxy_id":"lia-local-12436","running":true,"id":"12436","pid":2516,"stderr_log":"","request_count":0,"last_request_at":"2026-04-17T23:57:00.8820576+02:00","filename":"llama3.2-1b.gguf","stdout_log":"","path":"","port":12436},"active_filename":"llama3.2-1b.gguf","stderr_log":"","gpu":{"used_bytes":null,"label":"Intel(R) Arc(TM) 140V GPU (16GB)","available_bytes":null,"vendor":"generic","total_bytes":17179869184},"models_dir":"C:\\\\Users\\\\evolu\\\\Documents\\\\Github-repo\\\\lia\\\\models","pid":2516,"active_model":"llama3.2-1b","proxy_model_id":"lia-local","server_port":12434,"backend_label":"Vulkan","request_counter":{"12435":0,"total":167,"12436":0,"12434":0},"default_context":8192,"binary_path":"C:\\\\Users\\\\evolu\\\\Documents\\\\Github-repo\\\\lia\\\\runtime\\\\llama-releases\\\\b8809-vulkan\\\\llama-server.exe","stdout_log":"","last_error":"","server_port_start":12434,"started_at":"04/17/2026 23:57:00"}',
+  payload: {
+    backend: 'vulkan',
+    active_path: '',
+    running: true,
+    default_gpu_layers: 999,
+    server_port_end: 12444,
+    instances: {
+      active: true,
+      last_error: '',
+      model: 'llama3.2-1b',
+      started_at: '04/17/2026 23:57:00',
+      server_base_url: 'http://127.0.0.1:12436/v1',
+      estimated_vram_bytes: null,
+      proxy_id: 'lia-local-12436',
+      running: true,
+      id: '12436',
+      pid: 2516,
+      stderr_log: '',
+      request_count: 0,
+      last_request_at: '2026-04-17T23:57:00.8820576+02:00',
+      filename: 'llama3.2-1b.gguf',
+      stdout_log: '',
+      path: '',
+      port: 12436
+    },
+    active_filename: 'llama3.2-1b.gguf',
+    stderr_log: '',
+    gpu: {
+      used_bytes: null,
+      label: 'Intel(R) Arc(TM) 140V GPU (16GB)',
+      available_bytes: null,
+      vendor: 'generic',
+      total_bytes: 17179869184
+    },
+    models_dir: 'C:\\Users\\evolu\\Documents\\Github-repo\\lia\\models',
+    pid: 2516,
+    active_model: 'llama3.2-1b',
+    proxy_model_id: 'lia-local',
+    server_port: 12434,
+    backend_label: 'Vulkan',
+    request_counter: { '12434': 0, '12435': 0, '12436': 0, total: 167 },
+    default_context: 8192,
+    binary_path: 'C:\\Users\\evolu\\Documents\\Github-repo\\lia\\runtime\\llama-releases\\b8809-vulkan\\llama-server.exe',
+    stdout_log: '',
+    last_error: '',
+    server_port_start: 12434,
+    started_at: '04/17/2026 23:57:00'
+  }
+}
+[model-manager] incoming CONTROLLER-RESPONSE /status {
+  status: 200,
+  payload: {
+    backend: 'vulkan',
+    active_path: '',
+    running: true,
+    default_gpu_layers: 999,
+    server_port_end: 12444,
+    instances: {
+      active: true,
+      last_error: '',
+      model: 'llama3.2-1b',
+      started_at: '04/17/2026 23:57:00',
+      server_base_url: 'http://127.0.0.1:12436/v1',
+      estimated_vram_bytes: null,
+      proxy_id: 'lia-local-12436',
+      running: true,
+      id: '12436',
+      pid: 2516,
+      stderr_log: '',
+      request_count: 0,
+      last_request_at: '2026-04-17T23:57:00.8820576+02:00',
+      filename: 'llama3.2-1b.gguf',
+      stdout_log: '',
+      path: '',
+      port: 12436
+    },
+    active_filename: 'llama3.2-1b.gguf',
+    stderr_log: '',
+    gpu: {
+      used_bytes: null,
+      label: 'Intel(R) Arc(TM) 140V GPU (16GB)',
+      available_bytes: null,
+      vendor: 'generic',
+      total_bytes: 17179869184
+    },
+    models_dir: 'C:\\Users\\evolu\\Documents\\Github-repo\\lia\\models',
+    pid: 2516,
+    active_model: 'llama3.2-1b',
+    proxy_model_id: 'lia-local',
+    server_port: 12434,
+    backend_label: 'Vulkan',
+    request_counter: { '12434': 0, '12435': 0, '12436': 0, total: 167 },
+    default_context: 8192,
+    binary_path: 'C:\\Users\\evolu\\Documents\\Github-repo\\lia\\runtime\\llama-releases\\b8809-vulkan\\llama-server.exe',
+    stdout_log: '',
+    last_error: '',
+    server_port_start: 12434,
+    started_at: '04/17/2026 23:57:00'
+  }
+}
+[model-manager] incoming GET /health {}
+[model-manager] incoming GET /health {}
+[model-manager] incoming GET /api/version {}
+[model-manager] incoming GET /api/models/available {}
+[model-manager] incoming GET /api/modeles {}
+[model-manager] incoming GET /api/models/active {}
+[model-manager] incoming GET /api/models/status {}
+[model-manager] incoming GET /health {}
+[model-manager] incoming GET /api/modeles {}
+[model-manager] incoming GET /api/models/available {}
+[model-manager] incoming GET /api/version {}
+[model-manager] incoming GET /api/models/active {}
+[model-manager] incoming GET /api/models/status {}
+[model-manager] incoming GET /api/version {}
+[model-manager] incoming GET /api/models/available {}
+[model-manager] incoming GET /api/modeles {}
+[model-manager] incoming GET /api/models/active {}
+[model-manager] incoming GET /api/models/status {}
+[model-manager] incoming GET /api/version {}
+[model-manager] incoming GET /api/models/available {}
+[model-manager] incoming GET /api/modeles {}
+[model-manager] incoming GET /api/models/active {}
+[model-manager] incoming GET /api/models/status {}
+[model-manager] incoming GET /health {}
+[model-manager] incoming GET /api/version {}
+[model-manager] incoming GET /api/modeles {}
+[model-manager] incoming GET /api/models/available {}
+[model-manager] incoming GET /api/models/active {}
+[model-manager] incoming GET /api/models/status {}
+[model-manager] incoming GET /api/version {}
+[model-manager] incoming GET /api/models/available {}
+[model-manager] incoming GET /api/modeles {}
+[model-manager] incoming GET /api/models/active {}
+[model-manager] incoming GET /api/models/status {}
+[model-manager] incoming GET /api/version {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming GET /api/models/available {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming GET /api/modeles {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming GET /api/models/active {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming GET /api/models/status {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming CONTROLLER-RAW-RESPONSE /status {
+  status: 500,
+  text: `{"detail":"The process cannot access the file 'C:\\\\Users\\\\evolu\\\\Documents\\\\Github-repo\\\\lia\\\\runtime\\\\host-runtime-state.json' because it is being used by another process."}`,
+  payload: {
+    detail: "The process cannot access the file 'C:\\Users\\evolu\\Documents\\Github-repo\\lia\\runtime\\host-runtime-state.json' because it is being used by another process."
+  }
+}
+[model-manager] incoming GET /health {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming GET /api/modeles {}
+[model-manager] incoming GET /api/models/available {}
+[model-manager] incoming GET /api/version {}
+[model-manager] incoming GET /api/models/active {}
+[model-manager] incoming GET /api/models/status {}
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming CONTROLLER /status no payload
+[model-manager] incoming CONTROLLER-RAW-RESPONSE /status {
+  status: 200,
+  text: '{"backend":"vulkan","active_path":"","running":true,"default_gpu_layers":999,"server_port_end":12444,"instances":{"active":true,"last_error":"","model":"llama3.2-1b","started_at":"04/17/2026 23:57:00","server_base_url":"http://127.0.0.1:12436/v1","estimated_vram_bytes":null,"proxy_id":"lia-local-12436","running":true,"id":"12436","pid":2516,"stderr_log":"","request_count":0,"last_request_at":"2026-04-17T23:57:00.8820576+02:00","filename":"llama3.2-1b.gguf","stdout_log":"","path":"","port":12436},"active_filename":"llama3.2-1b.gguf","stderr_log":"","gpu":{"used_bytes":null,"label":"Intel(R) Arc(TM) 140V GPU (16GB)","available_bytes":null,"vendor":"generic","total_bytes":17179869184},"models_dir":"C:\\\\Users\\\\evolu\\\\Documents\\\\Github-repo\\\\lia\\\\models","pid":2516,"active_model":"llama3.2-1b","proxy_model_id":"lia-local","server_port":12434,"backend_label":"Vulkan","request_counter":{"12435":0,"total":170,"12436":0,"12434":0},"default_context":8192,"binary_path":"C:\\\\Users\\\\evolu\\\\Documents\\\\Github-repo\\\\lia\\\\runtime\\\\llama-releases\\\\b8809-vulkan\\\\llama-server.exe","stdout_log":"","last_error":"","server_port_start":12434,"started_at":"04/17/2026 23:57:00"}',
+  payload: {
+    backend: 'vulkan',
+    active_path: '',
+    running: true,
+    default_gpu_layers: 999,
+    server_port_end: 12444,
+    instances: {
+      active: true,
+      last_error: '',
+      model: 'llama3.2-1b',
+      started_at: '04/17/2026 23:57:00',
+      server_base_url: 'http://127.0.0.1:12436/v1',
+      estimated_vram_bytes: null,
+      proxy_id: 'lia-local-12436',
+      running: true,
+      id: '12436',
+      pid: 2516,
+      stderr_log: '',
+      request_count: 0,
+      last_request_at: '2026-04-17T23:57:00.8820576+02:00',
+      filename: 'llama3.2-1b.gguf',
+      stdout_log: '',
+      path: '',
+      port: 12436
+    },
+    active_filename: 'llama3.2-1b.gguf',
+    stderr_log: '',
+    gpu: {
+      used_bytes: null,
+      label: 'Intel(R) Arc(TM) 140V GPU (16GB)',
+      available_bytes: null,
+      vendor: 'generic',
+      total_bytes: 17179869184
+    },
+    models_dir: 'C:\\Users\\evolu\\Documents\\Github-repo\\lia\\models',
+    pid: 2516,
+    active_model: 'llama3.2-1b',
+    proxy_model_id: 'lia-local',
+    server_port: 12434,
+    backend_label: 'Vulkan',
+    request_counter: { '12434': 0, '12435': 0, '12436': 0, total: 170 },
+    default_context: 8192,
+    binary_path: 'C:\\Users\\evolu\\Documents\\Github-repo\\lia\\runtime\\llama-releases\\b8809-vulkan\\llama-server.exe',
+    stdout_log: '',
+    last_error: '',
+    server_port_start: 12434,
+    started_at: '04/17/2026 23:57:00'
+  }
+}
+[model-manager] incoming CONTROLLER-RESPONSE /status {
+  status: 200,
+  payload: {
+    backend: 'vulkan',
+    active_path: '',
+    running: true,
+    default_gpu_layers: 999,
+    server_port_end: 12444,
+    instances: {
+      active: true,
+      last_error: '',
+      model: 'llama3.2-1b',
+      started_at: '04/17/2026 23:57:00',
+      server_base_url: 'http://127.0.0.1:12436/v1',
+      estimated_vram_bytes: null,
+      proxy_id: 'lia-local-12436',
+      running: true,
+      id: '12436',
+      pid: 2516,
+      stderr_log: '',
+      request_count: 0,
+      last_request_at: '2026-04-17T23:57:00.8820576+02:00',
+      filename: 'llama3.2-1b.gguf',
+      stdout_log: '',
+      path: '',
+      port: 12436
+    },
+    active_filename: 'llama3.2-1b.gguf',
+    stderr_log: '',
+    gpu: {
+      used_bytes: null,
+      label: 'Intel(R) Arc(TM) 140V GPU (16GB)',
+      available_bytes: null,
+      vendor: 'generic',
+      total_bytes: 17179869184
+    },
+    models_dir: 'C:\\Users\\evolu\\Documents\\Github-repo\\lia\\models',
+    pid: 2516,
+    active_model: 'llama3.2-1b',
+    proxy_model_id: 'lia-local',
+    server_port: 12434,
+    backend_label: 'Vulkan',
+    request_counter: { '12434': 0, '12435': 0, '12436': 0, total: 170 },
+    default_context: 8192,
+    binary_path: 'C:\\Users\\evolu\\Documents\\Github-repo\\lia\\runtime\\llama-releases\\b8809-vulkan\\llama-server.exe',
+    stdout_log: '',
+    last_error: '',
+    server_port_start: 12434,
+    started_at: '04/17/2026 23:57:00'
+  }
+}

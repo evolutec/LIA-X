@@ -46,7 +46,7 @@ function ConvertTo-Hashtable($value) {
     if ($value -is [System.Collections.IDictionary]) {
         $table = @{}
         foreach ($key in $value.Keys) {
-            $table[$key] = ConvertTo-Hashtable $value[$key]
+            $table[[string]$key] = ConvertTo-Hashtable $value[$key]
         }
         return $table
     }
@@ -171,11 +171,52 @@ function Get-State {
         }
     }
 
-    return ConvertTo-Hashtable (Get-Content $StatePath -Raw | ConvertFrom-Json)
+    try {
+        $stream = [System.IO.File]::Open($StatePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+            $content = $reader.ReadToEnd()
+            $parsed = $content | ConvertFrom-Json
+            if ($parsed -is [System.Array]) {
+                if ($parsed.Count -eq 0) {
+                    return @{ instances = @() }
+                }
+
+                $parsed = $parsed[0]
+            }
+
+            return ConvertTo-Hashtable $parsed
+        } finally {
+            $reader.Dispose()
+            $stream.Dispose()
+        }
+    } catch {
+        Write-Host ('[controller] Get-State failed reading {0}: {1}' -f $StatePath, $_.Exception.Message)
+        throw
+    }
 }
 
 function Save-State([hashtable]$state) {
-    $state | ConvertTo-Json -Depth 6 | Set-Content -Path $StatePath -Encoding UTF8
+    try {
+        $serializableState = ConvertTo-Hashtable $state
+        if ($serializableState.instances -is [System.Collections.IDictionary]) {
+            $serializableState.instances = @($serializableState.instances)
+        }
+
+        $data = $serializableState | ConvertTo-Json -Depth 6
+        $stream = [System.IO.File]::Open($StatePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+        try {
+            $writer = New-Object System.IO.StreamWriter($stream, [System.Text.Encoding]::UTF8)
+            $writer.Write($data)
+            $writer.Flush()
+        } finally {
+            $writer.Dispose()
+            $stream.Dispose()
+        }
+    } catch {
+        Write-Host ('[controller] Save-State failed writing {0}: {1}' -f $StatePath, $_.Exception.Message)
+        throw
+    }
 }
 
 function Convert-LegacyState([hashtable]$state) {
@@ -217,12 +258,24 @@ function Ensure-StateConsistency {
     $liveInstances = Discover-LiveInstances (Get-Config)
     if ($liveInstances.Count -gt 0) {
         $state.instances = @($liveInstances)
+
+        $activeInstance = $state.instances | Where-Object { $_.active } | Select-Object -First 1
+        if (-not $activeInstance) {
+            $activeInstance = $state.instances | Where-Object { $_.running } | Select-Object -First 1
+        }
+        foreach ($instance in $state.instances) {
+            Set-ObjectProperty $instance 'active' ([bool]($activeInstance -and $instance.id -eq $activeInstance.id)) | Out-Null
+        }
+
         Save-State $state
         return Get-State
     }
 
     # Garantir que instances est toujours un tableau, jamais un objet/hashtable
-    if ($state.instances -isnot [System.Array]) {
+    if ($state.instances -is [System.Collections.IDictionary]) {
+        $state.instances = @($state.instances)
+        $changed = $true
+    } elseif ($state.instances -isnot [System.Array]) {
         $state.instances = @()
         $changed = $true
     }
@@ -256,6 +309,22 @@ function Ensure-StateConsistency {
         $newInstances += $instance
     }
     $state.instances = $newInstances
+
+    $activeInstance = $state.instances | Where-Object { $_.active } | Select-Object -First 1
+    if (-not $activeInstance -and $state.active_model) {
+        $activeInstance = $state.instances | Where-Object { $_.model -ieq $state.active_model } | Select-Object -First 1
+    }
+    if (-not $activeInstance) {
+        $activeInstance = $state.instances | Where-Object { $_.running } | Select-Object -First 1
+    }
+    foreach ($instance in $state.instances) {
+        $shouldBeActive = $activeInstance -and ($instance.id -eq $activeInstance.id)
+        $activeValue = Get-ObjectProperty $instance 'active'
+        if ($activeValue -ne $shouldBeActive) {
+            Set-ObjectProperty $instance 'active' ([bool]$shouldBeActive) | Out-Null
+            $changed = $true
+        }
+    }
 
     # Auto nettoyage des logs: supprimer les logs plus vieux que 7 jours
     $runtimeDir = Split-Path -Parent $StatePath
@@ -516,6 +585,23 @@ function Stop-LlamaProcess([hashtable]$body) {
     $state.instances = @($state.instances | Where-Object {
         ($_.id -ne $target.id) -and ($_.port -ne $target.port) -and ($_.model -ne $target.model)
     })
+
+    if ($state.active_model -and $state.active_model -ieq $target.model) {
+        $remainingActive = $state.instances | Where-Object { $_.running } | Select-Object -First 1
+        if ($remainingActive) {
+            $state.active_model = [string]$remainingActive.model
+            $state.active_filename = [string]$remainingActive.filename
+            $state.active_path = [string]$remainingActive.path
+            $state.started_at = [string]$remainingActive.started_at
+            $state.instances = $state.instances | ForEach-Object { $_.active = ($_.id -eq $remainingActive.id); $_ }
+        } else {
+            $state.active_model = ''
+            $state.active_filename = ''
+            $state.active_path = ''
+            $state.started_at = ''
+        }
+    }
+
     Save-State $state
     return $state
 }
@@ -531,8 +617,32 @@ function Start-LlamaProcess([hashtable]$body) {
     $gpuLayers = if ($body.gpu_layers) { [int]$body.gpu_layers } else { [int]$config.default_gpu_layers }
     $state = Ensure-StateConsistency
 
+    $debugLog = Join-Path (Split-Path -Parent $StatePath) 'controller-debug.log'
+    Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Start-LlamaProcess called for model=$($body.model) resolved=$($record.model)"
     $existingInstance = $state.instances | Where-Object { $_.model -ieq $record.model -and $_.running } | Select-Object -First 1
+    if ($existingInstance) {
+        Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Found existingInstance id=$($existingInstance.id) model=$($existingInstance.model) port=$($existingInstance.port) active=$($existingInstance.active)"
+    }
+    $activate = $true
+    if ($body.ContainsKey('activate') -and $body.activate -eq $false) {
+        $activate = $false
+    }
+
     if ($existingInstance -and (Test-TcpEndpoint -HostName '127.0.0.1' -Port ([int]$existingInstance.port) -TimeoutMs 1000)) {
+        if ($activate) {
+            Write-Host "[controller] Activating existing model instance: $($record.model) on port $($existingInstance.port)"
+            Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Promoting existing instance id=$($existingInstance.id)"
+            $state.instances = @($existingInstance) + ($state.instances | Where-Object { $_.id -ne $existingInstance.id })
+            $state.instances = $state.instances | ForEach-Object { Set-ObjectProperty $_ 'active' ($_.id -eq $existingInstance.id); $_ }
+            $state.active_model = [string]$existingInstance.model
+            $state.active_filename = [string]$existingInstance.filename
+            $state.active_path = [string]$existingInstance.path
+            $state.started_at = [string]$existingInstance.started_at
+            Save-State $state
+            Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Save-State called for active_model=$($state.active_model)"
+            return $state
+        }
+
         return $state
     }
 
@@ -550,8 +660,9 @@ function Start-LlamaProcess([hashtable]$body) {
     $stderrLog = Join-Path $runtimeDir "llama-server.$port.stderr.log"
 
     # Initialiser compteurs pour cette instance
-    $Global:RequestCounter[$port] = 0
-    $Global:LastRequestTime[$port] = Get-Date
+    $portKey = [string]$port
+    $Global:RequestCounter[$portKey] = 0
+    $Global:LastRequestTime[$portKey] = Get-Date
 
     $arguments = @(
         '--host', '0.0.0.0',
@@ -588,9 +699,18 @@ function Start-LlamaProcess([hashtable]$body) {
         estimated_vram_bytes = if ($body.estimated_vram_bytes) { [int64]$body.estimated_vram_bytes } else { $null }
         server_base_url = "http://127.0.0.1:$port/v1"
         proxy_id = "$($config.proxy_model_id)-$port"
+        active = $activate
     }
 
-    $state.instances = @($state.instances) + @($instance)
+    if ($activate) {
+        $state.instances = @($instance) + ($state.instances | ForEach-Object { Set-ObjectProperty $_ 'active' $false; $_ } | Where-Object { $_.id -ne $instance.id })
+        $state.active_model = [string]$instance.model
+        $state.active_filename = [string]$instance.filename
+        $state.active_path = [string]$instance.path
+        $state.started_at = [string]$instance.started_at
+    } else {
+        $state.instances = @($instance) + $state.instances
+    }
     Save-State $state
 
     for ($i = 0; $i -lt 15; $i++) {
@@ -629,14 +749,16 @@ function Get-RuntimeStatus {
     $config = Get-Config
     $state = Ensure-StateConsistency
     $instances = @()
+    $requestCounter = ConvertTo-Hashtable $Global:RequestCounter
 
     foreach ($instance in $state.instances) {
+        $portKey = [string]$instance.port
         $instances += @{
             id = [string]$instance.id
             port = [int]$instance.port
             pid = $instance.pid
-            request_count = if ($Global:RequestCounter[[int]$instance.port]) { $Global:RequestCounter[[int]$instance.port] } else { 0 }
-            last_request_at = if ($Global:LastRequestTime[[int]$instance.port]) { $Global:LastRequestTime[[int]$instance.port].ToString('o') } else { $null }
+            request_count = if ($requestCounter[$portKey]) { $requestCounter[$portKey] } else { 0 }
+            last_request_at = if ($Global:LastRequestTime[$portKey]) { $Global:LastRequestTime[$portKey].ToString('o') } else { $null }
             running = [bool]$instance.running
             model = [string]$instance.model
             filename = [string]$instance.filename
@@ -645,6 +767,7 @@ function Get-RuntimeStatus {
             last_error = [string]$instance.last_error
             stdout_log = [string]$instance.stdout_log
             stderr_log = [string]$instance.stderr_log
+            active = [bool]$instance.active
             estimated_vram_bytes = if ($instance.estimated_vram_bytes) { [int64]$instance.estimated_vram_bytes } else { $null }
             server_base_url = [string]$instance.server_base_url
             proxy_id = [string]$instance.proxy_id
@@ -652,17 +775,21 @@ function Get-RuntimeStatus {
     }
 
     $gpu = Get-GpuState
+    $activeInstance = $instances | Where-Object { $_.active } | Select-Object -First 1
+    if (-not $activeInstance -and $instances.Count -gt 0) {
+        $activeInstance = $instances[0]
+    }
 
     return @{
         running = [bool]($instances.Count -gt 0)
-        pid = if ($instances.Count -gt 0) { $instances[0].pid } else { $null }
-        active_model = if ($instances.Count -gt 0) { [string]$instances[0].model } else { '' }
-        active_filename = if ($instances.Count -gt 0) { [string]$instances[0].filename } else { '' }
-        active_path = if ($instances.Count -gt 0) { [string]$instances[0].path } else { '' }
-        started_at = if ($instances.Count -gt 0) { [string]$instances[0].started_at } else { '' }
-        last_error = if ($instances.Count -gt 0) { [string]$instances[0].last_error } else { '' }
-        stdout_log = if ($instances.Count -gt 0) { [string]$instances[0].stdout_log } else { '' }
-        stderr_log = if ($instances.Count -gt 0) { [string]$instances[0].stderr_log } else { '' }
+        pid = if ($activeInstance) { $activeInstance.pid } else { $null }
+        active_model = if ($activeInstance) { [string]$activeInstance.model } else { '' }
+        active_filename = if ($activeInstance) { [string]$activeInstance.filename } else { '' }
+        active_path = if ($activeInstance) { [string]$activeInstance.path } else { '' }
+        started_at = if ($activeInstance) { [string]$activeInstance.started_at } else { '' }
+        last_error = if ($activeInstance) { [string]$activeInstance.last_error } else { '' }
+        stdout_log = if ($activeInstance) { [string]$activeInstance.stdout_log } else { '' }
+        stderr_log = if ($activeInstance) { [string]$activeInstance.stderr_log } else { '' }
         backend = [string]$config.backend
         backend_label = [string]$config.backend_label
         binary_path = [string]$config.binary_path
@@ -674,7 +801,7 @@ function Get-RuntimeStatus {
         default_context = [int]$config.default_context
         default_gpu_layers = [int]$config.default_gpu_layers
         instances = $instances
-        request_counter = $Global:RequestCounter
+        request_counter = $requestCounter
         gpu = $gpu
     }
 }
@@ -754,8 +881,55 @@ function Read-JsonBody($request) {
     return ConvertTo-Hashtable (ConvertFrom-Json $request.raw_body)
 }
 
+function Get-ObjectProperty($object, [string]$name) {
+    if ($null -eq $object) { return $null }
+    if ($object -is [System.Collections.IDictionary]) {
+        return $object[$name]
+    }
+    if ($object.PSObject.Properties.Match($name).Count -gt 0) {
+        return $object.$name
+    }
+    return $null
+}
+
+function Set-ObjectProperty($object, [string]$name, $value) {
+    if ($null -eq $object) { return $object }
+    if ($object -is [System.Collections.IDictionary]) {
+        $object[$name] = $value
+        return $object
+    }
+    $object | Add-Member -NotePropertyName $name -NotePropertyValue $value -Force
+    return $object
+}
+
+function ConvertTo-SerializableObject($value) {
+    if ($null -eq $value) {
+        return $null
+    }
+
+    if ($value -is [System.Collections.IDictionary]) {
+        $obj = [PSCustomObject]@{}
+        foreach ($key in $value.Keys) {
+            $stringKey = [string]$key
+            $obj | Add-Member -NotePropertyName $stringKey -NotePropertyValue (ConvertTo-SerializableObject $value[$key]) -Force
+        }
+        return $obj
+    }
+
+    if ($value -is [System.Collections.IEnumerable] -and -not ($value -is [string])) {
+        $items = @()
+        foreach ($item in $value) {
+            $items += ,(ConvertTo-SerializableObject $item)
+        }
+        return $items
+    }
+
+    return $value
+}
+
 function Write-Json([System.Net.Sockets.NetworkStream]$stream, [int]$statusCode, $payload) {
-    $json = $payload | ConvertTo-Json -Depth 8 -Compress
+    $serializable = ConvertTo-SerializableObject $payload
+    $json = $serializable | ConvertTo-Json -Depth 8 -Compress
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($json)
     $statusText = Get-HttpStatusText $statusCode
     $headerText = "HTTP/1.1 {0} {1}`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: {2}`r`nAccess-Control-Allow-Origin: *`r`nAccess-Control-Allow-Methods: GET, POST, OPTIONS`r`nAccess-Control-Allow-Headers: *`r`nConnection: close`r`n`r`n" -f $statusCode, $statusText, $bodyBytes.Length
@@ -774,14 +948,13 @@ Register-ObjectEvent -InputObject $watchdogTimer -EventName Elapsed -Action {
     try {
         Write-Host "[Watchdog] Exécution vérification état..."
         $state = Ensure-StateConsistency
-        $config = Get-Config
         $idleTimeoutMinutes = 30
 
         $now = Get-Date
         foreach ($instance in $state.instances) {
             if (-not $instance.running -or -not $instance.pid) { continue }
             
-            $lastRequest = $Global:LastRequestTime[[int]$instance.port]
+            $lastRequest = $Global:LastRequestTime[[string]$instance.port]
             if ($lastRequest) {
                 $idleTime = ($now - $lastRequest).TotalMinutes
                 if ($idleTime -gt $idleTimeoutMinutes) {
@@ -792,10 +965,10 @@ Register-ObjectEvent -InputObject $watchdogTimer -EventName Elapsed -Action {
         }
 
         # Persister compteurs dans l'état
-        $state.request_counter = $Global:RequestCounter
+        $state.request_counter = ConvertTo-Hashtable $Global:RequestCounter
         $state.last_request_time = @{}
         foreach ($key in $Global:LastRequestTime.Keys) {
-            $state.last_request_time[$key] = $Global:LastRequestTime[$key].ToString('o')
+            $state.last_request_time[[string]$key] = $Global:LastRequestTime[$key].ToString('o')
         }
         Save-State $state
     }
@@ -816,11 +989,11 @@ try {
 try {
     $state = Get-State
     if ($state.request_counter) {
-        $Global:RequestCounter = $state.request_counter
+        $Global:RequestCounter = ConvertTo-Hashtable $state.request_counter
     }
     if ($state.last_request_time) {
         foreach ($key in $state.last_request_time.Keys) {
-            $Global:LastRequestTime[$key] = [datetime]$state.last_request_time[$key]
+            $Global:LastRequestTime[[string]$key] = [datetime]$state.last_request_time[$key]
         }
     }
 } catch {}
@@ -859,8 +1032,9 @@ while ($true) {
         # Mettre à jour timestamp dernière requête pour chaque instance appelée
         foreach ($instance in (Ensure-StateConsistency).instances) {
             if ($request.raw_body -match "\b$($instance.port)\b" -or $request.path -match "\b$($instance.port)\b") {
-                $Global:LastRequestTime[[int]$instance.port] = Get-Date
-                $Global:RequestCounter[[int]$instance.port] = if ($Global:RequestCounter[[int]$instance.port]) { $Global:RequestCounter[[int]$instance.port] + 1 } else { 1 }
+                $portKey = [string]$instance.port
+                $Global:LastRequestTime[$portKey] = Get-Date
+                $Global:RequestCounter[$portKey] = if ($Global:RequestCounter[$portKey]) { $Global:RequestCounter[$portKey] + 1 } else { 1 }
             }
         }
 
@@ -884,9 +1058,19 @@ while ($true) {
                     continue
                 }
 
-                # Limitation max instances
+                Write-Host "[controller] POST /start model=$($body.model) context=$($body.context)"
+
                 $config = Get-Config
                 $state = Ensure-StateConsistency
+                $existingInstance = $state.instances | Where-Object { $_.model -ieq $body.model -and $_.running } | Select-Object -First 1
+                if ($existingInstance) {
+                    Write-Host "[controller] model déjà chargé, promotion en actif : $($body.model)"
+                    Start-LlamaProcess $body | Out-Null
+                    Write-Json $stream 200 (Get-RuntimeStatus)
+                    continue
+                }
+
+                # Limitation max instances
                 $runningInstances = $state.instances | Where-Object { $_.running } | Measure-Object | Select-Object -ExpandProperty Count
                 if ($runningInstances -ge $config.max_instances) {
                     Write-Json $stream 429 @{ detail = "Limite maximum de $($config.max_instances) instances atteinte" }
@@ -899,12 +1083,14 @@ while ($true) {
             }
             'POST /stop' {
                 $body = Read-JsonBody $request
+                Write-Host "[controller] POST /stop model=$($body.model) id=$($body.id) proxy_id=$($body.proxy_id) port=$($body.port)"
                 Stop-LlamaProcess $body | Out-Null
                 Write-Json $stream 200 (Get-RuntimeStatus)
                 continue
             }
             'POST /restart' {
                 $body = Read-JsonBody $request
+                Write-Host "[controller] POST /restart model=$($body.model) id=$($body.id) proxy_id=$($body.proxy_id) port=$($body.port)"
                 Stop-LlamaProcess $body | Out-Null
                 Start-Sleep -Milliseconds 1000
                 Start-LlamaProcess $body | Out-Null

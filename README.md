@@ -43,7 +43,8 @@ Le runtime d'inférence reste piloté sur l'hôte Windows via [llama-host-contro
 ## Nouveautés de cette version
 
 - Plusieurs modèles GGUF peuvent maintenant être chargés en parallèle. Le contrôleur hôte gère plusieurs instances `llama-server`, attribue un port libre dans la plage `12434-12444`, et conserve l'état de chaque instance dans [runtime/host-runtime-state.json](runtime/host-runtime-state.json).
-- Le Model Loader expose un proxy OpenAI-compatible stable via l'identifiant `lia-local`, tout en affichant l'état des modèles chargés, les métadonnées GGUF et le modèle actif.
+- Le modèle principal est celui qui est servi à AnythingLLM via le proxy `lia-local`, tandis que les modèles chargés sont exposés via `/api/models` (avec `/api/modeles` comme alias) pour LibreChat et AnythingLLM.
+- Le Model Loader expose un proxy OpenAI-compatible stable via l'identifiant `lia-local`, tout en affichant l'état des modèles chargés, les métadonnées GGUF et le modèle principal.
 - LibreChat a été ajouté comme frontend supplémentaire, avec une image Docker dédiée, une configuration préintégrée et un backend MongoDB associé.
 - Les frontends AnythingLLM, Open WebUI et LibreChat sont désormais déployés comme conteneurs Docker distincts sur un même réseau applicatif.
 - Le script [lia.ps1](lia.ps1) sert désormais au bootstrap et à l'installation. Le fonctionnement quotidien passe par Docker et par les services exposés localement.
@@ -53,7 +54,7 @@ Le runtime d'inférence reste piloté sur l'hôte Windows via [llama-host-contro
 
 | Service | URL | Rôle |
 |---|---|---|
-| Model Loader | http://localhost:3002 | UI et API de contrôle des modèles GGUF, import, métadonnées et proxy OpenAI local |
+| Model Loader | http://localhost:3002 | UI et API de contrôle des modèles GGUF, import, métadonnées, proxy OpenAI local et catalogue des modèles chargés via `/api/models` |
 | AnythingLLM | http://localhost:3001 | Interface de chat et de workflow documentaire |
 | Open WebUI | http://localhost:3003 | Interface de chat alternative branchée sur `lia-local` |
 | LibreChat | http://localhost:3004 | Frontend OpenAI-compatible supplémentaire |
@@ -61,7 +62,7 @@ Le runtime d'inférence reste piloté sur l'hôte Windows via [llama-host-contro
 | llama-server | http://127.0.0.1:12434-12444 | Une instance par modèle chargé, selon les ports disponibles |
 | LibreChat MongoDB | interne Docker | Stockage de LibreChat |
 
-Le proxy OpenAI du Model Loader publie un modèle stable nommé `lia-local`. Les interfaces Docker ne pointent pas directement vers un modèle brut, elles parlent à ce proxy qui redirige vers l'instance active.
+Le proxy OpenAI du Model Loader publie un modèle stable nommé `lia-local`. AnythingLLM reçoit le modèle principal via ce proxy, tandis que LibreChat et AnythingLLM peuvent consulter les modèles chargés via `/api/models` (ou `/api/modeles` en alias).
 
 ## Architecture
 
@@ -85,7 +86,64 @@ flowchart LR
     L --> M
 ```
 
-Le point important est le suivant : un seul modèle est servi par instance `llama-server`, mais plusieurs instances peuvent coexister en mémoire en parallèle. Cela permet de garder plusieurs modèles chargés et d'alterner entre eux sans repartir de zéro à chaque fois.
+Le point important est le suivant : un seul modèle est servi par instance `llama-server`, mais plusieurs instances peuvent coexister en mémoire en parallèle. Le modèle principal est celui servi au chat principal via `lia-local`, et le catalogue des modèles chargés reste visible via `/api/models`.
+
+## Correspondance App.jsx ↔ server.js ↔ controller
+
+### Vue d'ensemble
+- `model-manager/src/App.jsx` appelle l'API du Model Loader.
+- `model-manager/server.js` convertit ces appels en opérations sur le contrôleur hôte et/ou en lecture locale de fichiers.
+- Le frontend n'appelle jamais `llama-host-controller.ps1` directement.
+
+### Requêtes de lecture d'état
+- `App.jsx` `refreshVersion()`
+  - `GET /api/version`
+  - `server.js` utilise `getRuntimeStatus()` → `controllerRequest('/status')`
+- `App.jsx` `refreshAvailableFiles()`
+  - `GET /api/models/available`
+  - `server.js` liste les fichiers GGUF locaux et exclut le modèle principal déterminé par `resolveActiveModel()`
+- `App.jsx` `refreshLoadedModels()`
+  - `GET /api/modeles`
+  - `server.js` renvoie `buildLoadedModelList(snapshot.runtime)` depuis le runtime ou le fallback `runtime/host-runtime-state.json`
+- `App.jsx` `refreshActiveModel()`
+  - `GET /api/models/active`
+  - `server.js` renvoie le modèle principal via `resolveActiveModel(snapshot.runtime)`
+- `App.jsx` `refreshStatusInfo()`
+  - `GET /api/models/status`
+  - `server.js` résume le runtime et les instances chargées via `buildLoadedModelList(runtime)`
+
+### Actions de modèle
+- `App.jsx` `handleLoadFile(modelName)`
+  - `POST /api/models/load` `{ model }`
+  - `server.js` appelle `buildModelStartRequest(model)` puis `controllerRequest('/start')`
+- `App.jsx` `handleSelectLoaded(modelName)`
+  - `POST /api/models/select` `{ model }`
+  - `server.js` réalise la même logique que `/api/models/load` pour démarrer/activer le modèle
+- `App.jsx` `handleUnloadModel(modelName)`
+  - `POST /api/models/unload` `{ model }`
+  - `server.js` appelle `controllerRequest('/stop')`
+- `App.jsx` `handleDeleteFile(filename)`
+  - `DELETE /api/models/files/:filename`
+  - `server.js` résout le modèle local, arrête l'instance active si nécessaire, puis supprime le fichier
+- `App.jsx` `handleOpenModelDetails(modelName)`
+  - `GET /api/models/details/:model`
+  - `server.js` retourne les métadonnées GGUF via `getModelGgufDetails(model)`
+
+### Import et téléchargement
+- `App.jsx` `handleDownloadUrl()` et `handleDownloadAndLoadUrl()`
+  - `POST /api/models/download`
+  - `server.js` importe depuis Ollama Library ou télécharge depuis Hugging Face, puis retourne le nom du fichier
+  - `handleDownloadAndLoadUrl()` effectue ensuite `POST /api/models/load` pour charger immédiatement le modèle
+
+### Points controller
+- `/status` : utilisé par `getRuntimeStatus()` pour connaître l'état global et les instances en cours.
+- `/start` : utilisé par `/api/models/load` et `/api/models/select` pour démarrer une instance `llama-server`.
+- `/stop` : utilisé par `/api/models/unload` et lors de la suppression d'un fichier principal.
+- `/restart` : implémenté dans `server.js` mais non utilisé directement par `App.jsx`.
+
+### Comportement principal / fallback
+- `resolveActiveModel(runtime)` cherche d'abord `runtime.active_model`, puis une instance `active`, puis une instance `running`.
+- `readRuntimeStateFallback()` permet à `server.js` d'utiliser l'état persistant dans `runtime/host-runtime-state.json` si le contrôleur n'est pas disponible.
 
 ## Flux d'utilisation
 
@@ -93,7 +151,7 @@ Le point important est le suivant : un seul modèle est servi par instance `llam
 2. Ouvrir Docker Desktop si ce n'est pas déjà fait.
 3. Aller sur [Model Loader](http://localhost:3002) pour importer un modèle GGUF depuis Hugging Face ou Ollama Library.
 4. Charger un modèle, puis en charger d'autres si besoin. Chaque modèle occupe sa propre instance `llama-server` sur un port libre.
-5. Utiliser le proxy `lia-local` depuis AnythingLLM, Open WebUI ou LibreChat.
+5. Utiliser le proxy `lia-local` depuis AnythingLLM, Open WebUI ou LibreChat. AnythingLLM reçoit le modèle principal, tandis que `/api/modeles` expose les modèles chargés pour la découverte et la sélection.
 
 Exemples de références acceptées dans le Model Loader :
 
@@ -104,7 +162,8 @@ Exemples de références acceptées dans le Model Loader :
 ## Fonctionnalités clés
 
 - Le Model Loader liste les modèles locaux, affiche leur statut, importe des fichiers GGUF, supprime des modèles et extrait des métadonnées détaillées.
-- [model-manager/server.js](model-manager/server.js) expose les routes `/health`, `/api/version`, `/api/models/available`, `/api/models/status`, `/api/models/details/:model`, `/api/models/load`, `/api/models/select`, `/api/models/unload` et les routes OpenAI compatibles `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`.
+- [model-manager/server.js](model-manager/server.js) expose les routes `/health`, `/api/version`, `/api/models/available`, `/api/models/status`, `/api/models/details/:model`, `/api/models/load`, `/api/models/select`, `/api/models/unload` et les routes OpenAI compatibles `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`. La route `/v1/models` renvoie le catalogue complet des modèles chargés, avec l'alias stable `lia-local` conservé pour compatibilité.
+- [model-manager/server.js](model-manager/server.js) expose aussi `/api/modeles`, qui renvoie la liste des modèles chargés en mémoire pour les interfaces qui veulent afficher le catalogue courant, avec un fallback sur l'état runtime monté si le contrôleur répond lentement.
 - [model-manager/src/App.jsx](model-manager/src/App.jsx) présente l'état runtime, les modèles en mémoire, les métadonnées GGUF et les raccourcis vers les différents frontends.
 - [llama-host-controller.ps1](llama-host-controller.ps1) gère plusieurs instances, persiste l'état, détecte les backends disponibles et surveille les ports actifs pour éviter les doublons.
 - [Dockerfile.librechat](Dockerfile.librechat) injecte la configuration LibreChat pour pointer vers `http://model-loader:3002/v1`.
@@ -166,6 +225,7 @@ Le script [lia.ps1](lia.ps1) vérifie les prérequis, installe Docker Desktop si
 - lit les métadonnées GGUF et le contexte détecté ;
 - gère le chargement, le déchargement et la sélection des modèles ;
 - expose un proxy OpenAI-compatible pour les autres interfaces ;
+- expose `/api/modeles` pour lister les modèles chargés, avec un fallback sur `runtime/host-runtime-state.json` monté dans le conteneur quand le contrôleur est lent, tout en gardant le modèle principal comme cible du proxy `lia-local` vers AnythingLLM ;
 - applique un circuit breaker côté requêtes vers le contrôleur.
 
 ### Frontends Docker
