@@ -76,6 +76,243 @@ body {
   color: var(--text-muted);
 }
 
+.app-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.app-nav-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.app-nav-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.app-nav-button.active {
+  background: rgba(20, 184, 166, 0.16);
+  border-color: rgba(20, 184, 166, 0.3);
+  color: #ecfeff;
+}
+
+.placeholder-block {
+  margin-top: 18px;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  color: var(--text-muted);
+}
+
+.section-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.log-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 18px;
+  padding: 18px;
+}
+
+.log-card-title {
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.log-card-body {
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.logs-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 18px;
+  padding: 20px;
+}
+
+.log-panel {
+  margin-top: 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.log-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  font-weight: 700;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.log-filter-select {
+  appearance: none;
+  background: rgba(15, 23, 42, 0.95);
+  color: var(--text);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 12px;
+  padding: 8px 12px;
+  font-size: 0.95rem;
+  min-width: 160px;
+}
+
+.log-panel-body {
+  padding: 18px;
+}
+
+.log-lines {
+  padding: 18px;
+  min-height: 220px;
+  max-height: 360px;
+  overflow-y: auto;
+  background: rgba(15, 23, 42, 0.9);
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+  border-bottom-left-radius: 18px;
+  border-bottom-right-radius: 18px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.log-line {
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 6px;
+}
+
+.log-line.log-error {
+  color: var(--danger);
+}
+
+.log-entry-source {
+  display: inline-block;
+  min-width: 10rem;
+  color: var(--text);
+  font-weight: 700;
+  margin-right: 0.5rem;
+}
+
+.performance-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 18px;
+  padding: 20px;
+}
+
+.performance-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.controller-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.summary-stack {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 18px;
+  padding: 16px;
+}
+
+.summary-title {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.performance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.hardware-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 18px;
+  padding: 18px;
+}
+
+.hardware-card-title {
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.hardware-card-meta {
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  font-size: 0.88rem;
+}
+
+.hardware-detail {
+  margin-bottom: 10px;
+  color: var(--text);
+  font-size: 0.92rem;
+}
+
+.usage-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  overflow: hidden;
+}
+
+.usage-fill {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(20, 184, 166, 1), rgba(59, 130, 246, 0.9));
+}
+
+.container-status-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--text-muted);
+}
+
+.container-status-table th,
+.container-status-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  text-align: left;
+}
+
+.container-status-table th {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.container-status-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
 .dot {
   width: 8px;
   height: 8px;
@@ -871,6 +1108,14 @@ input[type="text"]:focus {
   border-radius: 18px;
   border: 1px solid var(--border);
   background: rgba(4, 12, 24, 0.54);
+}
+
+.table-legend {
+  padding: 12px 18px;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .model-table {

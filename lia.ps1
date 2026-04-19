@@ -8,6 +8,9 @@ $runtimeDir        = Join-Path $rootDir "runtime"
 $modelsDir         = Join-Path $rootDir "models"
 $llamaRepoDir      = Join-Path $runtimeDir "llama.cpp"
 $controllerScript  = Join-Path $rootDir "llama-host-controller.ps1"
+$controllerLauncherScript = Join-Path $rootDir "controller-launcher.ps1"
+$controllerLauncherTaskName = 'LIA Controller Launcher'
+$controllerLauncherServiceName = 'LIA Controller Launcher'
 $runtimeConfigPath = Join-Path $runtimeDir "host-runtime-config.json"
 $runtimeStatePath  = Join-Path $runtimeDir "host-runtime-state.json"
 $controllerPort    = 13579
@@ -380,7 +383,98 @@ function Stop-ExistingController {
     }
 }
 
+function Get-ControllerLauncherTaskName {
+    return $controllerLauncherTaskName
+}
+
+function Get-ControllerLauncherServiceName {
+    return $controllerLauncherServiceName
+}
+
+function Ensure-ControllerLauncherService {
+    if (-not (Test-Path $controllerLauncherScript)) {
+        FAIL "Script controller-launcher introuvable : $controllerLauncherScript"
+    }
+
+    try {
+        $pwshPath = if (Get-Command pwsh -ErrorAction SilentlyContinue) { (Get-Command pwsh).Source } else { (Get-Command powershell.exe -ErrorAction Stop).Source }
+        $binaryPath = "`"$pwshPath`" -NoProfile -ExecutionPolicy Bypass -File `"$controllerLauncherScript`""
+        $service = Get-Service -Name (Get-ControllerLauncherServiceName) -ErrorAction SilentlyContinue
+        if (-not $service) {
+            New-Service -Name (Get-ControllerLauncherServiceName) -BinaryPathName $binaryPath -DisplayName 'LIA Controller Launcher' -Description 'Service de lancement et de supervision du contrôleur LIA' -StartupType Automatic
+            OK "Service controller-launcher installe"
+        }
+        return $true
+    } catch {
+        WARN "Impossible d'installer le service controller-launcher : $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Ensure-ControllerLauncherTask {
+    if (-not (Test-Path $controllerLauncherScript)) {
+        FAIL "Script controller-launcher introuvable : $controllerLauncherScript"
+    }
+
+    try {
+        $action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$controllerLauncherScript`""
+        $triggers = @(
+            New-ScheduledTaskTrigger -AtStartup,
+            New-ScheduledTaskTrigger -AtLogOn
+        )
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+        Register-ScheduledTask -TaskName (Get-ControllerLauncherTaskName) -Action $action -Trigger $triggers -Principal $principal -Description 'Launcher de relance du contrôleur LIA' -Force
+        OK "Tache planifiee $controllerLauncherTaskName installee"
+        return $true
+    } catch {
+        WARN "Impossible de creer la tache planifiee du controller-launcher : $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Start-ControllerLauncherService {
+    if (Wait-HttpOk -url "http://127.0.0.1:13580/health" -maxTries 1 -delay 1) {
+        return
+    }
+
+    INFO "Demarrage du service controller-launcher"
+    $serviceCreated = Ensure-ControllerLauncherService
+    if ($serviceCreated) {
+        try {
+            Start-Service -Name (Get-ControllerLauncherServiceName)
+            OK "Service controller-launcher demarre"
+        } catch {
+            WARN "Impossible de demarrer le service controller-launcher : $($_.Exception.Message)"
+        }
+    }
+
+    if (-not (Wait-HttpOk -url "http://127.0.0.1:13580/health" -maxTries 10 -delay 2)) {
+        INFO "Tache planifiee controller-launcher en secours"
+        $taskCreated = Ensure-ControllerLauncherTask
+        if ($taskCreated) {
+            try {
+                Start-ScheduledTask -TaskName (Get-ControllerLauncherTaskName)
+                OK "Tache controller-launcher demarree"
+            } catch {
+                WARN "Impossible de demarrer la tache planifiee controller-launcher : $($_.Exception.Message)"
+            }
+        }
+    }
+
+    if (-not (Wait-HttpOk -url "http://127.0.0.1:13580/health" -maxTries 10 -delay 2)) {
+        INFO "Démarrage direct de controller-launcher en secours"
+        $pwshExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+        Start-Process $pwshExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $controllerLauncherScript) -WindowStyle Hidden | Out-Null
+        if (-not (Wait-HttpOk -url "http://127.0.0.1:13580/health" -maxTries 10 -delay 2)) {
+            WARN "Le service controller-launcher n'a pas pu demarrer."
+        } else {
+            OK "controller-launcher demarre en mode secours"
+        }
+    }
+}
+
 function Ensure-ControllerRunning {
+    Start-ControllerLauncherService
     $controllerOk = $false
     if (Wait-HttpOk -url "http://127.0.0.1:$controllerPort/health" -maxTries 1 -delay 1) {
         try {
@@ -636,7 +730,7 @@ function Start-ModelLoaderContainer {
         '-v', ("{0}:/models" -f $modelsDir),
         '-v', ("{0}:/runtime:ro" -f $runtimeDir),
         '--restart', 'unless-stopped',
-        '--health-cmd', 'wget --no-verbose --tries=1 --spider http://localhost:3002/health || exit 1',
+        '--health-cmd', 'curl -fsS http://localhost:3002/health > /dev/null || exit 1',
         '--health-interval', '15s',
         '--health-timeout', '3s',
         '--health-retries', '2',

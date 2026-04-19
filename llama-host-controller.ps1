@@ -632,14 +632,21 @@ function Start-LlamaProcess([hashtable]$body) {
         if ($activate) {
             Write-Host "[controller] Activating existing model instance: $($record.model) on port $($existingInstance.port)"
             Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Promoting existing instance id=$($existingInstance.id)"
-            $state.instances = @($existingInstance) + ($state.instances | Where-Object { $_.id -ne $existingInstance.id })
-            $state.instances = $state.instances | ForEach-Object { Set-ObjectProperty $_ 'active' ($_.id -eq $existingInstance.id); $_ }
+            for ($i = 0; $i -lt $state.instances.Count; $i++) {
+                $instance = $state.instances[$i]
+                if ($instance -ne $null) {
+                    $state.instances[$i]['active'] = ([string]$instance.id -eq [string]$existingInstance.id)
+                }
+            }
             $state.active_model = [string]$existingInstance.model
             $state.active_filename = [string]$existingInstance.filename
             $state.active_path = [string]$existingInstance.path
             $state.started_at = [string]$existingInstance.started_at
             Save-State $state
             Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Save-State called for active_model=$($state.active_model)"
+            foreach ($instance in $state.instances) {
+                Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] instance $($instance.id) active=$($instance.active) model=$($instance.model)"
+            }
             return $state
         }
 
@@ -1065,6 +1072,7 @@ while ($true) {
                 $existingInstance = $state.instances | Where-Object { $_.model -ieq $body.model -and $_.running } | Select-Object -First 1
                 if ($existingInstance) {
                     Write-Host "[controller] model déjà chargé, promotion en actif : $($body.model)"
+                    $body.activate = $true
                     Start-LlamaProcess $body | Out-Null
                     Write-Json $stream 200 (Get-RuntimeStatus)
                     continue

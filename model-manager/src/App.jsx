@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import ContainerLogs from "./ContainerLogs";
+import Performance from "./Performance";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -13,18 +15,23 @@ function App() {
   const [statusMessage, setStatusMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
+  const [controllerHealth, setControllerHealth] = useState({ ok: true, controller_ok: true, detail: '', runtime: null });
+  const [controllerLoading, setControllerLoading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [sortColumn, setSortColumn] = useState("name");
   const [sortDirection, setSortDirection] = useState("asc");
+  const [currentPage, setCurrentPage] = useState('home');
 
   useEffect(() => {
     refreshAllModelState();
+    fetchControllerHealth();
   }, []);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
       if (!loading && !pendingAction) {
         refreshAllModelState({ silent: true });
+        fetchControllerHealth();
       }
     }, 5000);
     return () => window.clearInterval(intervalId);
@@ -70,6 +77,37 @@ function App() {
       throw new Error(message);
     }
     return payload;
+  }
+
+  async function fetchControllerHealth() {
+    setControllerLoading(true);
+    try {
+      const data = await apiFetch('/health');
+      setControllerHealth(data);
+    } catch (err) {
+      setControllerHealth({ ok: false, controller_ok: false, detail: err?.message || 'Impossible de contacter le contrôleur', runtime: null });
+    } finally {
+      setControllerLoading(false);
+    }
+  }
+
+  async function handleRestartController() {
+    if (loading || pendingAction) return;
+    setLoading(true);
+    setPendingAction({ model: 'controller', type: 'redémarrage' });
+    updateStatus('Redémarrage du contrôleur...');
+    try {
+      await apiFetch('/api/controller/restart', { method: 'POST' });
+      await fetchControllerHealth();
+      await refreshAllModelState({ silent: true });
+      updateStatus('Contrôleur redémarré.');
+    } catch (err) {
+      updateStatus(`Échec du redémarrage du contrôleur — ${err.message}`);
+      throw err;
+    } finally {
+      setPendingAction(null);
+      setLoading(false);
+    }
   }
 
   function formatBytes(value) {
@@ -376,25 +414,27 @@ function App() {
 
   const emptyState = modelRows.length === 0;
 
-  return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <img src="/logo.svg" alt="LIA Logo" width="44" height="44" />
-          <div>
-            <h1 style={{ margin: 0 }}>LIA-X</h1>
-            <p className="hero-subtitle" style={{ margin: 0 }}>Pilotage local des modèles GGUF et du runtime llama.cpp.</p>
-          </div>
-        </div>
-        <div className="backend-badge">
-          <span className={`dot ${version ? '' : 'offline'}`}></span>
-          <span>{version ? `Runtime prêt · ${version.version || 'llama.cpp'}` : 'Runtime hors ligne'}</span>
-        </div>
-      </header>
+  function renderPageContent() {
+    if (currentPage === 'logs') {
+      return <ContainerLogs />;
+    }
 
-      <main className="app-content">
-        {statusMessage && <div className={`notification ${/échec|Erreur|error/i.test(statusMessage) ? 'error' : 'info'}`}>{statusMessage}</div>}
+    if (currentPage === 'performance') {
+      return <Performance />;
+    }
 
+    if (currentPage === 'chat') {
+      return (
+        <div className="card">
+          <div className="card-title">💬 Chat</div>
+          <p className="card-subtitle">Interface de conversation. Implémentation à venir.</p>
+          <div className="placeholder-block">Préparez ici l’intégration d’un chat avec le runtime sous-jacent.</div>
+        </div>
+      );
+    }
+
+    return (
+      <>
         <section className="hero-panel">
           <div className="hero-copy">
             <div className="eyebrow">Console locale</div>
@@ -403,9 +443,31 @@ function App() {
           </div>
           <div className="hero-routing">
             <article className="hero-route hero-route-primary"><div className="hero-route-kicker">Principal</div><h3>{activeModel || 'Aucun modèle principal'}</h3><p>{activeModel ? `Proxy lia-local diffuse le modèle principal ${activeModel}.` : 'Sélectionne un modèle chargé pour le définir comme principal.'}</p></article>
+            <article className="hero-route"><div className="hero-route-kicker">Disponibles</div><h3>{availableFiles.length}</h3><p>{availableFiles.length > 0 ? 'Fichiers GGUF détectés sur disque.' : 'Aucun fichier GGUF disponible.'}</p></article>
             <article className="hero-route"><div className="hero-route-kicker">Chargés</div><h3>{loadedModels.length}</h3><p>{loadedModels.length > 0 ? 'Les modèles en mémoire sont exposés via /api/models.' : 'Aucun modèle chargé.'}</p></article>
           </div>
         </section>
+
+        <div className="card controller-status-card">
+          <div className="card-title">🔌 Contrôleur Windows</div>
+          <div className="controller-status-grid">
+            <div>
+              <div className="summary-title">Statut</div>
+              <div className={`badge ${controllerHealth.controller_ok ? 'badge-success' : 'badge-error'}`}>{controllerHealth.controller_ok ? 'Disponible' : 'Indisponible'}</div>
+            </div>
+            <div>
+              <div className="summary-title">Détail</div>
+              <div>{controllerHealth.controller_ok ? 'Le contrôleur répond correctement.' : controllerHealth.detail || 'Le contrôleur ne répond pas.'}</div>
+            </div>
+            <div>
+              <div className="summary-title">Action</div>
+              <button className="btn btn-primary" onClick={handleRestartController} disabled={loading || pendingAction || controllerHealth.controller_ok || controllerLoading}>
+                {controllerLoading || (pendingAction?.model === 'controller' ? 'Redémarrage…' : 'Relancer le contrôleur Windows')}
+              </button>
+            </div>
+          </div>
+          {!controllerHealth.controller_ok && <div className="placeholder-block">Si le contrôleur Windows est arrêté, ce bouton tente de le relancer via le service de relance local. Assure-toi que le service Windows est démarré sur le port 13580.</div>}
+        </div>
 
         <div className="card download-card">
           <div className="card-title">⬇️ Importer un modèle GGUF</div>
@@ -424,7 +486,7 @@ function App() {
 
         <div className="card model-table-card">
           <div className="card-header-row"><div><div className="card-title">🧠 Modèles</div><div className="card-subtitle card-subtitle-inline">Basculer le chargement et définir le modèle principal.</div></div><div className="auto-sync-label">Mise à jour auto</div></div>
-          {emptyState ? <div className="empty-state">Aucun modèle local détecté.</div> : <div className="table-wrap"><table className="model-table"><thead><tr>
+          {emptyState ? <div className="empty-state">Aucun modèle local détecté.</div> : <div className="table-wrap"><div className="table-legend">Afficher les fichiers GGUF disponibles sur disque et les modèles chargés en mémoire. Cliquez sur un toggle pour charger / décharger.</div><table className="model-table"><thead><tr>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('name')}>Nom {sortColumn === 'name' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('status')}>État {sortColumn === 'status' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('diskSize')}>Taille {sortColumn === 'diskSize' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
@@ -462,6 +524,46 @@ function App() {
             ))}
           </tbody></table></div>}
         </div>
+      </>
+    );
+  }
+
+  return (
+    <div className="app-shell">
+      <header className="app-header">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <img src="/logo.svg" alt="LIA Logo" width="44" height="44" />
+          <div>
+            <h1 style={{ margin: 0 }}>LIA-X</h1>
+            <p className="hero-subtitle" style={{ margin: 0 }}>Local Intelligence Assistant XTENDED</p>
+          </div>
+        </div>
+        <nav className="app-nav">
+          {[
+            { key: 'home', label: 'Accueil' },
+            { key: 'logs', label: 'Logs' },
+            { key: 'performance', label: 'Performance' },
+            { key: 'chat', label: 'Chat' },
+          ].map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              className={`app-nav-button${currentPage === item.key ? ' active' : ''}`}
+              onClick={() => setCurrentPage(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+        <div className="backend-badge">
+          <span className={`dot ${version ? '' : 'offline'}`}></span>
+          <span>{version ? `Runtime prêt · ${version.version || 'llama.cpp'}` : 'Runtime hors ligne'}</span>
+        </div>
+      </header>
+
+      <main className="app-content">
+        {statusMessage && <div className={`notification ${/échec|Erreur|error/i.test(statusMessage) ? 'error' : 'info'}`}>{statusMessage}</div>}
+        {renderPageContent()}
       </main>
     </div>
   );
