@@ -8,6 +8,35 @@ $ErrorActionPreference = "Stop"
 $Global:RequestCounter = @{}
 $Global:LastRequestTime = @{}
 
+function Get-RepoRoot {
+    if ($PSScriptRoot -match '\\(scripts|controller)$') {
+        return Split-Path -Parent $PSScriptRoot
+    }
+
+    return $PSScriptRoot
+}
+
+function Get-LogsRoot {
+    return Join-Path (Get-RepoRoot) 'logs'
+}
+
+function Get-ControllerLogDir {
+    return Join-Path (Get-LogsRoot) 'controller'
+}
+
+function Get-RuntimeLogDir {
+    return Join-Path (Get-LogsRoot) 'runtime'
+}
+
+function Initialize-LogsDirectories {
+    $dirs = @((Get-LogsRoot), (Get-ControllerLogDir), (Get-RuntimeLogDir))
+    foreach ($dir in $dirs) {
+        if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+    }
+}
+
 # Gestionnaire d'arrêt gracieux pour Windows Service
 Register-EngineEvent PowerShell.Exiting -Action {
     Write-Host "`n[Controller] Arrêt gracieux en cours..."
@@ -31,12 +60,14 @@ Register-EngineEvent PowerShell.Exiting -Action {
 } | Out-Null
 
 if (-not $ConfigPath) {
-    $ConfigPath = Join-Path $PSScriptRoot "runtime\host-runtime-config.json"
+    $ConfigPath = Join-Path (Get-RepoRoot) "runtime\host-runtime-config.json"
 }
 
 if (-not $StatePath) {
-    $StatePath = Join-Path $PSScriptRoot "runtime\host-runtime-state.json"
+    $StatePath = Join-Path (Get-RepoRoot) "runtime\host-runtime-state.json"
 }
+
+Initialize-LogsDirectories
 
 function ConvertTo-Hashtable($value) {
     if ($null -eq $value) {
@@ -249,13 +280,13 @@ function Convert-LegacyState([hashtable]$state) {
     return $state
 }
 
-function Ensure-StateConsistency {
+function Get-ConsistentState {
     $state = Get-State
     $state = Convert-LegacyState $state
     $changed = $false
     $graceWindowSeconds = 30
 
-    $liveInstances = Discover-LiveInstances (Get-Config)
+    $liveInstances = Get-LiveInstances (Get-Config)
     if ($liveInstances.Count -gt 0) {
         $state.instances = @($liveInstances)
 
@@ -327,7 +358,7 @@ function Ensure-StateConsistency {
     }
 
     # Auto nettoyage des logs: supprimer les logs plus vieux que 7 jours
-    $runtimeDir = Split-Path -Parent $StatePath
+    $runtimeDir = Get-RuntimeLogDir
     Get-ChildItem -Path $runtimeDir -Filter *.log -File -ErrorAction SilentlyContinue | Where-Object {
         $_.LastWriteTime -lt (Get-Date).AddDays(-7)
     } | Remove-Item -Force -ErrorAction SilentlyContinue
@@ -382,7 +413,7 @@ function Get-NextAvailablePort([hashtable]$config, [hashtable]$state) {
     return $null
 }
 
-function Discover-LiveInstances([hashtable]$config) {
+function Get-LiveInstances([hashtable]$config) {
     $instances = @()
     $start = [int]$config.server_port_start
     $end = [int]$config.server_port_end
@@ -436,7 +467,7 @@ function Discover-LiveInstances([hashtable]$config) {
 }
 
 function Resolve-InstanceRecord([string]$identifier) {
-    $state = Ensure-StateConsistency
+    $state = Get-ConsistentState
     if (-not $state.instances) { return $null }
 
     $needle = [string]$identifier
@@ -545,7 +576,7 @@ function Get-GpuState {
 }
 
 function Stop-LlamaProcess([hashtable]$body) {
-    $state = Ensure-StateConsistency
+    $state = Get-ConsistentState
     $target = $null
 
     if ($body -and $body.model) {
@@ -615,9 +646,12 @@ function Start-LlamaProcess([hashtable]$body) {
     $record = Resolve-ModelRecord([string]$body.model)
     $context = if ($body.context) { [int]$body.context } else { [int]$config.default_context }
     $gpuLayers = if ($body.gpu_layers) { [int]$body.gpu_layers } else { [int]$config.default_gpu_layers }
-    $state = Ensure-StateConsistency
+    $state = Get-ConsistentState
 
-    $debugLog = Join-Path (Split-Path -Parent $StatePath) 'controller-debug.log'
+    $debugLog = Join-Path (Get-ControllerLogDir) 'controller-debug.log'
+    if (-not (Test-Path (Split-Path -Parent $debugLog))) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $debugLog) -Force | Out-Null
+    }
     Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Start-LlamaProcess called for model=$($body.model) resolved=$($record.model)"
     $existingInstance = $state.instances | Where-Object { $_.model -ieq $record.model -and $_.running } | Select-Object -First 1
     if ($existingInstance) {
@@ -634,7 +668,7 @@ function Start-LlamaProcess([hashtable]$body) {
             Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Promoting existing instance id=$($existingInstance.id)"
             for ($i = 0; $i -lt $state.instances.Count; $i++) {
                 $instance = $state.instances[$i]
-                if ($instance -ne $null) {
+                if ($null -ne $instance) {
                     $state.instances[$i]['active'] = ([string]$instance.id -eq [string]$existingInstance.id)
                 }
             }
@@ -658,7 +692,7 @@ function Start-LlamaProcess([hashtable]$body) {
         throw "Aucune plage de ports disponible pour démarrer un nouveau modèle."
     }
 
-    $runtimeDir = Split-Path -Parent $StatePath
+    $runtimeDir = Get-RuntimeLogDir
     if (-not (Test-Path $runtimeDir)) {
         New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
     }
@@ -732,7 +766,7 @@ function Start-LlamaProcess([hashtable]$body) {
         throw "Timeout attente llama-server sur le port $port"
     }
 
-    return Ensure-StateConsistency
+    return Get-ConsistentState
 }
 
 function Test-TcpEndpoint([string]$HostName, [int]$Port, [int]$TimeoutMs = 1000) {
@@ -754,7 +788,7 @@ function Test-TcpEndpoint([string]$HostName, [int]$Port, [int]$TimeoutMs = 1000)
 
 function Get-RuntimeStatus {
     $config = Get-Config
-    $state = Ensure-StateConsistency
+    $state = Get-ConsistentState
     $instances = @()
     $requestCounter = ConvertTo-Hashtable $Global:RequestCounter
 
@@ -954,7 +988,7 @@ $watchdogTimer.AutoReset = $true
 Register-ObjectEvent -InputObject $watchdogTimer -EventName Elapsed -Action {
     try {
         Write-Host "[Watchdog] Exécution vérification état..."
-        $state = Ensure-StateConsistency
+        $state = Get-ConsistentState
         $idleTimeoutMinutes = 30
 
         $now = Get-Date
@@ -1037,7 +1071,7 @@ while ($true) {
         }
 
         # Mettre à jour timestamp dernière requête pour chaque instance appelée
-        foreach ($instance in (Ensure-StateConsistency).instances) {
+        foreach ($instance in (Get-ConsistentState).instances) {
             if ($request.raw_body -match "\b$($instance.port)\b" -or $request.path -match "\b$($instance.port)\b") {
                 $portKey = [string]$instance.port
                 $Global:LastRequestTime[$portKey] = Get-Date
@@ -1068,7 +1102,7 @@ while ($true) {
                 Write-Host "[controller] POST /start model=$($body.model) context=$($body.context)"
 
                 $config = Get-Config
-                $state = Ensure-StateConsistency
+                $state = Get-ConsistentState
                 $existingInstance = $state.instances | Where-Object { $_.model -ieq $body.model -and $_.running } | Select-Object -First 1
                 if ($existingInstance) {
                     Write-Host "[controller] model déjà chargé, promotion en actif : $($body.model)"

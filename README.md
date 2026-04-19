@@ -38,7 +38,7 @@
 
 LIA-X est une stack IA locale pensée pour Windows. La couche applicative s'exécute dans Docker, tandis que le script PowerShell sert de bootstrap pour l'installation des prérequis, la préparation du runtime et la configuration initiale.
 
-Le runtime d'inférence reste piloté sur l'hôte Windows via [llama-host-controller.ps1](llama-host-controller.ps1), et les conteneurs accèdent au service local par `host.docker.internal`. Cette séparation garde une base simple à maintenir tout en permettant plusieurs interfaces web au-dessus du même socle de modèles.
+Le runtime d'inférence reste piloté sur l'hôte Windows via [controller/llama-host-controller.ps1](controller/llama-host-controller.ps1), et les conteneurs accèdent au service local par `host.docker.internal`. Cette séparation garde une base simple à maintenir tout en permettant plusieurs interfaces web au-dessus du même socle de modèles.
 
 ## Nouveautés de cette version
 
@@ -47,7 +47,7 @@ Le runtime d'inférence reste piloté sur l'hôte Windows via [llama-host-contro
 - Le Model Loader expose un proxy OpenAI-compatible stable via l'identifiant `lia-local`, tout en affichant l'état des modèles chargés, les métadonnées GGUF et le modèle principal.
 - LibreChat a été ajouté comme frontend supplémentaire, avec une image Docker dédiée, une configuration préintégrée et un backend MongoDB associé.
 - Les frontends AnythingLLM, Open WebUI et LibreChat sont désormais déployés comme conteneurs Docker distincts sur un même réseau applicatif.
-- Le script [lia.ps1](lia.ps1) sert désormais au bootstrap et à l'installation. Le fonctionnement quotidien passe par Docker et par les services exposés localement.
+- Le script [install.ps1](install.ps1) sert désormais de wrapper pour [scripts/lia.ps1](scripts/lia.ps1) et initialise la stack.
 - Le contrôleur hôte détecte automatiquement le meilleur backend disponible, avec priorité CUDA pour NVIDIA, Vulkan pour AMD/Intel, puis CPU en repli.
 
 ## Services inclus
@@ -68,9 +68,13 @@ Le proxy OpenAI du Model Loader publie un modèle stable nommé `lia-local`. Any
 
 ```mermaid
 flowchart LR
-    W[Windows 11] --> B[lia.ps1\nbootstrap / installation]
-    B --> C[llama-host-controller.ps1\n:13579]
-    C --> R[Instances llama-server\n:12434-12444\n1 modèle par instance]
+    W[Windows 11] --> B[install.ps1
+bootstrap / installation]
+    B --> C[llama-host-controller.ps1
+:13579]
+    C --> R[Instances llama-server
+:12434-12444
+1 modèle par instance]
 
     W --> D[Docker Desktop]
     D --> M[Model Loader\n:3002]
@@ -147,7 +151,7 @@ Le point important est le suivant : un seul modèle est servi par instance `llam
 
 ## Flux d'utilisation
 
-1. Lancer [lia.ps1](lia.ps1) pour installer les prérequis, préparer les images et initialiser la stack.
+1. Lancer [install.ps1](install.ps1) pour installer les prérequis, préparer les images et initialiser la stack.
 2. Ouvrir Docker Desktop si ce n'est pas déjà fait.
 3. Aller sur [Model Loader](http://localhost:3002) pour importer un modèle GGUF depuis Hugging Face ou Ollama Library.
 4. Charger un modèle, puis en charger d'autres si besoin. Chaque modèle occupe sa propre instance `llama-server` sur un port libre.
@@ -165,23 +169,28 @@ Exemples de références acceptées dans le Model Loader :
 - [model-manager/server.js](model-manager/server.js) expose les routes `/health`, `/api/version`, `/api/models/available`, `/api/models/status`, `/api/models/details/:model`, `/api/models/load`, `/api/models/select`, `/api/models/unload` et les routes OpenAI compatibles `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`. La route `/v1/models` renvoie le catalogue complet des modèles chargés, avec l'alias stable `lia-local` conservé pour compatibilité.
 - [model-manager/server.js](model-manager/server.js) expose aussi `/api/modeles`, qui renvoie la liste des modèles chargés en mémoire pour les interfaces qui veulent afficher le catalogue courant, avec un fallback sur l'état runtime monté si le contrôleur répond lentement.
 - [model-manager/src/App.jsx](model-manager/src/App.jsx) présente l'état runtime, les modèles en mémoire, les métadonnées GGUF et les raccourcis vers les différents frontends.
-- [llama-host-controller.ps1](llama-host-controller.ps1) gère plusieurs instances, persiste l'état, détecte les backends disponibles et surveille les ports actifs pour éviter les doublons.
-- [Dockerfile.librechat](Dockerfile.librechat) injecte la configuration LibreChat pour pointer vers `http://model-loader:3002/v1`.
-- [Dockerfile.openwebui](Dockerfile.openwebui) configure Open WebUI pour utiliser le même proxy OpenAI local.
-- [Dockerfile.anythingllm](Dockerfile.anythingllm) conserve la configuration de démarrage adaptée à la stack LIA-X.
+- [controller/llama-host-controller.ps1](controller/llama-host-controller.ps1) gère plusieurs instances, persiste l'état, détecte les backends disponibles et surveille les ports actifs pour éviter les doublons.
+- [Dockerfiles/Dockerfile.librechat](Dockerfiles/Dockerfile.librechat) injecte la configuration LibreChat pour pointer vers `http://model-loader:3002/v1`.
+- [Dockerfiles/Dockerfile.openwebui](Dockerfiles/Dockerfile.openwebui) configure Open WebUI pour utiliser le même proxy OpenAI local.
+- [Dockerfiles/Dockerfile.anythingllm](Dockerfiles/Dockerfile.anythingllm) conserve la configuration de démarrage adaptée à la stack LIA-X.
 - Le Model Loader conserve un identifiant de proxy stable, `lia-local`, ce qui simplifie la configuration côté frontend.
 
 ## Structure du projet
 
 ```text
 .
-├── Dockerfile.anythingllm
-├── Dockerfile.librechat
-├── Dockerfile.model-loader
-├── Dockerfile.openwebui
-├── lia.ps1
-├── llama-host-controller.ps1
-├── librechat.yaml
+├── Dockerfiles/
+│   ├── Dockerfile.anythingllm
+│   ├── Dockerfile.librechat
+│   ├── Dockerfile.model-loader
+│   ├── Dockerfile.openwebui
+│   └── librechat.yaml
+├── install.ps1
+├── controller/
+│   └── llama-host-controller.ps1
+├── scripts/
+│   ├── controller-service.ps1
+│   └── lia.ps1
 ├── notes.md
 ├── README.md
 ├── model-manager/
@@ -205,11 +214,11 @@ Exemples de références acceptées dans le Model Loader :
 
 ### Bootstrap et installation
 
-Le script [lia.ps1](lia.ps1) vérifie les prérequis, installe Docker Desktop si nécessaire, prépare le réseau Docker `lia-network`, télécharge ou réutilise les binaires `llama.cpp`, puis construit et lance les conteneurs applicatifs.
+Le script [install.ps1](install.ps1) vérifie les prérequis, installe Docker Desktop si nécessaire, prépare le réseau Docker `lia-network`, télécharge ou réutilise les binaires `llama.cpp`, puis construit et lance les conteneurs applicatifs.
 
 ### Contrôleur hôte
 
-[llama-host-controller.ps1](llama-host-controller.ps1) est le point de vérité pour l'exécution locale des modèles. Il :
+[controller/llama-host-controller.ps1](controller/llama-host-controller.ps1) est le point de vérité pour l'exécution locale des modèles. Il :
 
 - détecte automatiquement le meilleur backend disponible avec fallback CUDA, Vulkan ou CPU ;
 - autorise plusieurs instances `llama-server` en parallèle ;
@@ -230,15 +239,15 @@ Le script [lia.ps1](lia.ps1) vérifie les prérequis, installe Docker Desktop si
 
 ### Frontends Docker
 
-- [Dockerfile.anythingllm](Dockerfile.anythingllm) est utilisé pour construire le conteneur AnythingLLM avec la configuration LIA.
-- [Dockerfile.openwebui](Dockerfile.openwebui) configure Open WebUI pour parler au Model Loader local.
-- [Dockerfile.librechat](Dockerfile.librechat) et [librechat.yaml](librechat.yaml) définissent l'intégration LibreChat vers le même proxy.
+- [Dockerfiles/Dockerfile.anythingllm](Dockerfiles/Dockerfile.anythingllm) est utilisé pour construire le conteneur AnythingLLM avec la configuration LIA.
+- [Dockerfiles/Dockerfile.openwebui](Dockerfiles/Dockerfile.openwebui) configure Open WebUI pour parler au Model Loader local.
+- [Dockerfiles/Dockerfile.librechat](Dockerfiles/Dockerfile.librechat) et [Dockerfiles/librechat.yaml](Dockerfiles/librechat.yaml) définissent l'intégration LibreChat vers le même proxy.
 
 ## Commandes utiles
 
 ```powershell
 # Bootstrap et installation
-.\lia.ps1
+.\install.ps1
 
 # Vérifier la santé du Model Loader
 Invoke-WebRequest -Uri "http://127.0.0.1:3002/health" -UseBasicParsing
@@ -271,6 +280,6 @@ docker logs -f librechat-mongo
 - Si un modèle ne s'ouvre pas, vérifier qu'un fichier `.gguf` valide est bien présent dans le répertoire modèles et que la plage de ports `12434-12444` n'est pas saturée.
 - Si LibreChat ne démarre pas, consulter `docker logs -f librechat` puis `docker logs -f librechat-mongo`.
 - Si un frontend Docker ne voit pas le proxy local, vérifier que le conteneur `model-loader` est bien présent sur `lia-network`.
-- Si Docker Desktop n'est pas démarré, relancer Docker puis exécuter à nouveau [lia.ps1](lia.ps1).
+- Si Docker Desktop n'est pas démarré, relancer Docker puis exécuter à nouveau [install.ps1](install.ps1).
 
 LIA-X reste un socle local-first pour le chat, l'import de modèles GGUF, les tests multi-modèles et l'expérimentation multi-interfaces sur Windows.

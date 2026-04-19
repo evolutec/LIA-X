@@ -1,7 +1,7 @@
 FROM ghcr.io/danny-avila/librechat:latest
 
 # Configuration LIA préintégrée
-COPY librechat.yaml /app/librechat.yaml
+COPY Dockerfiles/librechat.yaml /app/librechat.yaml
 
 # Variables d'environnement optimisées pour LIA
 ENV MONGO_URI=mongodb://librechat-mongo:27017/LibreChat

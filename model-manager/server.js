@@ -101,6 +101,7 @@ const MODEL_STORAGE_DIR = process.env.MODEL_STORAGE_DIR || path.join(__dirname, 
 const RUNTIME_STATE_PATH = process.env.RUNTIME_STATE_PATH || '/runtime/host-runtime-state.json';
 const PORT = Number(process.env.MODEL_MANAGER_PORT || 3002);
 const PROXY_MODEL_ID = process.env.PROXY_MODEL_ID || 'lia-local';
+const DOCKER_INTERNAL = String(process.env.DOCKER_INTERNAL || 'false').toLowerCase() === 'true';
 const CONTROLLER_START_TIMEOUT_MS = Number(process.env.CONTROLLER_START_TIMEOUT_MS || '120000');
 const OLLAMA_REGISTRY_BASE_URL = 'https://registry.ollama.ai';
 const GGUF_METADATA_CACHE = new Map();
@@ -1379,6 +1380,39 @@ function proxyModelPayload(runtimeStatus) {
     .filter((entry, index, array) => array.findIndex((item) => item.id === entry.id) === index);
 }
 
+function translateToDockerHost(url) {
+  if (!DOCKER_INTERNAL || typeof url !== 'string') {
+    return url;
+  }
+
+  return url
+    .replace(/^http:\/\/127\.0\.0\.1(:\d+)/i, 'http://host.docker.internal$1')
+    .replace(/^http:\/\/localhost(:\d+)/i, 'http://host.docker.internal$1');
+}
+
+function getRuntimeBaseUrl(runtimeStatus) {
+  if (!runtimeStatus || typeof runtimeStatus !== 'object') {
+    return translateToDockerHost(LLAMA_SERVER_BASE_URL);
+  }
+
+  const instances = Array.isArray(runtimeStatus.instances)
+    ? runtimeStatus.instances
+    : runtimeStatus.instances
+      ? [runtimeStatus.instances]
+      : [];
+
+  const activeInstance = instances.find((instance) => Boolean(instance.active) || Boolean(instance.running));
+  if (activeInstance?.server_base_url) {
+    return translateToDockerHost(String(activeInstance.server_base_url).replace(/\/v1\/?$/, '').replace(/\/$/, ''));
+  }
+
+  if (typeof runtimeStatus.server_port === 'number' && runtimeStatus.server_port > 0) {
+    return translateToDockerHost(`http://127.0.0.1:${runtimeStatus.server_port}`);
+  }
+
+  return translateToDockerHost(LLAMA_SERVER_BASE_URL);
+}
+
 async function proxyOpenAiRequest(req, res, endpoint) {
   try {
     const preferredModel = typeof req.body?.model === 'string' && req.body.model !== PROXY_MODEL_ID
@@ -1395,7 +1429,8 @@ async function proxyOpenAiRequest(req, res, endpoint) {
       payload.model = upstreamModel;
     }
 
-    const response = await fetch(`${LLAMA_SERVER_BASE_URL}${endpoint}`, {
+    const runtimeUrl = getRuntimeBaseUrl(runtimeStatus);
+    const response = await fetch(`${runtimeUrl}${endpoint}`, {
       method: req.method,
       headers: {
         'Content-Type': 'application/json',
@@ -1491,7 +1526,7 @@ app.get('/api/version', async (req, res) => {
       version: runtime?.backend_label ? `llama.cpp · ${runtime.backend_label}` : 'llama.cpp',
       device: runtime?.backend_label || 'Runtime indisponible',
       model_dir: MODEL_STORAGE_DIR,
-      runtime_url: `${LLAMA_SERVER_BASE_URL}/v1`,
+      runtime_url: `${getRuntimeBaseUrl(runtime)}/v1`,
       source: snapshot.source,
       detail: snapshot.detail || null,
     });
@@ -1547,6 +1582,23 @@ app.get('/api/models', async (req, res) => {
 });
 
 app.get('/api/modeles', async (req, res) => {
+  try {
+    const snapshot = await getRuntimeSnapshot();
+    const runtime = snapshot.runtime;
+    const loadedModels = buildLoadedModelList(runtime);
+
+    res.json({
+      active_model: resolveActiveModel(runtime),
+      models: loadedModels,
+      source: snapshot.source,
+      detail: snapshot.detail || null,
+    });
+  } catch (error) {
+    err(res, 502, error.message);
+  }
+});
+
+app.get('/modeles', async (req, res) => {
   try {
     const snapshot = await getRuntimeSnapshot();
     const runtime = snapshot.runtime;

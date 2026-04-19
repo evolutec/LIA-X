@@ -1,0 +1,19 @@
+[2026-04-19T17:20:23.9558878+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-19T17:23:15.0789291+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-19T17:23:15.0798455+02:00] Found existingInstance id=12434 model=llama3.2-1b port=12434 active=True
+[2026-04-19T17:23:15.0927526+02:00] Promoting existing instance id=12434
+[2026-04-19T17:23:15.1068172+02:00] Save-State called for active_model=llama3.2-1b
+[2026-04-19T17:23:15.1495669+02:00] instance 12434 active=True model=llama3.2-1b
+[2026-04-19T17:25:07.9150429+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-19T17:25:07.9166477+02:00] Found existingInstance id=12434 model=llama3.2-1b port=12434 active=True
+[2026-04-19T17:25:07.9278366+02:00] Promoting existing instance id=12434
+[2026-04-19T17:25:07.9338790+02:00] Save-State called for active_model=llama3.2-1b
+[2026-04-19T17:25:07.9411775+02:00] instance 12434 active=True model=llama3.2-1b
+[2026-04-19T18:06:47.6288356+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-19T18:11:28.7003270+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-19T18:34:40.5125842+02:00] Start-LlamaProcess called for model=Qwopus3.5-9B-v3.Q4_K_M.gguf resolved=Qwopus3.5-9B-v3.Q4_K_M
+[2026-04-19T20:32:48.7295821+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-19T20:42:02.9654302+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-19T20:48:02.4206034+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-19T21:02:17.8636788+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-19T21:31:14.4107982+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b

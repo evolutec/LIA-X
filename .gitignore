@@ -2,4 +2,4 @@ models/
 runtime/
 model-manager/node_modules/
 model-manager/dist/
-
+claude/
