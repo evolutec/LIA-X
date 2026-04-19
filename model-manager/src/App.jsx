@@ -149,37 +149,49 @@ function App() {
   }
 
   function buildRows() {
-    const rows = new Map();
+    // On veut une ligne pour chaque fichier du dossier, enrichie si chargé
+    const fileMap = new Map();
     availableFiles.forEach((file) => {
       const name = String(file?.name || '');
       if (!name) return;
-      rows.set(name, {
+      fileMap.set(name, {
         name,
         filename: file.filename || `${name}.gguf`,
-        loaded: false,
-        active: false,
+        loaded: !!file.loaded,
+        active: name === activeModel,
         diskSize: file.size ?? null,
         modifiedAt: file.modified_at ?? null,
         vramSize: null,
         expiresAt: null,
       });
     });
+    // Pour chaque modèle chargé, fusionne les infos si déjà dans le dossier, sinon ajoute une ligne "orpheline"
     loadedModels.forEach((item) => {
       const name = String(item?.model || '');
       if (!name) return;
-      const existing = rows.get(name) || {};
-      rows.set(name, {
-        name,
-        filename: item.filename || existing.filename || `${name}.gguf`,
-        loaded: true,
-        active: name === activeModel,
-        diskSize: existing.diskSize ?? null,
-        modifiedAt: existing.modifiedAt ?? null,
-        vramSize: item.size_vram ?? null,
-        expiresAt: item.expires_at ?? null,
-      });
+      if (fileMap.has(name)) {
+        const base = fileMap.get(name);
+        fileMap.set(name, {
+          ...base,
+          loaded: true,
+          active: name === activeModel,
+          vramSize: item.size_vram ?? base.vramSize,
+          expiresAt: item.expires_at ?? base.expiresAt,
+        });
+      } else {
+        fileMap.set(name, {
+          name,
+          filename: item.filename || `${name}.gguf`,
+          loaded: true,
+          active: name === activeModel,
+          diskSize: null,
+          modifiedAt: null,
+          vramSize: item.size_vram ?? null,
+          expiresAt: item.expires_at ?? null,
+        });
+      }
     });
-    return sortRows(Array.from(rows.values()));
+    return sortRows(Array.from(fileMap.values()));
   }
 
   function updateStatus(message) {
@@ -243,6 +255,10 @@ function App() {
     }
   }
 
+  async function refreshModelsState(silent = false) {
+    await Promise.all([refreshLoadedModels(silent), refreshActiveModel(silent)]);
+  }
+
   function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -256,6 +272,7 @@ function App() {
       const result = await callback();
       log('action', actionType, modelName, result);
       await delay(250);
+      await refreshModelsState(true);
       await refreshAllModelState({ silent: true });
       updateStatus(`${modelName} : ${actionType} terminé.`);
       return result;
@@ -279,6 +296,11 @@ function App() {
     if (modelName === activeModel) {
       updateStatus(`${modelName} est déjà principal.`);
       return;
+    }
+    // Si le modèle n'est pas chargé, charge-le d'abord puis promeut
+    const row = buildRows().find((r) => r.name === modelName);
+    if (row && !row.loaded) {
+      await handleLoadFile(modelName);
     }
     return performAction(modelName, 'activation', async () => {
       const data = await apiFetch('/api/models/select', { method: 'POST', body: { model: modelName } });

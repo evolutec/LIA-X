@@ -291,6 +291,9 @@ function Get-ConsistentState {
         $state.instances = @($liveInstances)
 
         $activeInstance = $state.instances | Where-Object { $_.active } | Select-Object -First 1
+        if (-not $activeInstance -and $state.active_model) {
+            $activeInstance = $state.instances | Where-Object { $_.model -ieq $state.active_model -or $_.filename -ieq $state.active_filename } | Select-Object -First 1
+        }
         if (-not $activeInstance) {
             $activeInstance = $state.instances | Where-Object { $_.running } | Select-Object -First 1
         }
@@ -653,9 +656,11 @@ function Start-LlamaProcess([hashtable]$body) {
         New-Item -ItemType Directory -Path (Split-Path -Parent $debugLog) -Force | Out-Null
     }
     Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Start-LlamaProcess called for model=$($body.model) resolved=$($record.model)"
-    $existingInstance = $state.instances | Where-Object { $_.model -ieq $record.model -and $_.running } | Select-Object -First 1
+    $existingInstance = $state.instances | Where-Object {
+        ($_.model -ieq $record.model -or $_.filename -ieq $body.model -or $_.filename -ieq $record.model) -and $_.running
+    } | Select-Object -First 1
     if ($existingInstance) {
-        Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Found existingInstance id=$($existingInstance.id) model=$($existingInstance.model) port=$($existingInstance.port) active=$($existingInstance.active)"
+        Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Found existingInstance id=$($existingInstance.id) model=$($existingInstance.model) filename=$($existingInstance.filename) port=$($existingInstance.port) active=$($existingInstance.active)"
     }
     $activate = $true
     if ($body.ContainsKey('activate') -and $body.activate -eq $false) {
@@ -1105,6 +1110,12 @@ while ($true) {
                 $state = Get-ConsistentState
                 $existingInstance = $state.instances | Where-Object { $_.model -ieq $body.model -and $_.running } | Select-Object -First 1
                 if ($existingInstance) {
+                    if ($body.ContainsKey('activate') -and $body.activate -eq $false) {
+                        Write-Host "[controller] model déjà chargé, reste en mémoire sans promotion : $($body.model)"
+                        Write-Json $stream 200 (Get-RuntimeStatus)
+                        continue
+                    }
+
                     Write-Host "[controller] model déjà chargé, promotion en actif : $($body.model)"
                     $body.activate = $true
                     Start-LlamaProcess $body | Out-Null

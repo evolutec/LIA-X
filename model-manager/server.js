@@ -559,7 +559,7 @@ async function buildModelStartRequest(identifier) {
   const model = await resolveModel(identifier);
   const details = await getModelGgufDetails(model);
   const payload = {
-    model: model.filename,
+    model: model.name,
   };
 
   if (Number.isInteger(details.context_length) && details.context_length > 0) {
@@ -768,9 +768,12 @@ function resolveActiveModel(runtime) {
     return activeFlaggedInstance.model;
   }
 
-  const runningInstance = instances.find((instance) => Boolean(instance.running));
+  const runningInstances = instances.filter((instance) => Boolean(instance.running));
+  if (runningInstances.length === 1) {
+    return runningInstances[0].model;
+  }
 
-  return runningInstance?.model || '';
+  return '';
 }
 
 function isProjectInstance(instance) {
@@ -1548,16 +1551,16 @@ app.get('/api/models/available', async (req, res) => {
   try {
     const snapshot = await getRuntimeSnapshot();
     const runtime = snapshot.runtime;
-    const runningActiveModel = resolveActiveModel(runtime);
+    const loadedModels = buildLoadedModelList(runtime);
+    const loadedModelNames = new Set(loadedModels.map((item) => item.model));
     const models = await listLocalModels();
-    const files = models
-      .filter((item) => item.name !== runningActiveModel)
-      .map((item) => ({
-        name: item.name,
-        filename: item.filename,
-        size: item.size,
-        modified_at: item.modified_at,
-      }));
+    const files = models.map((item) => ({
+      name: item.name,
+      filename: item.filename,
+      size: item.size,
+      modified_at: item.modified_at,
+      loaded: loadedModelNames.has(item.name),
+    }));
     res.json({ files, source: snapshot.source });
   } catch (error) {
     err(res, 502, error.message);
@@ -1704,6 +1707,7 @@ app.post('/api/models/load', async (req, res) => {
       body: JSON.stringify(payload),
       timeout: CONTROLLER_START_TIMEOUT_MS,
     });
+    invalidateStatusCache();
     res.json({
       model: startRequest.model.name,
       status: 'loaded',
@@ -1718,18 +1722,23 @@ app.post('/api/models/load', async (req, res) => {
 
 app.post('/api/models/select', async (req, res) => {
   try {
-    const startRequest = await buildModelStartRequest(req.body?.model);
-    const payload = { ...startRequest.payload, activate: true };
-    console.log('[model-manager] /api/models/select', { model: startRequest.model.name, payload });
+    const modelName = String(req.body?.model || '').trim();
+    if (!modelName) {
+      return err(res, 400, 'model requis');
+    }
+
+    const payload = { model: modelName, activate: true };
+    console.log('[model-manager] /api/models/select', { model: modelName, payload });
     await controllerRequest('/start', {
       method: 'POST',
       body: JSON.stringify(payload),
       timeout: CONTROLLER_START_TIMEOUT_MS,
     });
+    invalidateStatusCache();
     res.json({
-      active_model: startRequest.model.name,
-      context_applied: startRequest.payload.context || null,
-      architecture: startRequest.details.architecture || null,
+      active_model: modelName,
+      context_applied: null,
+      architecture: null,
     });
   } catch (error) {
     err(res, 502, error.message);
@@ -1744,8 +1753,8 @@ app.post('/api/models/unload', async (req, res) => {
     }
 
     console.log('[model-manager] /api/models/unload', { model: modelName });
-    const runtime = await getRuntimeStatus();
     await controllerRequest('/stop', { method: 'POST', body: JSON.stringify({ model: modelName }) });
+    invalidateStatusCache();
     res.json({ model: modelName, status: 'unloaded' });
   } catch (error) {
     err(res, 502, error.message);
