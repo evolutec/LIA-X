@@ -448,27 +448,6 @@ function App() {
           </div>
         </section>
 
-        <div className="card controller-status-card">
-          <div className="card-title">🔌 Contrôleur Windows</div>
-          <div className="controller-status-grid">
-            <div>
-              <div className="summary-title">Statut</div>
-              <div className={`badge ${controllerHealth.controller_ok ? 'badge-success' : 'badge-error'}`}>{controllerHealth.controller_ok ? 'Disponible' : 'Indisponible'}</div>
-            </div>
-            <div>
-              <div className="summary-title">Détail</div>
-              <div>{controllerHealth.controller_ok ? 'Le contrôleur répond correctement.' : controllerHealth.detail || 'Le contrôleur ne répond pas.'}</div>
-            </div>
-            <div>
-              <div className="summary-title">Action</div>
-              <button className="btn btn-primary" onClick={handleRestartController} disabled={loading || pendingAction || controllerHealth.controller_ok || controllerLoading}>
-                {controllerLoading || (pendingAction?.model === 'controller' ? 'Redémarrage…' : 'Relancer le contrôleur Windows')}
-              </button>
-            </div>
-          </div>
-          {!controllerHealth.controller_ok && <div className="placeholder-block">Si le contrôleur Windows est arrêté, ce bouton tente de le relancer via le service de relance local. Assure-toi que le service Windows est démarré sur le port 13580.</div>}
-        </div>
-
         <div className="card download-card">
           <div className="card-title">⬇️ Importer un modèle GGUF</div>
           <div className="download-grid">
@@ -555,9 +534,15 @@ function App() {
             </button>
           ))}
         </nav>
-        <div className="backend-badge">
-          <span className={`dot ${version ? '' : 'offline'}`}></span>
-          <span>{version ? `Runtime prêt · ${version.version || 'llama.cpp'}` : 'Runtime hors ligne'}</span>
+        <div className="backend-badges">
+          <div className="backend-badge">
+            <span className={`dot ${version ? 'badge-success' : 'offline'}`}></span>
+            <span>{version ? `Runtime prêt · ${version.version || 'llama.cpp'}` : 'Runtime hors ligne'}</span>
+          </div>
+          <div className="backend-badge">
+            <span className={`dot ${controllerHealth.controller_ok ? 'badge-success' : 'badge-error'}`}></span>
+            <span>{controllerHealth.controller_ok ? 'Contrôleur OK' : 'Contrôleur indisponible'}</span>
+          </div>
         </div>
       </header>
 
