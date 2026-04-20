@@ -314,14 +314,32 @@ body {
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  background: var(--success);
+  background: #22c55e;
   flex-shrink: 0;
+  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.12), 0 0 12px rgba(34, 197, 94, 0.6);
+  animation: pulse-green 2s infinite ease-in-out;
 }
 
-.dot.offline { background: var(--danger); }
+.dot.offline { 
+  background: #ef4444; 
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12), 0 0 12px rgba(239, 68, 68, 0.6);
+  animation: pulse-red 2s infinite ease-in-out;
+}
+
+@keyframes pulse-green {
+  0% { box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.12), 0 0 12px rgba(34, 197, 94, 0.6); }
+  50% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.2), 0 0 16px rgba(34, 197, 94, 0.85); }
+  100% { box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.12), 0 0 12px rgba(34, 197, 94, 0.6); }
+}
+
+@keyframes pulse-red {
+  0% { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12), 0 0 12px rgba(239, 68, 68, 0.6); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.2), 0 0 16px rgba(239, 68, 68, 0.85); }
+  100% { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12), 0 0 12px rgba(239, 68, 68, 0.6); }
+}
 
 .app-content {
   width: min(1500px, 100%);
@@ -796,7 +814,7 @@ input[type="text"]:focus {
   width: fit-content;
 }
 
-.badge-success { background: var(--success-bg); color: var(--success); }
+.badge-success { color: var(--success); }
 
 .badge-loaded {
   background: rgba(45, 212, 191, 0.14);

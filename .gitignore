@@ -3,3 +3,8 @@ runtime/
 model-manager/node_modules/
 model-manager/dist/
 claude/
+Analyses/
+
+# Ignore runtime log files
+logs/
+.cortex/

@@ -331,27 +331,37 @@ function Get-ConsistentState {
             $liveById[[string]$live.id] = $live
         }
 
-        $mergedInstances = @()
-        foreach ($instance in $state.instances) {
-            if ($instance -isnot [hashtable] -and $instance -isnot [System.Collections.IDictionary]) {
-                continue
-            }
-            $id = [string]$instance.id
-            if ($liveById.ContainsKey($id)) {
-                $live = $liveById[$id]
-                # Préserver les drapeaux souhaités de l'état persistant.
-                $live.active = [bool]$instance.active
-                $live.running = [bool]$instance.running
-                $mergedInstances += $live
-                $liveById.Remove($id)
-            } else {
-                $mergedInstances += $instance
-            }
+    $seenIds = @{}
+    $mergedInstances = @()
+    foreach ($instance in $state.instances) {
+        if ($instance -isnot [hashtable] -and $instance -isnot [System.Collections.IDictionary]) {
+            continue
         }
-
-        foreach ($live in $liveById.Values) {
+        $id = [string]$instance.id
+        if ($seenIds.ContainsKey($id)) {
+            continue
+        }
+        if ($liveById.ContainsKey($id)) {
+            $live = $liveById[$id]
+            # Préserver les drapeaux souhaités de l'état persistant.
+            $live.active = [bool]$instance.active
+            $live.running = [bool]$instance.running
             $mergedInstances += $live
+            $liveById.Remove($id)
+            $seenIds[$id] = $true
+        } else {
+            $mergedInstances += $instance
+            $seenIds[$id] = $true
         }
+    }
+
+    foreach ($live in $liveById.Values) {
+        $id = [string]$live.id
+        if (-not $seenIds.ContainsKey($id)) {
+            $mergedInstances += $live
+            $seenIds[$id] = $true
+        }
+    }
 
         $state.instances = $mergedInstances
 

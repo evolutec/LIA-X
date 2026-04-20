@@ -135,8 +135,8 @@ function Install-Or-Update-LiaService {
                     try {
                         $tcp = Get-NetTCPConnection -LocalPort 13579 -State Listen -ErrorAction Stop
                         if ($tcp) {
-                            $pid = $tcp.OwningProcess
-                            $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+                            $processId = $tcp.OwningProcess
+                            $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
                             if ($proc -and $proc.ProcessName -match 'pwsh') {
                                 $portUsed = $true
                             }
@@ -154,12 +154,12 @@ function Install-Or-Update-LiaService {
                             # Vérifier à nouveau si le port est écouté
                             $tcp2 = $null
                             try {
-                                $tcp2 = Get-NetTCPConnection -LocalPort 13579 -State Listen -ErrorAction Stop
-                            } catch {}
-                            if ($tcp2) {
-                                $pid2 = $tcp2.OwningProcess
-                                $proc2 = Get-Process -Id $pid2 -ErrorAction SilentlyContinue
-                                if ($proc2 -and $proc2.ProcessName -match 'pwsh') {
+                            $tcp2 = Get-NetTCPConnection -LocalPort 13579 -State Listen -ErrorAction Stop
+                        } catch {}
+                        if ($tcp2) {
+                            $processId2 = $tcp2.OwningProcess
+                            $proc2 = Get-Process -Id $processId2 -ErrorAction SilentlyContinue
+                            if ($proc2 -and $proc2.ProcessName -match 'pwsh') {
                                     Write-Host "Redémarrage réussi, le service écoute maintenant sur le port 13579."
                                     $skipInstall = $true
                                     $installNeeded = $false
@@ -172,7 +172,29 @@ function Install-Or-Update-LiaService {
                         }
                     }
                 } else {
-                    Write-Host "Service $ServiceName configuré mais pas en cours d'exécution. Réinstallation ou redémarrage."
+                    Write-Host "Service $ServiceName configuré mais pas en cours d'exécution. Tentative de démarrage..."
+                    try {
+                        Start-Service -Name $ServiceName -ErrorAction Stop
+                        Start-Sleep -Seconds 3
+                        # Vérifier si le port est écouté
+                        $tcp2 = $null
+                        try {
+                            $tcp2 = Get-NetTCPConnection -LocalPort 13579 -State Listen -ErrorAction Stop
+                        } catch {}
+                        if ($tcp2) {
+                            $processId2 = $tcp2.OwningProcess
+                            $proc2 = Get-Process -Id $processId2 -ErrorAction SilentlyContinue
+                            if ($proc2 -and $proc2.ProcessName -match 'pwsh') {
+                                Write-Host "Démarrage réussi, le service écoute maintenant sur le port 13579."
+                                $skipInstall = $true
+                                $installNeeded = $false
+                                return
+                            }
+                        }
+                        Write-Host "Après démarrage, le service n'écoute toujours pas sur le port 13579. Réinstallation nécessaire."
+                    } catch {
+                        Write-Warning "Démarrage du service $ServiceName a échoué : $($_.Exception.Message). Réinstallation nécessaire."
+                    }
                 }
             } else {
                 Write-Host "Reconfiguration du service $ServiceName..."
