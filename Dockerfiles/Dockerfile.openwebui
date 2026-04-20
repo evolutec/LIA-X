@@ -5,8 +5,8 @@ ENV WEBUI_AUTH=False
 ENV WEBUI_SECRET_KEY=lia-local-secret
 ENV ENABLE_OLLAMA_API=false
 ENV ENABLE_OPENAI_API=true
-ENV OPENAI_API_BASE_URL=http://model-loader:3002
-ENV OPENAI_API_BASE_URLS=http://model-loader:3002
+ENV OPENAI_API_BASE_URL=http://model-loader:3002/v1
+ENV OPENAI_API_BASE_URLS=http://model-loader:3002/v1
 ENV OPENAI_API_KEYS=not-used
 ENV OPENAI_API_KEY=not-used
 

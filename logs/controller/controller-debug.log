@@ -83,3 +83,12 @@
 [2026-04-19T23:44:21.6538554+02:00] instance 12436 active=True model=llama3.2-1b
 [2026-04-19T23:44:21.6648083+02:00] instance 12434 active=False model=qwen2.5-coder-3b
 [2026-04-19T23:46:48.5509164+02:00] Start-LlamaProcess called for model=llama3.2-1b resolved=llama3.2-1b
+[2026-04-20T07:21:04.1446913+02:00] Start-LlamaProcess called for model=llama3.2-1b resolved=llama3.2-1b
+[2026-04-20T07:31:20.5322009+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-20T07:42:29.6901785+02:00] Start-LlamaProcess called for model=qwen2.5-coder-3b resolved=qwen2.5-coder-3b
+[2026-04-20T07:45:17.7202637+02:00] Start-LlamaProcess called for model=qwen2.5-coder-3b resolved=qwen2.5-coder-3b
+[2026-04-20T07:45:17.7425858+02:00] Found existingInstance id=12434 model=qwen2.5-coder-3b filename=qwen2.5-coder-3b.gguf port=12434 active=False
+[2026-04-20T07:45:17.7687406+02:00] Promoting existing instance id=12434
+[2026-04-20T07:45:17.7867545+02:00] Save-State called for active_model=qwen2.5-coder-3b
+[2026-04-20T07:45:17.8229295+02:00] instance 12435 active=False model=llama3.2-1b
+[2026-04-20T07:45:17.8541771+02:00] instance 12434 active=True model=qwen2.5-coder-3b

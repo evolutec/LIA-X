@@ -770,6 +770,10 @@ function Start-OpenWebUiContainer {
     }
 }
 
+
+# S'assure que le réseau Docker existe avant tout lancement
+Ensure-DockerNetwork $dockerNetwork
+
 Ensure-Directory $runtimeDir
 Ensure-Directory $modelsDir
 Normalize-RuntimeConfig

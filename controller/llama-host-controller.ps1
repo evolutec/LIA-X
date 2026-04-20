@@ -67,7 +67,43 @@ if (-not $StatePath) {
     $StatePath = Join-Path (Get-RepoRoot) "runtime\host-runtime-state.json"
 }
 
+
 Initialize-LogsDirectories
+
+# --- Relance automatique des modèles actifs au démarrage ---
+try {
+    $state = Get-State
+    $config = Get-Config
+    foreach ($instance in $state.instances) {
+        # Si l'instance était marquée running mais n'a pas de process actif, on relance
+        $shouldRestart = $instance.running -and (-not $instance.pid -or -not (Get-Process -Id $instance.pid -ErrorAction SilentlyContinue))
+        if ($shouldRestart -and $instance.model) {
+            Write-Host "[Controller] Relance auto du modèle $($instance.model) sur port $($instance.port)"
+            try {
+                $body = @{ model = $instance.model }
+                if ($instance.context) { $body.context = $instance.context }
+                if ($instance.gpu_layers) { $body.gpu_layers = $instance.gpu_layers }
+                # On n'active qu'un seul modèle (le principal), les autres sont relancés mais non actifs
+                $body.activate = $false
+                Start-LlamaProcess $body | Out-Null
+            } catch {
+                Write-Host "[Controller] Echec relance auto modèle $($instance.model) : $($_.Exception.Message)"
+            }
+        }
+    }
+    # Promotion du modèle principal si défini
+    if ($state.active_model) {
+        try {
+            $body = @{ model = $state.active_model; activate = $true }
+            Start-LlamaProcess $body | Out-Null
+            Write-Host "[Controller] Modèle principal promu : $($state.active_model)"
+        } catch {
+            Write-Host "[Controller] Echec promotion modèle principal : $($_.Exception.Message)"
+        }
+    }
+} catch {
+    Write-Host "[Controller] Erreur relance auto modèles : $($_.Exception.Message)"
+}
 
 function ConvertTo-Hashtable($value) {
     if ($null -eq $value) {
