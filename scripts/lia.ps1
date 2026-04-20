@@ -13,12 +13,13 @@ $runtimeConfigPath = Join-Path $runtimeDir "host-runtime-config.json"
 $runtimeStatePath  = Join-Path $runtimeDir "host-runtime-state.json"
 $controllerPort    = 13579
 $llamaPort         = 12434
-$loaderPort        = 3002
-$anythingPort      = 3001
-$openWebUiPort     = 3003
-$libreChatPort     = 3004
-$dockerNetwork     = "lia-network"
-$modelLoaderImage  = "lia-model-loader:latest"
+$loaderPort           = 3002
+$anythingPort         = 3001
+$openWebUiPort        = 3003
+$libreChatPort        = 3004
+$libreChatInternalPort = 3080
+$dockerNetwork        = "lia-network"
+$modelLoaderImage     = "lia-model-loader:latest"
 $anythingllmImage  = "mintplexlabs/anythingllm:latest"
 $openWebUiImage    = "ghcr.io/open-webui/open-webui:main"
 $libreChatImage    = "ghcr.io/danny-avila/librechat:latest"
@@ -612,7 +613,7 @@ function Start-LibreChatContainer {
         'run', '-d',
         '--name', 'librechat',
         '--network', $dockerNetwork,
-        '-p', ("{0}:3080" -f $libreChatPort),
+        '-p', ("{0}:{1}" -f $libreChatPort, $libreChatInternalPort),
         '--add-host', 'host.docker.internal:host-gateway',
         '-v', 'librechat-data:/app/api/data',
         '--restart', 'unless-stopped',

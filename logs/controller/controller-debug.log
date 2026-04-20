@@ -92,3 +92,5 @@
 [2026-04-20T07:45:17.7867545+02:00] Save-State called for active_model=qwen2.5-coder-3b
 [2026-04-20T07:45:17.8229295+02:00] instance 12435 active=False model=llama3.2-1b
 [2026-04-20T07:45:17.8541771+02:00] instance 12434 active=True model=qwen2.5-coder-3b
+[2026-04-20T11:32:31.8777757+02:00] Start-LlamaProcess called for model=llama3.2-1b.gguf resolved=llama3.2-1b
+[2026-04-20T12:03:25.5543334+02:00] Start-LlamaProcess called for model=llama3.2-1b resolved=llama3.2-1b

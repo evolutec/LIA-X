@@ -409,6 +409,38 @@ function Get-ConsistentState {
     return Get-State
 }
 
+function Repair-DeadInstances([hashtable]$state) {
+    if (-not $state) {
+        return
+    }
+
+    foreach ($instance in $state.instances) {
+        if (-not $instance.running -or -not $instance.model) {
+            continue
+        }
+
+        $process = $null
+        if ($instance.pid) {
+            $process = Get-Process -Id ([int]$instance.pid) -ErrorAction SilentlyContinue
+        }
+
+        if ($process -and -not $process.HasExited) {
+            continue
+        }
+
+        Write-Host "[Controller] Processus manquant ou arrêté détecté pour $($instance.model) (port $($instance.port)). Redémarrage..."
+        try {
+            $body = @{ model = $instance.model }
+            if ($instance.context) { $body.context = [int]$instance.context }
+            if ($instance.gpu_layers) { $body.gpu_layers = [int]$instance.gpu_layers }
+            if ($instance.active) { $body.activate = $true } else { $body.activate = $false }
+            Start-LlamaProcess $body | Out-Null
+        } catch {
+            Write-Host "[Controller] Échec redémarrage du modèle $($instance.model) : $($_.Exception.Message)"
+        }
+    }
+}
+
 function Resolve-ModelRecord([string]$identifier) {
     $config = Get-Config
     $modelsDir = [string]$config.models_dir
@@ -1029,6 +1061,8 @@ $watchdogTimer.AutoReset = $true
 Register-ObjectEvent -InputObject $watchdogTimer -EventName Elapsed -Action {
     try {
         Write-Host "[Watchdog] Exécution vérification état..."
+        $state = Get-State
+        Repair-DeadInstances -state $state
         $state = Get-ConsistentState
         $idleTimeoutMinutes = 30
 

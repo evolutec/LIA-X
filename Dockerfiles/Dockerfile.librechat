@@ -2,6 +2,7 @@ FROM ghcr.io/danny-avila/librechat:latest
 
 # Configuration LIA préintégrée
 COPY Dockerfiles/librechat.yaml /app/librechat.yaml
+ENV CONFIG_PATH=/app/librechat.yaml
 
 # Variables d'environnement optimisées pour LIA
 ENV MONGO_URI=mongodb://librechat-mongo:27017/LibreChat
@@ -12,13 +13,26 @@ ENV ALLOW_REGISTRATION=true
 ENV ALLOW_SOCIAL_LOGIN=false
 ENV OPENAI_API_KEY=not-used
 ENV OPENAI_BASE_URL=http://model-loader:3002/v1
+ENV OPENAI_API_BASE_URL=http://model-loader:3002/v1
+ENV OPENAI_API_BASE_URLS=http://model-loader:3002/v1
+ENV OPENAI_REVERSE_PROXY=http://model-loader:3002/v1
 ENV OPENAI_MODELS_FETCH=true
+ENV OPENAI_MODELS=lia-local
 ENV AUTO_FETCH_MODELS=true
 ENV CUSTOM_MODELS=[{"user":"system","name":"lia-local","displayName":"LIA Local LLM","modelName":"lia-local","icon":"llama"}]
 ENV ENABLE_OPENAI=true
 ENV OPENAI_PROXY_ENABLED=true
 ENV DEBUG_OPENAI=true
 ENV DISABLE_TELEMETRY=true
+
+
+# Patch d'init pour forcer l'affichage du modèle local
+USER root
+COPY Dockerfiles/entrypoint.librechat.sh /entrypoint.librechat.sh
+RUN chmod +x /entrypoint.librechat.sh
+USER node
+ENTRYPOINT ["/entrypoint.librechat.sh"]
+CMD ["npm", "run", "backend"]
 
 # Health check intégré
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
