@@ -324,7 +324,36 @@ function Get-ConsistentState {
 
     $liveInstances = Get-LiveInstances (Get-Config)
     if ($liveInstances.Count -gt 0) {
-        $state.instances = @($liveInstances)
+        # Conserver les instances mortes qui étaient censées rester actives,
+        # et fusionner les instances vivantes pour ne pas perdre l'état désiré.
+        $liveById = @{}
+        foreach ($live in $liveInstances) {
+            $liveById[[string]$live.id] = $live
+        }
+
+        $mergedInstances = @()
+        foreach ($instance in $state.instances) {
+            if ($instance -isnot [hashtable] -and $instance -isnot [System.Collections.IDictionary]) {
+                continue
+            }
+            $id = [string]$instance.id
+            if ($liveById.ContainsKey($id)) {
+                $live = $liveById[$id]
+                # Préserver les drapeaux souhaités de l'état persistant.
+                $live.active = [bool]$instance.active
+                $live.running = [bool]$instance.running
+                $mergedInstances += $live
+                $liveById.Remove($id)
+            } else {
+                $mergedInstances += $instance
+            }
+        }
+
+        foreach ($live in $liveById.Values) {
+            $mergedInstances += $live
+        }
+
+        $state.instances = $mergedInstances
 
         $activeInstance = $state.instances | Where-Object { $_.active } | Select-Object -First 1
         if (-not $activeInstance -and $state.active_model) {
@@ -369,9 +398,13 @@ function Get-ConsistentState {
                     continue
                 }
 
-                $instance.running = $false
+                # Ne pas modifier l'état désiré si l'instance était censée être running.
+                # On conserve running=true pour pouvoir relancer le modèle à la sortie de veille ou au redémarrage.
                 $instance.pid = $null
                 $instance.started_at = ""
+                if (-not $instance.running) {
+                    $instance.started_at = ""
+                }
                 $changed = $true
             }
         }
@@ -1093,6 +1126,24 @@ Register-ObjectEvent -InputObject $watchdogTimer -EventName Elapsed -Action {
     }
 } | Out-Null
 $watchdogTimer.Start()
+
+try {
+    Register-ObjectEvent -InputObject [Microsoft.Win32.SystemEvents] -EventName PowerModeChanged -Action {
+        try {
+            $mode = $Event.SourceEventArgs.Mode
+            if ($mode -eq [Microsoft.Win32.PowerModes]::Resume) {
+                Write-Host "[Controller] Sortie de veille détectée, restauration des instances désirées..."
+                $state = Get-State
+                Repair-DeadInstances -state $state
+                Get-ConsistentState | Out-Null
+            }
+        } catch {
+            Write-Host "[Controller] Erreur lors de la gestion de la sortie de veille : $($_.Exception.Message)"
+        }
+    } | Out-Null
+} catch {
+    Write-Host "[Controller] Impossible d'enregistrer l'événement PowerModeChanged : $($_.Exception.Message)"
+}
 
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $Port)
 try {
