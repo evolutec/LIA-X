@@ -3,7 +3,7 @@ FROM mintplexlabs/anythingllm:latest
 # Configuration LIA préintégrée
 ENV STORAGE_DIR=/app/server/storage
 ENV LLM_PROVIDER=generic-openai
-ENV GENERIC_OPEN_AI_BASE_PATH=http://model-loader:3002/v1
+ENV GENERIC_OPEN_AI_BASE_PATH=http://host.docker.internal:3002/v1
 ENV GENERIC_OPEN_AI_MODEL_PREF=lia-local
 ENV GENERIC_OPEN_AI_API_KEY=not-used
 ENV GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=8192
