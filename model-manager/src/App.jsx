@@ -60,6 +60,7 @@ function App() {
     const init = {
       method: options.method || 'GET',
       headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      cache: 'no-store',
       ...options,
     };
     if (options.body !== undefined && typeof options.body !== 'string') {
@@ -291,7 +292,12 @@ function App() {
     } catch (err) {
       console.error('[App] action error', actionType, modelName, err);
       updateStatus(`${modelName} : échec ${actionType} — ${err.message}`);
-      throw err;
+      try {
+        await refreshAllModelState({ silent: true });
+      } catch (refreshErr) {
+        console.warn('[App] post-error refresh failed', refreshErr);
+      }
+      return null;
     } finally {
       setPendingAction(null);
       setLoading(false);

@@ -28,6 +28,123 @@ function Confirm-Command([string]$cmd) {
     [bool](Get-Command $cmd -ErrorAction SilentlyContinue)
 }
 
+function Test-IsAdministrator {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+function Get-PreferredPowerShellExecutable {
+    $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($pwsh) {
+        return $pwsh.Source
+    }
+    return (Get-Command powershell.exe -ErrorAction Stop).Source
+}
+
+function Get-NssmExecutablePath {
+    $cmd = Get-Command nssm.exe -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    $candidates = @(
+        (Join-Path ${env:ProgramFiles} 'nssm\win64\nssm.exe'),
+        (Join-Path ${env:ProgramFiles} 'nssm\win32\nssm.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'nssm\win64\nssm.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'nssm\win32\nssm.exe')
+    )
+    if ($env:ChocolateyInstall) {
+        $candidates += (Join-Path $env:ChocolateyInstall 'bin\nssm.exe')
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Ensure-NssmAvailable {
+    $existing = Get-NssmExecutablePath
+    if ($existing) {
+        OK "NSSM detecte: $existing"
+        return $true
+    }
+
+    if (-not (Confirm-Command "winget")) {
+        WARN "NSSM introuvable et winget indisponible."
+        return $false
+    }
+
+    INFO "NSSM introuvable. Tentative d'installation automatique..."
+    $candidateIds = @('NSSM.NSSM', 'nssm.nssm', 'NSSM')
+    foreach ($id in $candidateIds) {
+        try {
+            winget install --id $id -e --silent --accept-source-agreements --accept-package-agreements | Out-Null
+        } catch {}
+
+        $existing = Get-NssmExecutablePath
+        if ($existing) {
+            OK "NSSM installe: $existing"
+            return $true
+        }
+    }
+
+    WARN "Installation automatique de NSSM impossible."
+    return $false
+}
+
+function Ensure-ControllerServiceInstalled {
+    if (Test-IsAdministrator) {
+        if (-not (Ensure-NssmAvailable)) {
+            FAIL "NSSM est requis pour installer le service LIA Controller."
+        }
+        & $controllerServiceHelper -RootDir $rootDir
+        return
+    }
+
+    INFO "Installation du service LIA Controller: elevation UAC requise."
+    $pwshExe = Get-PreferredPowerShellExecutable
+    $escapedRoot = $rootDir.Replace("'", "''")
+    $escapedHelper = $controllerServiceHelper.Replace("'", "''")
+    $elevatedCommand = @"
+`$ErrorActionPreference = 'Stop'
+`$nssm = Get-Command nssm.exe -ErrorAction SilentlyContinue
+if (-not `$nssm) {
+  `$ids = @('NSSM.NSSM', 'nssm.nssm', 'NSSM')
+  foreach (`$id in `$ids) {
+    try {
+      winget install --id `$id -e --silent --accept-source-agreements --accept-package-agreements | Out-Null
+    } catch {}
+    `$nssm = Get-Command nssm.exe -ErrorAction SilentlyContinue
+    if (`$nssm) { break }
+  }
+}
+if (-not `$nssm) { throw 'NSSM introuvable apres tentative d installation.' }
+& '$escapedHelper' -RootDir '$escapedRoot'
+"@
+
+    try {
+        $proc = Start-Process -FilePath $pwshExe -Verb RunAs -Wait -PassThru -ArgumentList @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-Command', $elevatedCommand
+        )
+        if ($proc.ExitCode -ne 0) {
+            FAIL "Installation du service annulee ou echouee (exit code $($proc.ExitCode))."
+        }
+    } catch {
+        FAIL "Impossible de lancer l'installation service avec elevation UAC: $($_.Exception.Message)"
+    }
+}
+
 function Step([string]$n, [string]$msg) {
     Write-Host "`n── [$n] $msg" -ForegroundColor Cyan
 }
@@ -652,6 +769,9 @@ function Start-ModelLoaderContainer {
         Remove-Container 'model-loader'
     }
 
+    $modelMountArg = "type=bind,source=$modelsDir,target=/models"
+    $runtimeMountArg = "type=bind,source=$runtimeDir,target=/runtime,readonly"
+
     $args = @(
         'run', '-d',
         '--name', 'model-loader',
@@ -663,8 +783,8 @@ function Start-ModelLoaderContainer {
         '-e', 'MODEL_STORAGE_DIR=/models',
         '-e', 'RUNTIME_STATE_PATH=/runtime/host-runtime-state.json',
         '-e', 'PROXY_MODEL_ID=lia-local',
-        '-v', ("{0}:/models" -f $modelsDir),
-        '-v', ("{0}:/runtime:ro" -f $runtimeDir),
+        '--mount', $modelMountArg,
+        '--mount', $runtimeMountArg,
         '--restart', 'unless-stopped',
         '--health-cmd', 'curl -fsS http://localhost:3002/health > /dev/null || exit 1',
         '--health-interval', '15s',
@@ -682,6 +802,30 @@ function Start-ModelLoaderContainer {
 
     if (-not (Wait-HttpOk -url "http://127.0.0.1:$loaderPort/health" -maxTries 30 -delay 2)) {
         FAIL "Le Model Loader ne répond pas."
+    }
+
+    $inspectionRaw = docker inspect model-loader 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        FAIL "Impossible d'inspecter le conteneur model-loader après démarrage."
+    }
+
+    $inspection = $inspectionRaw | ConvertFrom-Json
+    $mounts = @($inspection[0].Mounts)
+    $modelsDirResolved = (Resolve-Path -LiteralPath $modelsDir).Path
+
+    $modelsMountOk = $false
+    foreach ($mount in $mounts) {
+        if ($mount.Destination -ne '/models') { continue }
+        if ($mount.Type -ne 'bind') { continue }
+        $source = [string]$mount.Source
+        if ($source -eq $modelsDirResolved -or $source -eq $modelsDir) {
+            $modelsMountOk = $true
+            break
+        }
+    }
+
+    if (-not $modelsMountOk) {
+        FAIL "Mount /models invalide: bind mount vers '$modelsDirResolved' absent."
     }
 
     OK "Model Loader prêt sur http://localhost:$loaderPort"
@@ -824,7 +968,8 @@ if ($buildResult.source -eq 'release') {
 }
 
 Step "4/6" "Controleur hote et runtime"
-& $controllerServiceHelper -RootDir $rootDir
+Ensure-ControllerServiceInstalled
+Ensure-ControllerRunning
 Start-DefaultRuntime
 
 Step "5/6" "Conteneurs applicatifs"

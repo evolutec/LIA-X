@@ -871,8 +871,10 @@ Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Start-LlamaProces
     Save-State $state
 
     # Attendre que le serveur soit prêt et réponde correctement
+    # Certains modèles (ex: contexte très large) peuvent prendre >15s à warmup.
+    # On élargit la fenêtre pour éviter les faux positifs "timeout" alors que le chargement continue.
     $serverReady = $false
-    for ($i = 0; $i -lt 25; $i++) {
+    for ($i = 0; $i -lt 60; $i++) {
         try {
             $response = Invoke-RestMethod -Uri "http://127.0.0.1:$port/v1/models" -Method Get -TimeoutSec 2 -ErrorAction Stop
             if ($response.data -or $response.models) {

@@ -44,8 +44,6 @@ EXPOSE 3002
 EXPOSE 13579
 EXPOSE 12434
 
-VOLUME [ "/models" ]
-
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:3002/health > /dev/null || exit 1
 

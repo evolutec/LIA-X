@@ -1426,3 +1426,192 @@ input[type="text"]:focus {
     font-size: 1.4rem;
   }
 }
+
+/* Loader redesign aligned with App visual language */
+.loader-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background:
+    radial-gradient(circle at 24% 18%, rgba(45, 212, 191, 0.16), transparent 38%),
+    radial-gradient(circle at 78% 4%, rgba(59, 130, 246, 0.14), transparent 32%),
+    rgba(3, 10, 20, 0.78);
+  backdrop-filter: blur(14px);
+}
+
+.loader-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.loader-panel {
+  width: min(520px, 100%);
+  position: relative;
+  overflow: hidden;
+  border-radius: 28px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background:
+    radial-gradient(circle at top left, rgba(45, 212, 191, 0.14), transparent 36%),
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.1), transparent 42%),
+    linear-gradient(180deg, rgba(12, 20, 36, 0.98), rgba(7, 14, 28, 0.98));
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.56), 0 0 0 1px rgba(45, 212, 191, 0.1);
+  padding: 28px 28px 22px;
+}
+
+.loader-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), transparent 35%, transparent 72%, rgba(45, 212, 191, 0.08));
+}
+
+.loader-kicker,
+.loader-title,
+.loader-subtitle,
+.loader-visual,
+.loader-progress-track,
+.loader-meta {
+  position: relative;
+  z-index: 1;
+}
+
+.loader-kicker {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-weight: 800;
+  color: #2dd4bf;
+  margin-bottom: 10px;
+}
+
+.loader-title {
+  font-size: clamp(1.7rem, 4vw, 2.4rem);
+  line-height: 1.1;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.loader-subtitle {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.loader-visual {
+  width: 140px;
+  height: 140px;
+  margin: 24px auto 20px;
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.loader-orbit {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(45, 212, 191, 0.18);
+  border-top-color: rgba(45, 212, 191, 0.9);
+  border-right-color: rgba(59, 130, 246, 0.75);
+  animation: loader-spin 1.2s linear infinite;
+  box-shadow: 0 0 20px rgba(45, 212, 191, 0.16);
+}
+
+.loader-core {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(255, 255, 255, 0.22), transparent 45%),
+    linear-gradient(150deg, rgba(45, 212, 191, 0.28), rgba(59, 130, 246, 0.2));
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.14), 0 0 24px rgba(45, 212, 191, 0.2);
+  animation: loader-breathe 1.8s ease-in-out infinite;
+}
+
+.loader-core-text {
+  position: absolute;
+  font-size: 0.84rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #d9fbff;
+  text-transform: uppercase;
+}
+
+.loader-progress-track {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.2);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.loader-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2dd4bf 0%, #0ea5e9 100%);
+  box-shadow: 0 0 20px rgba(14, 165, 233, 0.4);
+  transition: width 0.35s ease;
+}
+
+.loader-progress-track.indeterminate .loader-progress-fill {
+  width: 42%;
+  animation: loader-slide 1.5s ease-in-out infinite;
+}
+
+.loader-meta {
+  margin-top: 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+@keyframes loader-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes loader-breathe {
+  0%, 100% { transform: scale(0.95); box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.14), 0 0 20px rgba(45, 212, 191, 0.16); }
+  50% { transform: scale(1.03); box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.18), 0 0 30px rgba(45, 212, 191, 0.28); }
+}
+
+@keyframes loader-slide {
+  0% { transform: translateX(-85%); }
+  50% { transform: translateX(110%); }
+  100% { transform: translateX(280%); }
+}
+
+@media (max-width: 600px) {
+  .loader-overlay {
+    padding: 14px;
+  }
+
+  .loader-panel {
+    padding: 22px 16px 18px;
+    border-radius: 22px;
+  }
+
+  .loader-visual {
+    width: 114px;
+    height: 114px;
+    margin-top: 20px;
+    margin-bottom: 16px;
+  }
+
+  .loader-core {
+    width: 64px;
+    height: 64px;
+  }
+
+  .loader-meta {
+    font-size: 0.78rem;
+  }
+}

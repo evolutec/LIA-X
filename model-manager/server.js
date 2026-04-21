@@ -78,6 +78,12 @@ function invalidateStatusCache() {
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
 
 function logRequest(method, path, payload) {
   console.log('[model-manager] incoming', method, path, payload || 'no payload');
@@ -580,6 +586,31 @@ function err(res, status, message) {
   return res.status(status).json({ detail: message });
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function registerControllerFailure(detail) {
+  CIRCUIT_BREAKER.failures += 1;
+  CIRCUIT_BREAKER.lastFailure = Date.now();
+  if (CIRCUIT_BREAKER.failures >= CIRCUIT_BREAKER.maxFailures) {
+    CIRCUIT_BREAKER.open = true;
+  }
+  logError('controller', detail);
+  pushLogEntry('controller', 'request', 'error', detail);
+}
+
+function isRetryableControllerError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return error?.name === 'AbortError'
+    || message.includes('fetch failed')
+    || message.includes('socket hang up')
+    || message.includes('econnreset')
+    || message.includes('econnrefused')
+    || message.includes('etimedout')
+    || message.includes('this operation was aborted');
+}
+
 async function controllerRequest(endpoint, options = {}) {
   logRequest('CONTROLLER', endpoint, options.body ? JSON.parse(options.body) : null);
   // Vérifier état Circuit Breaker
@@ -594,69 +625,95 @@ async function controllerRequest(endpoint, options = {}) {
 
   const controllerUrl = new URL(`${CONTROLLER_URL}${endpoint}`);
   const agent = controllerUrl.protocol === 'https:' ? httpsAgent : httpAgent;
+  const maxRetries = Number.isFinite(Number(options.maxRetries))
+    ? Number(options.maxRetries)
+    : (endpoint === '/status' ? 1 : 2);
+  const retryBaseDelayMs = Number.isFinite(Number(options.retryBaseDelayMs))
+    ? Number(options.retryBaseDelayMs)
+    : 300;
 
-  // Compatibilité NodeJS < 18: AbortController manuel
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeout || 15000);
-  
-  try {
-    const response = await fetch(`${CONTROLLER_URL}${endpoint}`, {
-      ...options,
-      agent,
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.headers || {}),
-      },
-    });
+  let lastError = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    // Compatibilité NodeJS < 18: AbortController manuel
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), options.timeout || 15000);
 
-    const text = await response.text();
-    let payload = null;
     try {
-      payload = text ? JSON.parse(text) : null;
-    } catch (parseError) {
-      // Gérer le cas où le backend .NET retourne un Hashtable non sérialisable
-      // Détecter l'erreur spécifique System.Collections.Hashtable
-      if (text.includes('System.Collections.Hashtable') && text.includes('Keys must be strings')) {
-        payload = {
-          detail: 'Erreur de sérialisation coté backend: Le contrôleur .NET a retourné un dictionnaire avec des clés non-string. Ceci est une erreur du runtime hôte.'
-        };
-      } else {
-        payload = text;
+      const response = await fetch(`${CONTROLLER_URL}${endpoint}`, {
+        ...options,
+        agent,
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(options.headers || {}),
+        },
+      });
+
+      const text = await response.text();
+      let payload = null;
+      try {
+        payload = text ? JSON.parse(text) : null;
+      } catch (parseError) {
+        // Gérer le cas où le backend .NET retourne un Hashtable non sérialisable
+        // Détecter l'erreur spécifique System.Collections.Hashtable
+        if (text.includes('System.Collections.Hashtable') && text.includes('Keys must be strings')) {
+          payload = {
+            detail: 'Erreur de sérialisation coté backend: Le contrôleur .NET a retourné un dictionnaire avec des clés non-string. Ceci est une erreur du runtime hôte.'
+          };
+        } else {
+          payload = text;
+        }
       }
-    }
 
-    logRequest('CONTROLLER-RAW-RESPONSE', endpoint, { status: response.status, text, payload });
+      logRequest('CONTROLLER-RAW-RESPONSE', endpoint, { status: response.status, text, payload, attempt: attempt + 1 });
 
-    if (!response.ok) {
-      const detail = typeof payload === 'object' && payload?.detail ? payload.detail : payload || response.statusText;
-      CIRCUIT_BREAKER.failures += 1;
-      CIRCUIT_BREAKER.lastFailure = Date.now();
-      if (CIRCUIT_BREAKER.failures >= CIRCUIT_BREAKER.maxFailures) {
-        CIRCUIT_BREAKER.open = true;
+      if (!response.ok) {
+        const detail = typeof payload === 'object' && payload?.detail ? payload.detail : payload || response.statusText;
+        const retryableHttp = response.status >= 500 && response.status < 600;
+        if (retryableHttp && attempt < maxRetries) {
+          const waitMs = retryBaseDelayMs * (attempt + 1);
+          pushLogEntry('controller', endpoint, 'warn', `Retry ${attempt + 1}/${maxRetries} après HTTP ${response.status}: ${detail}`);
+          await delay(waitMs);
+          continue;
+        }
+
+        const finalDetail = `Controller response ${response.status}: ${detail}`;
+        registerControllerFailure(finalDetail);
+        throw new Error(String(detail));
       }
-      logError(endpoint, `Controller response ${response.status}: ${detail}`);
-      pushLogEntry('controller', endpoint, 'error', `Controller response ${response.status}: ${detail}`);
-      throw new Error(String(detail));
+
+      logRequest('CONTROLLER-RESPONSE', endpoint, { status: response.status, payload, attempt: attempt + 1 });
+      pushLogEntry('controller', endpoint, 'info', `Controller response ${response.status}`);
+
+      // Réinitialiser Circuit Breaker en cas de succès
+      CIRCUIT_BREAKER.failures = 0;
+      CIRCUIT_BREAKER.open = false;
+
+      // Invalidate the cached runtime status after state-changing controller calls.
+      if (['/start', '/stop', '/restart'].includes(endpoint)) {
+        invalidateStatusCache();
+      }
+
+      return payload;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxRetries && isRetryableControllerError(error)) {
+        const waitMs = retryBaseDelayMs * (attempt + 1);
+        pushLogEntry('controller', endpoint, 'warn', `Retry ${attempt + 1}/${maxRetries} après erreur réseau: ${error?.message || error}`);
+        await delay(waitMs);
+        continue;
+      }
+
+      if (!(error instanceof Error && /^Controller response \d+:/u.test(error.message))) {
+        registerControllerFailure(`Controller request failed: ${error?.message || error}`);
+      }
+      throw new Error(`Controller request failed: ${error?.message || error}`);
+    } finally {
+      clearTimeout(timeout);
     }
-
-    logRequest('CONTROLLER-RESPONSE', endpoint, { status: response.status, payload });
-    pushLogEntry('controller', endpoint, 'info', `Controller response ${response.status}`);
-
-    // Réinitialiser Circuit Breaker en cas de succès
-    CIRCUIT_BREAKER.failures = 0;
-    CIRCUIT_BREAKER.open = false;
-
-    // Invalidate the cached runtime status after state-changing controller calls.
-    if (['/start', '/stop', '/restart'].includes(endpoint)) {
-      invalidateStatusCache();
-    }
-
-    return payload;
-  
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw lastError || new Error('Controller request failed');
 }
 
 async function hostLauncherRequest(endpoint, options = {}) {
@@ -1757,6 +1814,22 @@ app.post('/api/models/unload', async (req, res) => {
     invalidateStatusCache();
     res.json({ model: modelName, status: 'unloaded' });
   } catch (error) {
+    try {
+      const snapshot = await getRuntimeSnapshot();
+      const runtime = snapshot.runtime;
+      const loadedModels = buildLoadedModelList(runtime);
+      const stillRunning = loadedModels.some((item) => item.model === modelName && item.running);
+      if (!stillRunning) {
+        return res.json({
+          model: modelName,
+          status: 'unloaded',
+          source: 'reconciled_after_error',
+          detail: error.message,
+        });
+      }
+    } catch {
+      // no-op: garder l'erreur initiale
+    }
     err(res, 502, error.message);
   }
 });
