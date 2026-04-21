@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import ContainerLogs from "./ContainerLogs";
 import Performance from "./Performance";
+import Loader from "./Loader";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -274,6 +275,17 @@ function App() {
       await delay(250);
       await refreshModelsState(true);
       await refreshAllModelState({ silent: true });
+      
+      // Clear fetch cache to prevent stale state on next actions
+      if ('caches' in window) {
+        try {
+          const cacheNames = await caches.keys();
+          for (const name of cacheNames) {
+            await caches.delete(name);
+          }
+        } catch (e) { /* ignore cache errors */ }
+      }
+      
       updateStatus(`${modelName} : ${actionType} terminé.`);
       return result;
     } catch (err) {
@@ -329,7 +341,7 @@ function App() {
     }
   }
 
-  async function handleDownloadUrl() {
+async function handleDownloadUrl() {
     const url = normalizeUrl(huggingfaceUrl);
     const ollama = normalizeUrl(ollamaName);
     if (!url && !ollama) {
@@ -338,25 +350,53 @@ function App() {
     }
     const body = ollama ? { ollama_name: ollama, name: hfModelName || undefined } : { url, name: hfModelName || undefined };
     log('download payload', body);
+
+    const xhr = new XMLHttpRequest();
+    const apiUrl = `${apiBase}/api/models/download`;
+    
     setLoading(true);
     setDownloadProgress(0);
     updateStatus('Téléchargement en cours...');
-    const interval = window.setInterval(() => setDownloadProgress((prev) => Math.min(prev + 10, 90)), 500);
-    try {
-      const data = await apiFetch('/api/models/download', { method: 'POST', body });
-      updateStatus(`Modèle téléchargé : ${data.filename}`);
-      await refreshAllModelState({ silent: true });
-      setHuggingfaceUrl('');
-      setOllamaName('');
-      setHfModelName('');
-    } catch (err) {
-      console.error('[App] download error', err);
-      updateStatus(`Échec du téléchargement : ${err.message}`);
-    } finally {
-      clearInterval(interval);
+
+    xhr.open('POST', apiUrl, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+
+    xhr.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable) {
+        const percent = Math.round((event.loaded / event.total) * 100);
+        setDownloadProgress(percent);
+        updateStatus(`Téléchargement: ${percent}%`);
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const data = JSON.parse(xhr.responseText || '{}');
+        setDownloadProgress(100);
+        updateStatus(`Modèle téléchargé : ${data.filename}`);
+        delay(1500).then(() => {
+          setDownloadProgress(0);
+          setLoading(false);
+        });
+        refreshAllModelState({ silent: true });
+        setHuggingfaceUrl('');
+        setOllamaName('');
+        setHfModelName('');
+      } else {
+        const errMsg = xhr.statusText || `Erreur HTTP ${xhr.status}`;
+        updateStatus(`Échec téléchargement: ${errMsg}`);
+        setDownloadProgress(0);
+        setLoading(false);
+      }
+    });
+
+    xhr.addEventListener('error', () => {
+      updateStatus('Erreur réseau téléchargement');
       setDownloadProgress(0);
       setLoading(false);
-    }
+    });
+
+    xhr.send(JSON.stringify(body));
   }
 
   async function handleDownloadAndLoadUrl() {
@@ -368,27 +408,56 @@ function App() {
     }
     const body = ollama ? { ollama_name: ollama, name: hfModelName || undefined } : { url, name: hfModelName || undefined };
     log('download+load payload', body);
+
+    const xhr = new XMLHttpRequest();
+    const apiUrl = `${apiBase}/api/models/download`;
+    
     setLoading(true);
     setDownloadProgress(0);
-    updateStatus('Import et chargement en cours...');
-    const interval = window.setInterval(() => setDownloadProgress((prev) => Math.min(prev + 8, 90)), 500);
-    try {
-      const data = await apiFetch('/api/models/download', { method: 'POST', body });
-      setDownloadProgress(95);
-      await apiFetch('/api/models/load', { method: 'POST', body: { model: data.filename } });
-      updateStatus(`Modèle importé et chargé : ${data.filename}`);
-      await refreshAllModelState({ silent: true });
-      setHuggingfaceUrl('');
-      setOllamaName('');
-      setHfModelName('');
-    } catch (err) {
-      console.error('[App] download and load error', err);
-      updateStatus(`Échec import/chargement : ${err.message}`);
-    } finally {
-      clearInterval(interval);
+    updateStatus('Import en cours...');
+
+    xhr.open('POST', apiUrl, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+
+    xhr.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable) {
+        const percent = Math.round((event.loaded / event.total) * 100);
+        setDownloadProgress(percent);
+        updateStatus(`Import: ${percent}%`);
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const data = JSON.parse(xhr.responseText || '{}');
+        setDownloadProgress(95);
+        apiFetch('/api/models/load', { method: 'POST', body: { model: data.filename } }).then(() => {
+          setDownloadProgress(100);
+          updateStatus(`Modèle importé et chargé : ${data.filename}`);
+          delay(1500).then(() => {
+            setDownloadProgress(0);
+            setLoading(false);
+          });
+          refreshAllModelState({ silent: true });
+          setHuggingfaceUrl('');
+          setOllamaName('');
+          setHfModelName('');
+        });
+      } else {
+        const errMsg = xhr.statusText || `Erreur HTTP ${xhr.status}`;
+        updateStatus(`Échec import: ${errMsg}`);
+        setDownloadProgress(0);
+        setLoading(false);
+      }
+    });
+
+    xhr.addEventListener('error', () => {
+      updateStatus('Erreur réseau import');
       setDownloadProgress(0);
       setLoading(false);
-    }
+    });
+
+    xhr.send(JSON.stringify(body));
   }
 
   const modelRows = useMemo(() => {
@@ -481,7 +550,8 @@ function App() {
             <a href="https://ollama.com/library" target="_blank" rel="noreferrer"><img className="link-icon ollama-icon" src="https://ollama.com/public/assets/c889cc0d-cb83-4c46-a98e-0d0e273151b9/42f6b28d-9117-48cd-ac0d-44baaf5c178e.png" alt="" aria-hidden="true" />Ollama Library</a>
             <a href="https://huggingface.co/models" target="_blank" rel="noreferrer"><img className="link-icon huggingface-icon" src="https://huggingface.co/front/assets/huggingface_logo-noborder.svg" alt="" aria-hidden="true" />Hugging Face Models</a>
           </div>
-          {downloadProgress > 0 && <div className="progress-bar"><div className="progress-fill" style={{ width: `${downloadProgress}%` }}></div><span className="progress-text">{downloadProgress}%</span></div>}
+
+
           <div className="download-actions"><button className="btn btn-primary btn-download" onClick={handleDownloadUrl} disabled={loading}>{loading ? 'Import en cours…' : '⬇️ Importer'}</button><button className="btn btn-secondary btn-download" onClick={handleDownloadAndLoadUrl} disabled={loading}>{loading ? 'Import en cours…' : '⚡ Importer + charger'}</button></div>
         </div>
 
@@ -572,6 +642,7 @@ function App() {
         {statusMessage && <div className={`notification ${/échec|Erreur|error/i.test(statusMessage) ? 'error' : 'info'}`}>{statusMessage}</div>}
         {renderPageContent()}
       </main>
+      <Loader show={loading || !!pendingAction} progress={downloadProgress} />
     </div>
   );
 }

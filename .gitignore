@@ -3,8 +3,13 @@ runtime/
 model-manager/node_modules/
 model-manager/dist/
 claude/
+.claude/
+.cortec/
+.vscode/
+.blackboxrules/
+.cortex/
 Analyses/
+CLAUDE.md
 
 # Ignore runtime log files
 logs/
-.cortex/

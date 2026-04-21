@@ -74,31 +74,29 @@ Initialize-LogsDirectories
 try {
     $state = Get-State
     $config = Get-Config
+
+    # NETTOYAGE: Supprimer TOUTES les instances mortes avant toute relance
+    $liveInstances = @()
     foreach ($instance in $state.instances) {
-        # Si l'instance était marquée running mais n'a pas de process actif, on relance
-        $shouldRestart = $instance.running -and (-not $instance.pid -or -not (Get-Process -Id $instance.pid -ErrorAction SilentlyContinue))
-        if ($shouldRestart -and $instance.model) {
-            Write-Host "[Controller] Relance auto du modèle $($instance.model) sur port $($instance.port)"
-            try {
-                $body = @{ model = $instance.model }
-                if ($instance.context) { $body.context = $instance.context }
-                if ($instance.gpu_layers) { $body.gpu_layers = $instance.gpu_layers }
-                # On n'active qu'un seul modèle (le principal), les autres sont relancés mais non actifs
-                $body.activate = $false
-                Start-LlamaProcess $body | Out-Null
-            } catch {
-                Write-Host "[Controller] Echec relance auto modèle $($instance.model) : $($_.Exception.Message)"
+        if ($instance.pid) {
+            $process = Get-Process -Id ([int]$instance.pid) -ErrorAction SilentlyContinue
+            if ($process -and -not $process.HasExited) {
+                $liveInstances += $instance
+                continue
             }
         }
     }
-    # Promotion du modèle principal si défini
+    $state.instances = $liveInstances
+    Save-State $state
+
+    # Relancer UNIQUEMENT le modèle principal s'il est défini
     if ($state.active_model) {
         try {
             $body = @{ model = $state.active_model; activate = $true }
             Start-LlamaProcess $body | Out-Null
-            Write-Host "[Controller] Modèle principal promu : $($state.active_model)"
+            Write-Host "[Controller] Modèle principal chargé : $($state.active_model)"
         } catch {
-            Write-Host "[Controller] Echec promotion modèle principal : $($_.Exception.Message)"
+            Write-Host "[Controller] Echec chargement modèle principal : $($_.Exception.Message)"
         }
     }
 } catch {
@@ -324,44 +322,35 @@ function Get-ConsistentState {
 
     $liveInstances = Get-LiveInstances (Get-Config)
     if ($liveInstances.Count -gt 0) {
-        # Conserver les instances mortes qui étaient censées rester actives,
-        # et fusionner les instances vivantes pour ne pas perdre l'état désiré.
-        $liveById = @{}
+        # ✅ RÈGLE ABSOLUE: 1 MODELE = MAXIMUM 1 INSTANCE
+        $seenModels = @{}
+        $filteredLive = @()
         foreach ($live in $liveInstances) {
-            $liveById[[string]$live.id] = $live
+            $modelKey = $live.filename.ToLowerInvariant()
+            if (-not $seenModels.ContainsKey($modelKey)) {
+                $seenModels[$modelKey] = $true
+                $filteredLive += $live
+            } else {
+                # ❌ Détruire immédiatement les doublons pour le même modèle
+                try { Stop-Process -Id $live.pid -Force -ErrorAction SilentlyContinue } catch {}
+            }
         }
+        $liveInstances = $filteredLive
 
-    $seenIds = @{}
-    $mergedInstances = @()
-    foreach ($instance in $state.instances) {
-        if ($instance -isnot [hashtable] -and $instance -isnot [System.Collections.IDictionary]) {
-            continue
-        }
-        $id = [string]$instance.id
-        if ($seenIds.ContainsKey($id)) {
-            continue
-        }
-        if ($liveById.ContainsKey($id)) {
-            $live = $liveById[$id]
-            # Préserver les drapeaux souhaités de l'état persistant.
-            $live.active = [bool]$instance.active
-            $live.running = [bool]$instance.running
+        # ✅ SYNCHRONISATION EXACTE: Ne garder que les instances VRAIMENT en cours d'exécution
+        $mergedInstances = @()
+        foreach ($live in $liveInstances) {
+            $id = [string]$live.id
+            $existing = $state.instances | Where-Object { [string]$_.id -eq $id } | Select-Object -First 1
+            if ($existing) {
+                # Préserver flags actif et configuration utilisateur
+                $live.active = [bool]$existing.active
+                $live.running = $true
+                $live.context = $existing.context
+                $live.gpu_layers = $existing.gpu_layers
+            }
             $mergedInstances += $live
-            $liveById.Remove($id)
-            $seenIds[$id] = $true
-        } else {
-            $mergedInstances += $instance
-            $seenIds[$id] = $true
         }
-    }
-
-    foreach ($live in $liveById.Values) {
-        $id = [string]$live.id
-        if (-not $seenIds.ContainsKey($id)) {
-            $mergedInstances += $live
-            $seenIds[$id] = $true
-        }
-    }
 
         $state.instances = $mergedInstances
 
@@ -467,21 +456,23 @@ function Repair-DeadInstances([hashtable]$state) {
             $process = Get-Process -Id ([int]$instance.pid) -ErrorAction SilentlyContinue
         }
 
-        if ($process -and -not $process.HasExited) {
-            continue
-        }
-
-        Write-Host "[Controller] Processus manquant ou arrêté détecté pour $($instance.model) (port $($instance.port)). Redémarrage..."
-        try {
-            $body = @{ model = $instance.model }
-            if ($instance.context) { $body.context = [int]$instance.context }
-            if ($instance.gpu_layers) { $body.gpu_layers = [int]$instance.gpu_layers }
-            if ($instance.active) { $body.activate = $true } else { $body.activate = $false }
-            Start-LlamaProcess $body | Out-Null
-        } catch {
-            Write-Host "[Controller] Échec redémarrage du modèle $($instance.model) : $($_.Exception.Message)"
-        }
+    if ($process -and -not $process.HasExited) {
+        continue
     }
+
+    Write-Host "[Controller] Processus manquant ou arrêté détecté pour $($instance.model) (port $($instance.port)). Redémarrage..."
+    try {
+        $body = @{ model = $instance.model }
+        if ($instance.context) { $body.context = [int]$instance.context }
+        if ($instance.gpu_layers) { $body.gpu_layers = [int]$instance.gpu_layers }
+        if ($instance.active) { $body.activate = $true } else { $body.activate = $false }
+        Start-LlamaProcess $body | Out-Null
+    } catch {
+        Write-Host "[Controller] Échec redémarrage du modèle $($instance.model) : $($_.Exception.Message)"
+        $instance.running = $false
+        $instance.last_error = $_.Exception.Message
+    }
+}
 }
 
 function Resolve-ModelRecord([string]$identifier) {
@@ -727,9 +718,14 @@ function Stop-LlamaProcess([hashtable]$body) {
     $target.running = $false
     $target.started_at = ""
 
-    $state.instances = @($state.instances | Where-Object {
+    # FORCER TABLEAU même quand 0 ou 1 élément (comportement PowerShell)
+    $filtered = $state.instances | Where-Object {
         ($_.id -ne $target.id) -and ($_.port -ne $target.port) -and ($_.model -ne $target.model)
-    })
+    }
+    $state.instances = @()
+    if ($filtered) {
+        $state.instances = @($filtered)
+    }
 
     if ($state.active_model -and $state.active_model -ieq $target.model) {
         $remainingActive = $state.instances | Where-Object { $_.running } | Select-Object -First 1
@@ -766,16 +762,16 @@ function Start-LlamaProcess([hashtable]$body) {
     if (-not (Test-Path (Split-Path -Parent $debugLog))) {
         New-Item -ItemType Directory -Path (Split-Path -Parent $debugLog) -Force | Out-Null
     }
-    Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Start-LlamaProcess called for model=$($body.model) resolved=$($record.model)"
+Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Start-LlamaProcess called for model=$($body.model) resolved=$($record.model)"
     $existingInstance = $state.instances | Where-Object {
         ($_.model -ieq $record.model -or $_.filename -ieq $body.model -or $_.filename -ieq $record.model) -and $_.running
     } | Select-Object -First 1
     if ($existingInstance) {
-        Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Found existingInstance id=$($existingInstance.id) model=$($existingInstance.model) filename=$($existingInstance.filename) port=$($existingInstance.port) active=$($existingInstance.active)"
+        Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Found existingInstance id=$($existingInstance.id) model=$($existingInstance.model) filename=$($existingInstance.filename) port=$($existingInstance.port) active=$($existingInstance.active)"
     }
-    $activate = $true
-    if ($body.ContainsKey('activate') -and $body.activate -eq $false) {
-        $activate = $false
+    $activate = $false
+    if ($body.ContainsKey('activate') -and $body.activate -eq $true) {
+        $activate = $true
     }
 
     if ($existingInstance -and (Test-TcpEndpoint -HostName '127.0.0.1' -Port ([int]$existingInstance.port) -TimeoutMs 1000)) {
@@ -860,26 +856,38 @@ function Start-LlamaProcess([hashtable]$body) {
     }
 
     if ($activate) {
-        $state.instances = @($instance) + ($state.instances | ForEach-Object { Set-ObjectProperty $_ 'active' $false; $_ } | Where-Object { $_.id -ne $instance.id })
+        # Supprimer TOUTES les anciennes instances quand on active un nouveau modèle
+        $state.instances = @($instance)
         $state.active_model = [string]$instance.model
         $state.active_filename = [string]$instance.filename
         $state.active_path = [string]$instance.path
         $state.started_at = [string]$instance.started_at
+        # Réinitialiser aussi les compteurs
+        $Global:RequestCounter = @{}
+        $Global:LastRequestTime = @{}
     } else {
         $state.instances = @($instance) + $state.instances
     }
     Save-State $state
 
-    for ($i = 0; $i -lt 15; $i++) {
-        if (Test-TcpEndpoint -Host '127.0.0.1' -Port ([int]$port) -TimeoutMs 1000) {
-            break
+    # Attendre que le serveur soit prêt et réponde correctement
+    $serverReady = $false
+    for ($i = 0; $i -lt 25; $i++) {
+        try {
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:$port/v1/models" -Method Get -TimeoutSec 2 -ErrorAction Stop
+            if ($response.data -or $response.models) {
+                $serverReady = $true
+                break
+            }
+        } catch {
+            # Server pas encore prêt, on continue d'attendre
         }
-        Start-Sleep -Milliseconds 700
+        Start-Sleep -Milliseconds 600
     }
 
-    if ($i -ge 15) {
+    if (-not $serverReady) {
         try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch {}
-        throw "Timeout attente llama-server sur le port $port"
+        throw "Timeout attente llama-server sur le port ${port}: le serveur n'a pas répondu correctement"
     }
 
     return Get-ConsistentState
@@ -908,7 +916,9 @@ function Get-RuntimeStatus {
     $instances = @()
     $requestCounter = ConvertTo-Hashtable $Global:RequestCounter
 
-    foreach ($instance in $state.instances) {
+    if ($state.instances -is [System.Collections.IDictionary]) {
+        # Cas spécial: si un seul élément PowerShell l'a converti en hashtable unique
+        $instance = $state.instances
         $portKey = [string]$instance.port
         $instances += @{
             id = [string]$instance.id
@@ -928,6 +938,29 @@ function Get-RuntimeStatus {
             estimated_vram_bytes = if ($instance.estimated_vram_bytes) { [int64]$instance.estimated_vram_bytes } else { $null }
             server_base_url = [string]$instance.server_base_url
             proxy_id = [string]$instance.proxy_id
+        }
+    } else {
+        foreach ($instance in $state.instances) {
+            $portKey = [string]$instance.port
+            $instances += @{
+                id = [string]$instance.id
+                port = [int]$instance.port
+                pid = $instance.pid
+                request_count = if ($requestCounter[$portKey]) { $requestCounter[$portKey] } else { 0 }
+                last_request_at = if ($Global:LastRequestTime[$portKey]) { $Global:LastRequestTime[$portKey].ToString('o') } else { $null }
+                running = [bool]$instance.running
+                model = [string]$instance.model
+                filename = [string]$instance.filename
+                path = [string]$instance.path
+                started_at = [string]$instance.started_at
+                last_error = [string]$instance.last_error
+                stdout_log = [string]$instance.stdout_log
+                stderr_log = [string]$instance.stderr_log
+                active = [bool]$instance.active
+                estimated_vram_bytes = if ($instance.estimated_vram_bytes) { [int64]$instance.estimated_vram_bytes } else { $null }
+                server_base_url = [string]$instance.server_base_url
+                proxy_id = [string]$instance.proxy_id
+            }
         }
     }
 
@@ -1241,15 +1274,12 @@ while ($true) {
                 $state = Get-ConsistentState
                 $existingInstance = $state.instances | Where-Object { $_.model -ieq $body.model -and $_.running } | Select-Object -First 1
                 if ($existingInstance) {
-                    if ($body.ContainsKey('activate') -and $body.activate -eq $false) {
+                    if ($body.ContainsKey('activate') -and $body.activate -eq $true) {
+                        Write-Host "[controller] model déjà chargé, promotion en actif : $($body.model)"
+                        Start-LlamaProcess $body | Out-Null
+                    } else {
                         Write-Host "[controller] model déjà chargé, reste en mémoire sans promotion : $($body.model)"
-                        Write-Json $stream 200 (Get-RuntimeStatus)
-                        continue
                     }
-
-                    Write-Host "[controller] model déjà chargé, promotion en actif : $($body.model)"
-                    $body.activate = $true
-                    Start-LlamaProcess $body | Out-Null
                     Write-Json $stream 200 (Get-RuntimeStatus)
                     continue
                 }
