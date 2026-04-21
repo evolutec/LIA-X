@@ -13,3 +13,6 @@ CLAUDE.md
 
 # Ignore runtime log files
 logs/
+
+# Guide technique local (ne pas push sur le repo)
+GUIDE-EXECUTION-SCRIPTS-POWERSHELL.md
