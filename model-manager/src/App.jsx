@@ -26,8 +26,9 @@ function App() {
   const [modelDetailsLoading, setModelDetailsLoading] = useState(false);
   const [modelContextOverrides, setModelContextOverrides] = useState({});
   const [modelContextNeedsReload, setModelContextNeedsReload] = useState({});
-  const [modelGpuLayersOverrides, setModelGpuLayersOverrides] = useState({});
-  const [modelGpuLayersNeedsReload, setModelGpuLayersNeedsReload] = useState({});
+  const [hardwareProfile, setHardwareProfile] = useState(null);
+  const [recommendedRuntime, setRecommendedRuntime] = useState(null);
+  const [showRecommendedRuntimeModal, setShowRecommendedRuntimeModal] = useState(false);
 
   useEffect(() => {
     refreshAllModelState();
@@ -218,55 +219,6 @@ function App() {
     updateStatus(`${row.name}: contexte modifié (${getRequestedContextForRow(row)}). Déchargez/rechargez le modèle pour appliquer.`);
   }
 
-  function normalizeGpuLayersValue(value) {
-    const number = Number(value);
-    if (!Number.isFinite(number)) return null;
-    const rounded = Math.round(number);
-    return rounded >= 1 ? rounded : null;
-  }
-
-  function getSliderMinGpuLayers() {
-    return 1;
-  }
-
-  function getSliderMaxGpuLayers() {
-    return 4;
-  }
-
-  function getDefaultGpuLayers(row) {
-    const fromMetadata = normalizeGpuLayersValue(row?.gpuLayers);
-    return fromMetadata !== null ? Math.min(Math.max(fromMetadata, getSliderMinGpuLayers()), getSliderMaxGpuLayers()) : getSliderMinGpuLayers();
-  }
-
-  function getRequestedGpuLayersForRow(row) {
-    if (!row?.name) return getDefaultGpuLayers(row);
-    const override = normalizeGpuLayersValue(modelGpuLayersOverrides[row.name]);
-    if (override !== null) return override;
-    return getDefaultGpuLayers(row);
-  }
-
-  function handleGpuLayersSliderChange(row, rawValue) {
-    if (!row?.name) return;
-    const normalized = normalizeGpuLayersValue(rawValue);
-    if (normalized === null) return;
-
-    setModelGpuLayersOverrides((current) => ({
-      ...current,
-      [row.name]: normalized,
-    }));
-
-    if (row.loaded) {
-      setModelGpuLayersNeedsReload((current) => ({
-        ...current,
-        [row.name]: true,
-      }));
-    }
-  }
-
-  function handleGpuLayersSliderCommit(row) {
-    if (!row?.name || !row.loaded) return;
-    updateStatus(`${row.name}: GPU layers modifiés (${getRequestedGpuLayersForRow(row)}). Déchargez/rechargez le modèle pour appliquer.`);
-  }
 
   function buildRows() {
     // On veut une ligne pour chaque fichier du dossier, enrichie si chargé
@@ -274,6 +226,7 @@ function App() {
     availableFiles.forEach((file) => {
       const name = String(file?.name || '');
       if (!name) return;
+      const rawGpuLayers = Number(file.gpu_layers);
       fileMap.set(name, {
         name,
         filename: file.filename || `${name}.gguf`,
@@ -284,7 +237,7 @@ function App() {
         vramSize: null,
         expiresAt: null,
         contextLength: normalizeContextValue(file.context_length),
-        gpuLayers: normalizeGpuLayersValue(file.gpu_layers),
+        gpuLayers: Number.isFinite(rawGpuLayers) ? rawGpuLayers : null,
       });
     });
     // Pour chaque modèle chargé, fusionne les infos si déjà dans le dossier, sinon ajoute une ligne "orpheline"
@@ -325,6 +278,18 @@ function App() {
     log('status', message);
   }
 
+  async function refreshHardwareProfile(silent = false) {
+    try {
+      const data = await apiFetch('/api/hardware-profile');
+      setHardwareProfile(data.profile || null);
+      setRecommendedRuntime(data.recommended_runtime || null);
+    } catch (err) {
+      setHardwareProfile(null);
+      setRecommendedRuntime(null);
+      if (!silent) updateStatus(`Impossible de lire le profil matériel : ${err.message}`);
+    }
+  }
+
   async function refreshAllModelState(options = {}) {
     const { silent = false } = options;
     log('refreshAllModelState', options);
@@ -334,6 +299,7 @@ function App() {
         refreshAvailableFiles(silent),
         refreshLoadedModels(silent),
         refreshActiveModel(silent),
+        refreshHardwareProfile(silent),
       ]);
       if (!silent) updateStatus('Synchronisation terminée.');
     } catch (err) {
@@ -432,11 +398,14 @@ function App() {
     if (!modelName) return;
     const row = buildRows().find((item) => item.name === modelName);
     const requestedContext = getRequestedContextForRow(row);
-    const requestedGpuLayers = getRequestedGpuLayersForRow(row);
-    const payload = { model: modelName, context: requestedContext };
-    if (requestedGpuLayers !== null) {
-      payload.gpu_layers = requestedGpuLayers;
+    const payload = {
+      model: modelName,
+      context: requestedContext,
+    };
+    if (recommendedRuntime?.gpu_layers !== undefined && recommendedRuntime?.gpu_layers !== null) {
+      payload.gpu_layers = recommendedRuntime.gpu_layers;
     }
+    log('load payload', payload);
     const result = await performAction(modelName, 'chargement', async () => apiFetch('/api/models/load', {
       method: 'POST',
       body: payload,
@@ -444,10 +413,6 @@ function App() {
 
     if (result) {
       setModelContextNeedsReload((current) => ({
-        ...current,
-        [modelName]: false,
-      }));
-      setModelGpuLayersNeedsReload((current) => ({
         ...current,
         [modelName]: false,
       }));
@@ -476,7 +441,7 @@ function App() {
 
     // Si le contexte ou les GPU layers ont changé pour un modèle déjà chargé,
     // recharge-le avant d'en faire le principal.
-    const needsReload = row.loaded && (modelContextNeedsReload[row.name] || modelGpuLayersNeedsReload[row.name]);
+    const needsReload = row.loaded && modelContextNeedsReload[row.name];
     if (needsReload) {
       await handleUnloadModel(modelName);
       await handleLoadFile(modelName);
@@ -487,10 +452,12 @@ function App() {
       const payload = { model: modelName };
       if (updatedRow) {
         const requestedContext = getRequestedContextForRow(updatedRow);
-        const requestedGpuLayers = getRequestedGpuLayersForRow(updatedRow);
         if (requestedContext !== null) payload.context = requestedContext;
-        if (requestedGpuLayers !== null) payload.gpu_layers = requestedGpuLayers;
       }
+      if (recommendedRuntime?.gpu_layers !== undefined && recommendedRuntime?.gpu_layers !== null) {
+        payload.gpu_layers = recommendedRuntime.gpu_layers;
+      }
+      log('select payload', payload);
       const data = await apiFetch('/api/models/select', { method: 'POST', body: payload });
       setActiveModel(data.active_model || modelName);
       return data;
@@ -657,6 +624,54 @@ function App() {
     );
   }
 
+  function renderRecommendedRuntimeModal() {
+    if (!showRecommendedRuntimeModal) return null;
+
+    return (
+      <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Recommandations runtime">
+        <div className="modal-card">
+          <div className="modal-header-row">
+            <div>
+              <h2 style={{ margin: 0 }}>Recommandations runtime</h2>
+              <p style={{ margin: '0.5rem 0 0' }}>Valeurs utilisées pour charger ou sélectionner un modèle.</p>
+            </div>
+            <button type="button" className="btn btn-secondary btn-close-modal" onClick={() => setShowRecommendedRuntimeModal(false)}>
+              ✕
+            </button>
+          </div>
+          <div className="modal-content-grid">
+            <section className="modal-section">
+              <div className="summary-stack">
+                <div className="summary-title">Backend recommandé</div>
+                <div>{recommendedRuntime?.backend || 'Auto'}</div>
+              </div>
+              <div className="summary-stack">
+                <div className="summary-title">Contexte recommandé</div>
+                <div>{recommendedRuntime?.context ? `${recommendedRuntime.context} tokens` : 'Auto'}</div>
+              </div>
+              <div className="summary-stack">
+                <div className="summary-title">gpu_layers recommandé</div>
+                <div>{recommendedRuntime?.gpu_layers ?? 'Auto'}</div>
+              </div>
+              <div className="summary-stack">
+                <div className="summary-title">GPU détecté</div>
+                <div>{hardwareProfile?.gpu?.label || hardwareProfile?.label || 'Aucun'}</div>
+              </div>
+            </section>
+            <section className="modal-section">
+              <div className="modal-section-title">Requête UI</div>
+              <div className="modal-note">Le contexte sélectionné dans le slider est utilisé par le serveur et transmis au controller dans la requête de démarrage.</div>
+              <div className="summary-stack">
+                <div className="summary-title">Contexte actif</div>
+                <div>{recommendedRuntime?.context ? `${recommendedRuntime.context} tokens` : 'Auto'}</div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
 async function handleDownloadUrl() {
     const url = normalizeUrl(huggingfaceUrl);
     const ollama = normalizeUrl(ollamaName);
@@ -747,7 +762,14 @@ async function handleDownloadUrl() {
       if (xhr.status >= 200 && xhr.status < 300) {
         const data = JSON.parse(xhr.responseText || '{}');
         setDownloadProgress(95);
-        apiFetch('/api/models/load', { method: 'POST', body: { model: data.filename } }).then(() => {
+        apiFetch('/api/models/load', {
+          method: 'POST',
+          body: {
+            model: data.filename,
+            context: getDefaultContext(null),
+            gpu_layers: recommendedRuntime?.gpu_layers,
+          },
+        }).then(() => {
           setDownloadProgress(100);
           updateStatus(`Modèle importé et chargé : ${data.filename}`);
           delay(1500).then(() => {
@@ -781,6 +803,7 @@ async function handleDownloadUrl() {
     availableFiles.forEach((file) => {
       const name = String(file?.name || '');
       if (!name) return;
+      const rawGpuLayers = Number(file.gpu_layers);
       rows.set(name, {
         name,
         filename: file.filename || `${name}.gguf`,
@@ -791,7 +814,7 @@ async function handleDownloadUrl() {
         vramSize: null,
         expiresAt: null,
         contextLength: normalizeContextValue(file.context_length),
-        gpuLayers: normalizeGpuLayersValue(file.gpu_layers),
+        gpuLayers: Number.isFinite(rawGpuLayers) ? rawGpuLayers : null,
       });
     });
     loadedModels.forEach((item) => {
@@ -876,7 +899,18 @@ async function handleDownloadUrl() {
         </div>
 
         <div className="card model-table-card">
-          <div className="card-header-row"><div><div className="card-title">🧠 Modèles</div><div className="card-subtitle card-subtitle-inline">Basculer le chargement et définir le modèle principal.</div></div><div className="auto-sync-label">Mise à jour auto</div></div>
+          <div className="card-header-row">
+            <div>
+              <div className="card-title">🧠 Modèles</div>
+              <div className="card-subtitle card-subtitle-inline">Basculer le chargement et définir le modèle principal.</div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <button type="button" className="btn btn-secondary btn-icon" onClick={() => setShowRecommendedRuntimeModal(true)} disabled={loading || Boolean(pendingAction)} title="Voir les recommandations runtime">
+                ⚙️
+              </button>
+              <div className="auto-sync-label">Mise à jour auto</div>
+            </div>
+          </div>
           {emptyState ? <div className="empty-state">Aucun modèle local détecté.</div> : <div className="table-wrap"><div className="table-legend">Afficher les fichiers GGUF disponibles sur disque et les modèles chargés en mémoire. Cliquez sur un toggle pour charger / décharger.</div><table className="model-table"><thead><tr>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('name')}>Nom {sortColumn === 'name' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('status')}>État {sortColumn === 'status' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
@@ -913,26 +947,9 @@ async function handleDownloadUrl() {
                     {row.loaded && modelContextNeedsReload[row.name] && (
                       <div className="context-reload-note">Modifié: décharger/recharger pour appliquer.</div>
                     )}
-                    <div className="gpu-layers-cell">
-                      <div className="gpu-layers-values">
-                        <span className="badge badge-neutral">metadata: {row.gpuLayers ?? '—'}</span>
-                        <span className="badge badge-loaded">gpu_layers: {getRequestedGpuLayersForRow(row)}</span>
-                      </div>
-                      <input
-                        type="range"
-                        min={getSliderMinGpuLayers()}
-                        max={Math.max(getSliderMaxGpuLayers(row), getRequestedGpuLayersForRow(row))}
-                        step={1}
-                        value={getRequestedGpuLayersForRow(row)}
-                        onChange={(event) => handleGpuLayersSliderChange(row, event.target.value)}
-                        onMouseUp={() => handleGpuLayersSliderCommit(row)}
-                        onTouchEnd={() => handleGpuLayersSliderCommit(row)}
-                        disabled={loading || Boolean(pendingAction)}
-                        aria-label={`GPU layers pour ${row.name}`}
-                      />
-                      {row.loaded && modelGpuLayersNeedsReload[row.name] && (
-                        <div className="context-reload-note">Modifié: décharger/recharger pour appliquer.</div>
-                      )}
+                    <div className="gpu-summary">
+                      <span className="badge badge-neutral">gpu_layers metadata: {row.gpuLayers ?? '—'}</span>
+                      <span className="badge badge-loaded">gpu_layers recommandé: {recommendedRuntime?.gpu_layers ?? 'auto'}</span>
                     </div>
                   </div>
                 </td>

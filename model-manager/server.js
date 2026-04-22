@@ -31,8 +31,8 @@ const CIRCUIT_BREAKER = {
   open: false,
   failures: 0,
   lastFailure: 0,
-  resetTimeout: 10000,
-  maxFailures: 5
+  resetTimeout: 1000,
+  maxFailures: 15
 };
 
 // Cache global pour /status
@@ -592,20 +592,26 @@ function normalizeRequestedContext(rawValue) {
 async function buildModelStartRequest(identifier, requestedContext = null, requestedGpuLayers = null) {
   const model = await resolveModel(identifier);
   const details = await getModelGgufDetails(model);
+  const profile = await readHardwareProfile();
+  const recommended = getRecommendedRuntimeDefaults(profile);
   const payload = {
     model: model.name,
   };
 
   const normalizedContext = normalizeRequestedContext(requestedContext);
-  if (normalizedContext) {
+  if (normalizedContext !== null) {
     payload.context = normalizedContext;
   } else if (Number.isInteger(details.context_length) && details.context_length > 0) {
-    payload.context = details.context_length;
+    payload.context = Math.min(details.context_length, recommended.context);
+  } else {
+    payload.context = recommended.context;
   }
 
   const normalizedGpuLayers = normalizeRequestedGpuLayers(requestedGpuLayers);
   if (normalizedGpuLayers !== null) {
     payload.gpu_layers = normalizedGpuLayers;
+  } else if (recommended?.gpu_layers !== undefined && recommended?.gpu_layers !== null) {
+    payload.gpu_layers = recommended.gpu_layers;
   } else if (Number.isInteger(details.gpu_layers) && details.gpu_layers >= 0) {
     payload.gpu_layers = details.gpu_layers;
   }
@@ -854,6 +860,60 @@ async function readHardwareProfile() {
   } catch {
     return null;
   }
+}
+
+function getRecommendedRuntimeDefaults(hardwareProfile) {
+  const safe = {
+    backend: 'cpu',
+    context: 4096,
+    gpu_layers: 0,
+  };
+
+  if (!hardwareProfile || typeof hardwareProfile !== 'object') {
+    return safe;
+  }
+
+  if (hardwareProfile.recommended_runtime && typeof hardwareProfile.recommended_runtime === 'object') {
+    return {
+      backend: String(hardwareProfile.recommended_runtime.backend || safe.backend),
+      context: Number.isFinite(Number(hardwareProfile.recommended_runtime.context))
+        ? Math.max(1, Math.floor(Number(hardwareProfile.recommended_runtime.context)))
+        : safe.context,
+      gpu_layers: Number.isFinite(Number(hardwareProfile.recommended_runtime.gpu_layers))
+        ? Math.max(0, Math.floor(Number(hardwareProfile.recommended_runtime.gpu_layers)))
+        : safe.gpu_layers,
+    };
+  }
+
+  const vendor = String(hardwareProfile.vendor || '').toLowerCase();
+  const totalBytes = Number(hardwareProfile?.memory?.total_bytes ?? 0);
+  const gpuBytes = Number(hardwareProfile?.gpu?.devices?.[0]?.adapter_ram_bytes ?? 0);
+  const GB = 1024 * 1024 * 1024;
+
+  const result = { ...safe };
+  if (vendor === 'nvidia' || vendor === 'amd' || vendor === 'intel') {
+    result.backend = vendor === 'nvidia' ? 'cuda' : 'vulkan';
+    result.gpu_layers = 999;
+    if (gpuBytes >= 24 * GB) {
+      result.context = 8192;
+    } else if (gpuBytes >= 14 * GB) {
+      result.context = 6144;
+    } else if (gpuBytes >= 8 * GB) {
+      result.context = 4096;
+    } else {
+      result.context = 2048;
+    }
+  } else {
+    if (totalBytes >= 32 * GB) {
+      result.context = 8192;
+    } else if (totalBytes >= 16 * GB) {
+      result.context = 4096;
+    } else {
+      result.context = 2048;
+    }
+  }
+
+  return result;
 }
 
 function hasUsefulRuntimeState(runtime) {
@@ -1453,8 +1513,13 @@ async function downloadToModelsDir(url, name) {
   }
 
   await fs.promises.mkdir(MODEL_STORAGE_DIR, { recursive: true });
-  const safeBase = String(name || filenameFromUrl(url)).trim();
-  const targetFilename = safeBase.toLowerCase().endsWith('.gguf') ? safeBase : `${safeBase}.gguf`;
+  const rawBase = String(name || filenameFromUrl(url)).trim();
+  const safeBase = path.basename(rawBase) || filenameFromUrl(url);
+  const normalizedBase = safeBase.trim();
+  if (!normalizedBase) {
+    throw new Error('Nom de fichier invalide pour le téléchargement.');
+  }
+  const targetFilename = normalizedBase.toLowerCase().endsWith('.gguf') ? normalizedBase : `${normalizedBase}.gguf`;
   const targetPath = path.join(MODEL_STORAGE_DIR, targetFilename);
 
   if (fs.existsSync(targetPath)) {
@@ -1709,6 +1774,19 @@ app.get('/api/version', async (req, res) => {
   }
 });
 
+app.get('/api/hardware-profile', async (req, res) => {
+  try {
+    const profile = await readHardwareProfile();
+    const recommended = getRecommendedRuntimeDefaults(profile);
+    res.json({
+      profile,
+      recommended_runtime: recommended,
+    });
+  } catch (error) {
+    err(res, 502, error.message);
+  }
+});
+
 app.get('/api/performance', async (req, res) => {
   try {
     const performance = await getPerformanceMetrics();
@@ -1918,7 +1996,7 @@ app.post('/api/models/select', async (req, res) => {
 
     const payload = { model: modelName, activate: true };
     const normalizedContext = normalizeRequestedContext(req.body?.context);
-    if (normalizedContext) {
+    if (normalizedContext !== null) {
       payload.context = normalizedContext;
     }
     console.log('[model-manager] /api/models/select', { model: modelName, payload });
@@ -1930,7 +2008,7 @@ app.post('/api/models/select', async (req, res) => {
     invalidateStatusCache();
     res.json({
       active_model: modelName,
-      context_applied: null,
+      context_applied: payload.context ?? null,
       architecture: null,
     });
   } catch (error) {

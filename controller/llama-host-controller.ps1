@@ -1259,8 +1259,8 @@ while ($true) {
         }
 
         $client = $listener.EndAcceptTcpClient($asyncResult)
-        $client.ReceiveTimeout = 5000
-        $client.SendTimeout = 10000
+        $client.ReceiveTimeout = 30000
+        $client.SendTimeout = 60000
 
         $stream = $client.GetStream()
         $request = Read-HttpRequest $stream

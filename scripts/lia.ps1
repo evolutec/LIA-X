@@ -472,6 +472,7 @@ function Save-HardwareProfile([hashtable]$profile) {
 
         $profile.generation_count = if ($existing -and $existing.generation_count) { [int]$existing.generation_count + 1 } else { 1 }
         $profile.generated_at = (Get-Date).ToString('o')
+        $profile.recommended_runtime = Get-RecommendedRuntimeConfig $profile
         $profile | ConvertTo-Json -Depth 6 | Set-Content -Path $hardwareProfilePath -Encoding UTF8
         OK "Profil materiel sauve : $hardwareProfilePath (generation_count=$($profile.generation_count))"
     } catch {
@@ -479,13 +480,56 @@ function Save-HardwareProfile([hashtable]$profile) {
     }
 }
 
+function Get-RecommendedRuntimeConfig([hashtable]$hardware) {
+    $GB = 1024 * 1024 * 1024
+    $vendor = [string]($hardware.vendor ?? 'cpu').ToLower()
+    $totalRam = if ($hardware?.memory?.total_bytes) { [int64]$hardware.memory.total_bytes } else { 0 }
+    $gpuRam = if ($hardware?.gpu?.devices?.Count -gt 0) { [int64]$hardware.gpu.devices[0].adapter_ram_bytes } else { 0 }
+
+    $recommended = @{
+        backend = 'cpu'
+        backend_label = 'CPU'
+        context = 4096
+        gpu_layers = 0
+    }
+
+    if ($vendor -in @('nvidia', 'amd', 'intel')) {
+        $recommended.backend = if ($vendor -eq 'nvidia') { 'cuda' } else { 'vulkan' }
+        $recommended.backend_label = if ($vendor -eq 'nvidia') { 'NVIDIA CUDA' } else { 'Vulkan' }
+        $recommended.gpu_layers = 999
+
+        if ($gpuRam -ge 24 * $GB) {
+            $recommended.context = 8192
+        } elseif ($gpuRam -ge 14 * $GB) {
+            $recommended.context = 6144
+        } elseif ($gpuRam -ge 8 * $GB) {
+            $recommended.context = 4096
+        } else {
+            $recommended.context = 2048
+        }
+    } else {
+        if ($totalRam -ge 32 * $GB) {
+            $recommended.context = 8192
+        } elseif ($totalRam -ge 16 * $GB) {
+            $recommended.context = 4096
+        } else {
+            $recommended.context = 2048
+        }
+    }
+
+    return $recommended
+}
+
 function Get-BackendPlan($hardware) {
+    $recommended = Get-RecommendedRuntimeConfig $hardware
     $vendor = [string]$hardware.vendor
 
     if ($vendor -eq 'nvidia') {
         return @{
             backend = 'cuda'
             label = 'NVIDIA CUDA'
+            recommended_context = $recommended.context
+            recommended_gpu_layers = $recommended.gpu_layers
             releaseCandidates = @(
                 @{ backend = 'cuda'; label = 'NVIDIA CUDA'; assetPattern = 'llama-.*-bin-win-cuda-13\.1-x64\.zip$' },
                 @{ backend = 'cuda'; label = 'NVIDIA CUDA'; assetPattern = 'llama-.*-bin-win-cuda-12\.4-x64\.zip$' },
@@ -499,6 +543,8 @@ function Get-BackendPlan($hardware) {
         return @{
             backend = 'vulkan'
             label = 'Vulkan'
+            recommended_context = $recommended.context
+            recommended_gpu_layers = $recommended.gpu_layers
             releaseCandidates = @(
                 @{ backend = 'vulkan'; label = 'Vulkan'; assetPattern = 'llama-.*-bin-win-vulkan-x64\.zip$' },
                 @{ backend = 'cpu'; label = 'CPU'; assetPattern = 'llama-.*-bin-win-cpu-x64\.zip$' }
@@ -510,6 +556,8 @@ function Get-BackendPlan($hardware) {
         return @{
             backend = 'vulkan'
             label = 'Vulkan'
+            recommended_context = $recommended.context
+            recommended_gpu_layers = $recommended.gpu_layers
             releaseCandidates = @(
                 @{ backend = 'vulkan'; label = 'Vulkan'; assetPattern = 'llama-.*-bin-win-vulkan-x64\.zip$' },
                 @{ backend = 'cpu'; label = 'CPU'; assetPattern = 'llama-.*-bin-win-cpu-x64\.zip$' }
@@ -520,6 +568,8 @@ function Get-BackendPlan($hardware) {
     return @{
         backend = 'cpu'
         label = 'CPU'
+        recommended_context = $recommended.context
+        recommended_gpu_layers = $recommended.gpu_layers
         releaseCandidates = @(
             @{ backend = 'cpu'; label = 'CPU'; assetPattern = 'llama-.*-bin-win-cpu-x64\.zip$' }
         )
@@ -623,7 +673,7 @@ function Ensure-ControllerRunning {
     OK "Contrôleur hôte prêt"
 }
 
-function Write-RuntimeConfig([string]$backend, [string]$backendLabel, [string]$binaryPath) {
+function Write-RuntimeConfig([string]$backend, [string]$backendLabel, [string]$binaryPath, [int]$recommendedContext = 8192, [int]$recommendedGpuLayers = 999) {
     $config = @{
         controller_port = $controllerPort
         server_port = $llamaPort
@@ -632,8 +682,8 @@ function Write-RuntimeConfig([string]$backend, [string]$backendLabel, [string]$b
         binary_path = $binaryPath
         models_dir = $modelsDir
         proxy_model_id = 'lia-local'
-        default_context = 8192
-        default_gpu_layers = if ($backend -eq 'cpu') { 0 } else { 999 }
+        default_context = $recommendedContext
+        default_gpu_layers = if ($backend -eq 'cpu') { 0 } else { $recommendedGpuLayers }
         server_port_start = 12434
         server_port_end = 12444
         max_instances = 6
@@ -1036,20 +1086,28 @@ OK "Docker operationnel"
 
 Step "3/6" "Detection materiel et preparation llama.cpp"
 $hardware = Get-HardwareProfile
+$plan = Get-BackendPlan $hardware
+$hardware.recommended_runtime = @{
+    backend = $plan.backend
+    label = $plan.label
+    context = $plan.recommended_context
+    gpu_layers = $plan.recommended_gpu_layers
+}
 Save-HardwareProfile -profile $hardware
 INFO "Materiel detecte : $($hardware.label)"
 if ($hardware.cpu) {
     INFO "CPU detecte : $($hardware.cpu.model) | cores physiques : $($hardware.cpu.physical_cores) | threads : $($hardware.cpu.logical_processors)"
 }
 if ($hardware.memory) {
-    INFO "RAM detectee : $([math]::Round($hardware.memory.total_bytes / 1GB, 2)) Go"
+    $GB = 1024 * 1024 * 1024
+    INFO "RAM detectee : $([math]::Round($hardware.memory.total_bytes / $GB, 2)) Go"
 }
-$plan = Get-BackendPlan $hardware
 INFO "Backend cible : $($plan.label)"
+INFO "Configuration recommande : contexte=$($plan.recommended_context) gpu_layers=$($plan.recommended_gpu_layers)"
 
 $buildResult = Build-LlamaCpp $plan
 $llamaServerBinary = if ($buildResult.binaryPath) { $buildResult.binaryPath } else { Resolve-LlamaServerBinary $buildResult.buildDir }
-Write-RuntimeConfig -backend $buildResult.backend -backendLabel $buildResult.label -binaryPath $llamaServerBinary
+Write-RuntimeConfig -backend $buildResult.backend -backendLabel $buildResult.label -binaryPath $llamaServerBinary -recommendedContext $plan.recommended_context -recommendedGpuLayers $plan.recommended_gpu_layers
 if ($buildResult.source -eq 'release') {
     OK "llama.cpp prepare via binaire officiel avec backend $($buildResult.label)"
 } else {
