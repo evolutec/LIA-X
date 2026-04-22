@@ -105,6 +105,7 @@ const CONTROLLER_HOST_LAUNCHER_URL = (process.env.CONTROLLER_HOST_LAUNCHER_URL |
 const LLAMA_SERVER_BASE_URL = (process.env.LLAMA_SERVER_BASE_URL || 'http://host.docker.internal:12434').replace(/\/$/, '');
 const MODEL_STORAGE_DIR = process.env.MODEL_STORAGE_DIR || path.join(__dirname, 'models');
 const RUNTIME_STATE_PATH = process.env.RUNTIME_STATE_PATH || '/runtime/host-runtime-state.json';
+const RUNTIME_HARDWARE_PROFILE_PATH = process.env.RUNTIME_HARDWARE_PROFILE_PATH || path.join(path.dirname(RUNTIME_STATE_PATH), 'hardware-profile.json');
 const PORT = Number(process.env.MODEL_MANAGER_PORT || 3002);
 const PROXY_MODEL_ID = process.env.PROXY_MODEL_ID || 'lia-local';
 const DOCKER_INTERNAL = String(process.env.DOCKER_INTERNAL || 'false').toLowerCase() === 'true';
@@ -467,6 +468,17 @@ function extractContextLength(architecture, metadataMap) {
   return fallbackKey ? metadataMap[fallbackKey] : null;
 }
 
+function extractGpuLayers(metadataMap) {
+  const fallbackKey = Object.keys(metadataMap)
+    .find((key) => /gpu_layers$/u.test(key) || /default_gpu_layers$/u.test(key));
+
+  if (!fallbackKey) return null;
+  const value = metadataMap[fallbackKey];
+  if (Number.isInteger(value)) return value;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.floor(number) : null;
+}
+
 async function parseGgufFile(filePath) {
   const fileHandle = await fs.promises.open(filePath, 'r');
   const reader = new BufferedFileReader(fileHandle);
@@ -534,12 +546,14 @@ async function parseGgufFile(filePath) {
 
     const architecture = typeof metadataMap['general.architecture'] === 'string' ? metadataMap['general.architecture'] : '';
     const contextLength = extractContextLength(architecture, metadataMap);
+    const gpuLayers = extractGpuLayers(metadataMap);
     return {
       version,
       tensor_count: tensorCount,
       kv_count: kvCount,
       architecture,
       context_length: contextLength,
+      gpu_layers: gpuLayers,
       metadata,
       tensors,
     };
@@ -561,15 +575,39 @@ async function getModelGgufDetails(model) {
   return details;
 }
 
-async function buildModelStartRequest(identifier) {
+function normalizeRequestedContext(rawValue) {
+  if (rawValue === undefined || rawValue === null || rawValue === '') {
+    return null;
+  }
+
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  const rounded = Math.floor(value);
+  return rounded > 0 ? rounded : null;
+}
+
+async function buildModelStartRequest(identifier, requestedContext = null, requestedGpuLayers = null) {
   const model = await resolveModel(identifier);
   const details = await getModelGgufDetails(model);
   const payload = {
     model: model.name,
   };
 
-  if (Number.isInteger(details.context_length) && details.context_length > 0) {
+  const normalizedContext = normalizeRequestedContext(requestedContext);
+  if (normalizedContext) {
+    payload.context = normalizedContext;
+  } else if (Number.isInteger(details.context_length) && details.context_length > 0) {
     payload.context = details.context_length;
+  }
+
+  const normalizedGpuLayers = normalizeRequestedGpuLayers(requestedGpuLayers);
+  if (normalizedGpuLayers !== null) {
+    payload.gpu_layers = normalizedGpuLayers;
+  } else if (Number.isInteger(details.gpu_layers) && details.gpu_layers >= 0) {
+    payload.gpu_layers = details.gpu_layers;
   }
 
   return {
@@ -577,6 +615,20 @@ async function buildModelStartRequest(identifier) {
     details,
     payload,
   };
+}
+
+function normalizeRequestedGpuLayers(rawValue) {
+  if (rawValue === undefined || rawValue === null || rawValue === '') {
+    return null;
+  }
+
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  const rounded = Math.floor(value);
+  return rounded >= 0 ? rounded : null;
 }
 
 app.use(express.static(path.join(__dirname, 'dist')));
@@ -790,6 +842,15 @@ async function readRuntimeStateFallback() {
     }
 
     return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function readHardwareProfile() {
+  try {
+    const raw = await fs.promises.readFile(RUNTIME_HARDWARE_PROFILE_PATH, 'utf8');
+    return JSON.parse(raw);
   } catch {
     return null;
   }
@@ -1183,13 +1244,53 @@ function getRuntimeGpuFallback(runtime) {
   }];
 }
 
+function formatHardwareProfileGpu(profileGpu) {
+  if (!profileGpu || typeof profileGpu !== 'object') {
+    return null;
+  }
+
+  const totalBytes = profileGpu.devices?.[0]?.adapter_ram_bytes ?? null;
+  return {
+    id: 'gpu-profile',
+    type: 'gpu',
+    vendor: String(profileGpu.vendor || 'Unknown'),
+    model: String(profileGpu.label || profileGpu.model || 'GPU'),
+    usage_percent: null,
+    memory_total_bytes: Number.isFinite(Number(totalBytes)) ? Number(totalBytes) : null,
+    memory_used_bytes: null,
+    driver: null,
+  };
+}
+
 async function getPerformanceMetrics() {
+  const hardwareProfile = await readHardwareProfile();
   const discoveredGpus = await probeGpuInfo();
   const runtime = await getRuntimeStatus().catch(() => null);
+  const profileGpu = hardwareProfile?.gpu ? formatHardwareProfileGpu(hardwareProfile.gpu) : null;
   const hardware = [
     ...getCpuSnapshot(),
-    ...(discoveredGpus.length > 0 ? discoveredGpus : getRuntimeGpuFallback(runtime)),
+    ...(discoveredGpus.length > 0
+      ? discoveredGpus
+      : profileGpu
+        ? [profileGpu]
+        : getRuntimeGpuFallback(runtime)),
   ];
+
+  const memory = {
+    total_bytes: os.totalmem(),
+    free_bytes: os.freemem(),
+    used_bytes: os.totalmem() - os.freemem(),
+  };
+
+  if (hardwareProfile?.memory?.total_bytes != null) {
+    memory.host_total_bytes = Number(hardwareProfile.memory.total_bytes);
+  }
+  if (hardwareProfile?.memory?.free_bytes != null) {
+    memory.host_free_bytes = Number(hardwareProfile.memory.free_bytes);
+    if (memory.host_total_bytes != null) {
+      memory.host_used_bytes = Math.max(0, memory.host_total_bytes - memory.host_free_bytes);
+    }
+  }
 
   return {
     system: {
@@ -1197,13 +1298,11 @@ async function getPerformanceMetrics() {
       arch: os.arch(),
       uptime_seconds: Math.floor(os.uptime()),
       hostname: os.hostname(),
+      os_profile: hardwareProfile?.os || null,
     },
-    memory: {
-      total_bytes: os.totalmem(),
-      free_bytes: os.freemem(),
-      used_bytes: os.totalmem() - os.freemem(),
-    },
+    memory,
     hardware,
+    profile: hardwareProfile || null,
   };
 }
 
@@ -1483,7 +1582,22 @@ async function proxyOpenAiRequest(req, res, endpoint) {
       return err(res, 503, 'Aucun modèle actif côté llama.cpp');
     }
 
+    // ✅ RÉCUPÉRER LA VRAIE TAILLE DE CONTEXTE DE L'INSTANCE ACTIVE
+    const instances = Array.isArray(runtimeStatus.instances)
+      ? runtimeStatus.instances
+      : runtimeStatus.instances
+        ? [runtimeStatus.instances]
+        : [];
+    const activeInstance = instances.find((instance) => Boolean(instance.active) || Boolean(instance.running));
+    const realContextSize = activeInstance?.context || runtimeStatus.default_context || 131072;
+
     const payload = { ...(req.body || {}) };
+    
+    // ✅ INJECTER AUTOMATIQUEMENT max_tokens AVEC LA VRAIE LIMITE
+    // llama.cpp DEFAULT TOUJOURS À 8192 MÊME SI --ctx-size EST PLUS GRAND !
+    if (!payload.max_tokens && !payload.max_completion_tokens) {
+      payload.max_tokens = Math.floor(realContextSize * 0.95);
+    }
     const upstreamModel = runtimeStatus.active_filename || runtimeStatus.active_model;
     if (!payload.model || payload.model === PROXY_MODEL_ID) {
       payload.model = upstreamModel;
@@ -1611,12 +1725,30 @@ app.get('/api/models/available', async (req, res) => {
     const loadedModels = buildLoadedModelList(runtime);
     const loadedModelNames = new Set(loadedModels.map((item) => item.model));
     const models = await listLocalModels();
-    const files = models.map((item) => ({
-      name: item.name,
-      filename: item.filename,
-      size: item.size,
-      modified_at: item.modified_at,
-      loaded: loadedModelNames.has(item.name),
+    const files = await Promise.all(models.map(async (item) => {
+      let contextLength = null;
+      let gpuLayers = null;
+      try {
+        const details = await getModelGgufDetails(item);
+        if (Number.isInteger(details?.context_length) && details.context_length > 0) {
+          contextLength = details.context_length;
+        }
+        if (Number.isInteger(details?.gpu_layers) && details.gpu_layers >= 0) {
+          gpuLayers = details.gpu_layers;
+        }
+      } catch (error) {
+        pushLogEntry('server', '/api/models/available', 'warn', `GGUF metadata unavailable for ${item.name}: ${error?.message || error}`);
+      }
+
+      return {
+        name: item.name,
+        path: item.path,
+        size: item.size,
+        modified_at: item.modified_at,
+        loaded: loadedModelNames.has(item.name),
+        context_length: contextLength,
+        gpu_layers: gpuLayers,
+      };
     }));
     res.json({ files, source: snapshot.source });
   } catch (error) {
@@ -1756,7 +1888,7 @@ app.post('/api/models/download', async (req, res) => {
 
 app.post('/api/models/load', async (req, res) => {
   try {
-    const startRequest = await buildModelStartRequest(req.body?.model);
+    const startRequest = await buildModelStartRequest(req.body?.model, req.body?.context, req.body?.gpu_layers);
     const payload = { ...startRequest.payload, activate: false };
     console.log('[model-manager] /api/models/load', { model: startRequest.model.name, payload });
     await controllerRequest('/start', {
@@ -1785,6 +1917,10 @@ app.post('/api/models/select', async (req, res) => {
     }
 
     const payload = { model: modelName, activate: true };
+    const normalizedContext = normalizeRequestedContext(req.body?.context);
+    if (normalizedContext) {
+      payload.context = normalizedContext;
+    }
     console.log('[model-manager] /api/models/select', { model: modelName, payload });
     await controllerRequest('/start', {
       method: 'POST',

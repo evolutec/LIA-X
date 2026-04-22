@@ -22,6 +22,12 @@ function App() {
   const [sortColumn, setSortColumn] = useState("name");
   const [sortDirection, setSortDirection] = useState("asc");
   const [currentPage, setCurrentPage] = useState('home');
+  const [modelDetails, setModelDetails] = useState(null);
+  const [modelDetailsLoading, setModelDetailsLoading] = useState(false);
+  const [modelContextOverrides, setModelContextOverrides] = useState({});
+  const [modelContextNeedsReload, setModelContextNeedsReload] = useState({});
+  const [modelGpuLayersOverrides, setModelGpuLayersOverrides] = useState({});
+  const [modelGpuLayersNeedsReload, setModelGpuLayersNeedsReload] = useState({});
 
   useEffect(() => {
     refreshAllModelState();
@@ -144,10 +150,122 @@ function App() {
         const order = (item) => (item.active ? 0 : item.loaded ? 1 : 2);
         return sortDirection === 'asc' ? order(a) - order(b) : order(b) - order(a);
       }
+      if (sortColumn === 'contextLength') {
+        const valueA = Number(a.contextLength) || 0;
+        const valueB = Number(b.contextLength) || 0;
+        return sortDirection === 'asc' ? valueA - valueB : valueB - valueA;
+      }
+      if (sortColumn === 'gpuLayers') {
+        const valueA = Number(a.gpuLayers) || 0;
+        const valueB = Number(b.gpuLayers) || 0;
+        return sortDirection === 'asc' ? valueA - valueB : valueB - valueA;
+      }
       const valueA = a[sortColumn] ?? 0;
       const valueB = b[sortColumn] ?? 0;
       return sortDirection === 'asc' ? valueA - valueB : valueB - valueA;
     });
+  }
+
+  function normalizeContextValue(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return null;
+    const rounded = Math.round(number);
+    return rounded > 0 ? rounded : null;
+  }
+
+  function getSliderMinContext() {
+    return 512;
+  }
+
+  function getSliderMaxContext(row) {
+    const fromMetadata = normalizeContextValue(row?.contextLength);
+    if (fromMetadata) return Math.max(getSliderMinContext(), fromMetadata);
+    return 32768;
+  }
+
+  function getDefaultContext(row) {
+    const fromMetadata = normalizeContextValue(row?.contextLength);
+    return fromMetadata || 8192;
+  }
+
+  function getRequestedContextForRow(row) {
+    if (!row?.name) return getDefaultContext(row);
+    const override = normalizeContextValue(modelContextOverrides[row.name]);
+    if (override) return override;
+    return getDefaultContext(row);
+  }
+
+  function handleContextSliderChange(row, rawValue) {
+    if (!row?.name) return;
+    const normalized = normalizeContextValue(rawValue);
+    if (!normalized) return;
+
+    setModelContextOverrides((current) => ({
+      ...current,
+      [row.name]: normalized,
+    }));
+
+    if (row.loaded) {
+      setModelContextNeedsReload((current) => ({
+        ...current,
+        [row.name]: true,
+      }));
+    }
+  }
+
+  function handleContextSliderCommit(row) {
+    if (!row?.name || !row.loaded) return;
+    updateStatus(`${row.name}: contexte modifié (${getRequestedContextForRow(row)}). Déchargez/rechargez le modèle pour appliquer.`);
+  }
+
+  function normalizeGpuLayersValue(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return null;
+    const rounded = Math.round(number);
+    return rounded >= 1 ? rounded : null;
+  }
+
+  function getSliderMinGpuLayers() {
+    return 1;
+  }
+
+  function getSliderMaxGpuLayers() {
+    return 4;
+  }
+
+  function getDefaultGpuLayers(row) {
+    const fromMetadata = normalizeGpuLayersValue(row?.gpuLayers);
+    return fromMetadata !== null ? Math.min(Math.max(fromMetadata, getSliderMinGpuLayers()), getSliderMaxGpuLayers()) : getSliderMinGpuLayers();
+  }
+
+  function getRequestedGpuLayersForRow(row) {
+    if (!row?.name) return getDefaultGpuLayers(row);
+    const override = normalizeGpuLayersValue(modelGpuLayersOverrides[row.name]);
+    if (override !== null) return override;
+    return getDefaultGpuLayers(row);
+  }
+
+  function handleGpuLayersSliderChange(row, rawValue) {
+    if (!row?.name) return;
+    const normalized = normalizeGpuLayersValue(rawValue);
+    if (normalized === null) return;
+
+    setModelGpuLayersOverrides((current) => ({
+      ...current,
+      [row.name]: normalized,
+    }));
+
+    if (row.loaded) {
+      setModelGpuLayersNeedsReload((current) => ({
+        ...current,
+        [row.name]: true,
+      }));
+    }
+  }
+
+  function handleGpuLayersSliderCommit(row) {
+    if (!row?.name || !row.loaded) return;
+    updateStatus(`${row.name}: GPU layers modifiés (${getRequestedGpuLayersForRow(row)}). Déchargez/rechargez le modèle pour appliquer.`);
   }
 
   function buildRows() {
@@ -165,6 +283,8 @@ function App() {
         modifiedAt: file.modified_at ?? null,
         vramSize: null,
         expiresAt: null,
+        contextLength: normalizeContextValue(file.context_length),
+        gpuLayers: normalizeGpuLayersValue(file.gpu_layers),
       });
     });
     // Pour chaque modèle chargé, fusionne les infos si déjà dans le dossier, sinon ajoute une ligne "orpheline"
@@ -179,6 +299,8 @@ function App() {
           active: name === activeModel,
           vramSize: item.size_vram ?? base.vramSize,
           expiresAt: item.expires_at ?? base.expiresAt,
+          contextLength: base.contextLength ?? null,
+          gpuLayers: base.gpuLayers ?? null,
         });
       } else {
         fileMap.set(name, {
@@ -190,6 +312,8 @@ function App() {
           modifiedAt: null,
           vramSize: item.size_vram ?? null,
           expiresAt: item.expires_at ?? null,
+          contextLength: null,
+          gpuLayers: null,
         });
       }
     });
@@ -306,7 +430,30 @@ function App() {
 
   async function handleLoadFile(modelName) {
     if (!modelName) return;
-    return performAction(modelName, 'chargement', async () => apiFetch('/api/models/load', { method: 'POST', body: { model: modelName } }));
+    const row = buildRows().find((item) => item.name === modelName);
+    const requestedContext = getRequestedContextForRow(row);
+    const requestedGpuLayers = getRequestedGpuLayersForRow(row);
+    const payload = { model: modelName, context: requestedContext };
+    if (requestedGpuLayers !== null) {
+      payload.gpu_layers = requestedGpuLayers;
+    }
+    const result = await performAction(modelName, 'chargement', async () => apiFetch('/api/models/load', {
+      method: 'POST',
+      body: payload,
+    }));
+
+    if (result) {
+      setModelContextNeedsReload((current) => ({
+        ...current,
+        [modelName]: false,
+      }));
+      setModelGpuLayersNeedsReload((current) => ({
+        ...current,
+        [modelName]: false,
+      }));
+    }
+
+    return result;
   }
 
   async function handleSelectLoaded(modelName) {
@@ -315,13 +462,36 @@ function App() {
       updateStatus(`${modelName} est déjà principal.`);
       return;
     }
-    // Si le modèle n'est pas chargé, charge-le d'abord puis promeut
+
     const row = buildRows().find((r) => r.name === modelName);
-    if (row && !row.loaded) {
+    if (!row) {
+      updateStatus(`Impossible de trouver ${modelName}.`);
+      return null;
+    }
+
+    // Si le modèle n'est pas chargé, charge-le d'abord puis promeut
+    if (!row.loaded) {
       await handleLoadFile(modelName);
     }
+
+    // Si le contexte ou les GPU layers ont changé pour un modèle déjà chargé,
+    // recharge-le avant d'en faire le principal.
+    const needsReload = row.loaded && (modelContextNeedsReload[row.name] || modelGpuLayersNeedsReload[row.name]);
+    if (needsReload) {
+      await handleUnloadModel(modelName);
+      await handleLoadFile(modelName);
+    }
+
+    const updatedRow = buildRows().find((r) => r.name === modelName);
     return performAction(modelName, 'activation', async () => {
-      const data = await apiFetch('/api/models/select', { method: 'POST', body: { model: modelName } });
+      const payload = { model: modelName };
+      if (updatedRow) {
+        const requestedContext = getRequestedContextForRow(updatedRow);
+        const requestedGpuLayers = getRequestedGpuLayersForRow(updatedRow);
+        if (requestedContext !== null) payload.context = requestedContext;
+        if (requestedGpuLayers !== null) payload.gpu_layers = requestedGpuLayers;
+      }
+      const data = await apiFetch('/api/models/select', { method: 'POST', body: payload });
       setActiveModel(data.active_model || modelName);
       return data;
     });
@@ -329,7 +499,14 @@ function App() {
 
   async function handleUnloadModel(modelName) {
     if (!modelName) return;
-    return performAction(modelName, 'déchargement', async () => apiFetch('/api/models/unload', { method: 'POST', body: { model: modelName } }));
+    const result = await performAction(modelName, 'déchargement', async () => apiFetch('/api/models/unload', { method: 'POST', body: { model: modelName } }));
+    if (result) {
+      setModelContextNeedsReload((current) => ({
+        ...current,
+        [modelName]: false,
+      }));
+    }
+    return result;
   }
 
   async function handleDeleteFile(filename) {
@@ -339,12 +516,145 @@ function App() {
 
   async function handleOpenModelDetails(modelName) {
     if (!modelName) return;
+    setModelDetailsLoading(true);
     try {
       const data = await apiFetch(`/api/models/details/${encodeURIComponent(modelName)}`);
-      window.alert(`Détails du modèle:\n${JSON.stringify(data.model, null, 2)}`);
+      setModelDetails(data);
     } catch (error) {
       updateStatus(`Impossible de charger les détails : ${error.message}`);
+    } finally {
+      setModelDetailsLoading(false);
     }
+  }
+
+  function formatDetailValue(value) {
+    if (Array.isArray(value)) {
+      return value.length === 0 ? '[]' : `[${value.map((item) => String(item)).join(', ')}]`;
+    }
+    if (value === null || value === undefined) {
+      return '—';
+    }
+    if (typeof value === 'boolean') {
+      return value ? 'Oui' : 'Non';
+    }
+    return String(value);
+  }
+
+  function renderModelDetailsModal() {
+    if (!modelDetails) return null;
+
+    const metadataRows = [...(modelDetails.gguf?.metadata || [])];
+    metadataRows.sort((a, b) => {
+      const aGeneral = a.key.startsWith('general.');
+      const bGeneral = b.key.startsWith('general.');
+      if (aGeneral !== bGeneral) return aGeneral ? -1 : 1;
+      return a.key.localeCompare(b.key, 'fr', { sensitivity: 'base' });
+    });
+
+    return (
+      <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={`Détails du modèle ${modelDetails.model?.name || ''}`}>
+        <div className="modal-card">
+          <div className="modal-header-row">
+            <div>
+              <h2>Détails du modèle</h2>
+              <p className="card-subtitle">Lecture des métadonnées GGUF et aperçu technique du modèle.</p>
+            </div>
+            <button type="button" className="btn btn-secondary btn-close-modal" onClick={() => setModelDetails(null)}>
+              Fermer
+            </button>
+          </div>
+
+          <div className="modal-content-grid">
+            <section className="modal-section">
+              <h3>Informations modèle</h3>
+              <table className="metadata-table">
+                <tbody>
+                  <tr>
+                    <th>Nom</th>
+                    <td>{modelDetails.model?.name || '—'}</td>
+                  </tr>
+                  <tr>
+                    <th>Fichier</th>
+                    <td>{modelDetails.model?.filename || '—'}</td>
+                  </tr>
+                  <tr>
+                    <th>Taille sur disque</th>
+                    <td>{formatBytes(modelDetails.model?.size)}</td>
+                  </tr>
+                  <tr>
+                    <th>Modifié</th>
+                    <td>{formatShortDate(modelDetails.model?.modified_at)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </section>
+
+            <section className="modal-section">
+              <h3>Résumé GGUF</h3>
+              <table className="metadata-table">
+                <tbody>
+                  <tr>
+                    <th>Architecture</th>
+                    <td>{modelDetails.gguf?.architecture || '—'}</td>
+                  </tr>
+                  <tr>
+                    <th>Version GGUF</th>
+                    <td>{modelDetails.gguf?.version ?? '—'}</td>
+                  </tr>
+                  <tr>
+                    <th>Context length</th>
+                    <td>{modelDetails.gguf?.context_length ?? '—'}</td>
+                  </tr>
+                  <tr>
+                    <th>Tensor count</th>
+                    <td>{String(modelDetails.gguf?.tensor_count ?? '—')}</td>
+                  </tr>
+                  <tr>
+                    <th>KV count</th>
+                    <td>{String(modelDetails.gguf?.kv_count ?? '—')}</td>
+                  </tr>
+                  <tr>
+                    <th>Clés metadata</th>
+                    <td>{String(modelDetails.gguf?.metadata?.length ?? 0)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </section>
+
+            <section className="modal-section modal-table-wrap">
+              <div className="card-header-row" style={{ padding: 0 }}>
+                <h3 style={{ margin: 0 }}>Métadonnées GGUF</h3>
+                {modelDetailsLoading && <span className="badge badge-neutral">Chargement...</span>}
+              </div>
+              {metadataRows.length === 0 ? (
+                <div className="modal-empty-state">Aucune métadonnée détectée dans ce GGUF.</div>
+              ) : (
+                <div className="table-wrap">
+                  <table className="metadata-table">
+                    <thead>
+                      <tr>
+                        <th>Clé</th>
+                        <th>Type</th>
+                        <th>Valeur</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {metadataRows.map((item) => (
+                        <tr key={item.key}>
+                          <td className="metadata-key">{item.key}</td>
+                          <td className="metadata-type">{item.type}</td>
+                          <td className="metadata-value-cell"><p className="metadata-value">{formatDetailValue(item.value_display)}</p></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
+      </div>
+    );
   }
 
 async function handleDownloadUrl() {
@@ -480,6 +790,8 @@ async function handleDownloadUrl() {
         modifiedAt: file.modified_at ?? null,
         vramSize: null,
         expiresAt: null,
+        contextLength: normalizeContextValue(file.context_length),
+        gpuLayers: normalizeGpuLayersValue(file.gpu_layers),
       });
     });
     loadedModels.forEach((item) => {
@@ -495,6 +807,8 @@ async function handleDownloadUrl() {
         modifiedAt: existing.modifiedAt ?? null,
         vramSize: item.size_vram ?? null,
         expiresAt: item.expires_at ?? null,
+        contextLength: existing.contextLength ?? null,
+        gpuLayers: existing.gpuLayers ?? null,
       });
     });
     return sortRows(Array.from(rows.values()));
@@ -567,16 +881,61 @@ async function handleDownloadUrl() {
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('name')}>Nom {sortColumn === 'name' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('status')}>État {sortColumn === 'status' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('diskSize')}>Taille {sortColumn === 'diskSize' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
+            <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('contextLength')}>Context {sortColumn === 'contextLength' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('vramSize')}>VRAM {sortColumn === 'vramSize' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('modifiedAt')}>Modifié {sortColumn === 'modifiedAt' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('expiresAt')}>Expire {sortColumn === 'expiresAt' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
-            <th>Infos</th><th>Chargé</th><th>Principal</th>
-          </tr></thead><tbody>
+             <th>Infos</th><th>Chargé</th><th>Principal</th><th>Supprimer</th>
+           </tr></thead><tbody>
             {modelRows.map((row) => (
               <tr key={row.name} className={[row.loaded ? 'row-loaded' : '', row.active ? 'row-active' : '', pendingAction?.model === row.name ? 'row-pending' : ''].filter(Boolean).join(' ')}>
                 <td className="col-name"><div className="table-model-name">{row.filename || row.name}</div></td>
                 <td><div className="state-stack">{row.active && <span className="badge badge-success">✓ Principal</span>}{!row.active && row.loaded && <span className="badge badge-loaded">En mémoire</span>}{!row.loaded && <span className="badge badge-neutral">Disponible</span>}{pendingAction?.model === row.name && <span className="badge badge-pending"><span className="spinner spinner-small" /> {pendingAction.type}…</span>}</div></td>
                 <td>{formatBytes(row.diskSize)}</td>
+                <td>
+                  <div className="context-cell">
+                    <div className="context-values">
+                      <span className="badge badge-neutral">metadata: {row.contextLength ?? '—'}</span>
+                      <span className="badge badge-loaded">n_ctx: {getRequestedContextForRow(row)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={getSliderMinContext()}
+                      max={Math.max(getSliderMaxContext(row), getRequestedContextForRow(row))}
+                      step={256}
+                      value={getRequestedContextForRow(row)}
+                      onChange={(event) => handleContextSliderChange(row, event.target.value)}
+                      onMouseUp={() => handleContextSliderCommit(row)}
+                      onTouchEnd={() => handleContextSliderCommit(row)}
+                      disabled={loading || Boolean(pendingAction)}
+                      aria-label={`Context length pour ${row.name}`}
+                    />
+                    {row.loaded && modelContextNeedsReload[row.name] && (
+                      <div className="context-reload-note">Modifié: décharger/recharger pour appliquer.</div>
+                    )}
+                    <div className="gpu-layers-cell">
+                      <div className="gpu-layers-values">
+                        <span className="badge badge-neutral">metadata: {row.gpuLayers ?? '—'}</span>
+                        <span className="badge badge-loaded">gpu_layers: {getRequestedGpuLayersForRow(row)}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={getSliderMinGpuLayers()}
+                        max={Math.max(getSliderMaxGpuLayers(row), getRequestedGpuLayersForRow(row))}
+                        step={1}
+                        value={getRequestedGpuLayersForRow(row)}
+                        onChange={(event) => handleGpuLayersSliderChange(row, event.target.value)}
+                        onMouseUp={() => handleGpuLayersSliderCommit(row)}
+                        onTouchEnd={() => handleGpuLayersSliderCommit(row)}
+                        disabled={loading || Boolean(pendingAction)}
+                        aria-label={`GPU layers pour ${row.name}`}
+                      />
+                      {row.loaded && modelGpuLayersNeedsReload[row.name] && (
+                        <div className="context-reload-note">Modifié: décharger/recharger pour appliquer.</div>
+                      )}
+                    </div>
+                  </div>
+                </td>
                 <td>{formatBytes(row.vramSize)}</td>
                 <td>{formatShortDate(row.modifiedAt)}</td>
                 <td>{formatShortDate(row.expiresAt)}</td>
@@ -596,8 +955,13 @@ async function handleDownloadUrl() {
                     </span>
                     <span className="toggle-led" aria-hidden="true" />
                   </button>
-                </td>
-              </tr>
+                 </td>
+                 <td>
+                   <button className="btn btn-icon btn-delete" onClick={() => handleDeleteFile(row.filename)} disabled={loading || Boolean(pendingAction)} title={`Supprimer ${row.name}`}>
+                     🗑️
+                   </button>
+                 </td>
+               </tr>
             ))}
           </tbody></table></div>}
         </div>
@@ -647,6 +1011,7 @@ async function handleDownloadUrl() {
       <main className="app-content">
         {statusMessage && <div className={`notification ${/échec|Erreur|error/i.test(statusMessage) ? 'error' : 'info'}`}>{statusMessage}</div>}
         {renderPageContent()}
+        {renderModelDetailsModal()}
       </main>
       <Loader show={loading || !!pendingAction} progress={downloadProgress} />
     </div>

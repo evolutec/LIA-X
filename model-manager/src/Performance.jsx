@@ -62,7 +62,25 @@ function Performance() {
   }, []);
 
   const cpuCards = useMemo(() => (performance?.hardware || []).filter((item) => item.type === "cpu"), [performance]);
-  const gpuCards = useMemo(() => (performance?.hardware || []).filter((item) => item.type === "gpu"), [performance]);
+  const gpuCards = useMemo(() => {
+    const gpuItems = (performance?.hardware || []).filter((item) => item.type === "gpu");
+    if (gpuItems.length > 0) {
+      return gpuItems;
+    }
+    if (performance?.profile?.gpu) {
+      return [{
+        id: 'gpu-profile',
+        type: 'gpu',
+        vendor: performance.profile.gpu.vendor,
+        model: performance.profile.gpu.label,
+        usage_percent: null,
+        memory_total_bytes: performance.profile.gpu.devices?.[0]?.adapter_ram_bytes ?? null,
+        memory_used_bytes: null,
+        driver: null,
+      }];
+    }
+    return [];
+  }, [performance]);
 
   return (
     <div className="card performance-card">
@@ -85,8 +103,16 @@ function Performance() {
           <div>{formatDuration(performance?.system?.uptime_seconds)}</div>
         </div>
         <div className="summary-stack">
-          <div className="summary-title">RAM système</div>
-          <div>{performance?.memory ? `${formatBytes(performance.memory.used_bytes)} / ${formatBytes(performance.memory.total_bytes)}` : '—'}</div>
+          <div className="summary-title">CPU hôte</div>
+          <div>{performance?.profile?.cpu?.model || '—'}</div>
+        </div>
+        <div className="summary-stack">
+          <div className="summary-title">Threads</div>
+          <div>{performance?.profile?.cpu ? `${performance.profile.cpu.logical_processors} / ${performance.profile.cpu.physical_cores}` : '—'}</div>
+        </div>
+        <div className="summary-stack">
+          <div className="summary-title">RAM hôte</div>
+          <div>{performance?.memory ? `${formatBytes(performance.memory.host_used_bytes ?? performance.memory.used_bytes)} / ${formatBytes(performance.memory.host_total_bytes ?? performance.memory.total_bytes)}` : '—'}</div>
         </div>
       </div>
 

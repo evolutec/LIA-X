@@ -623,6 +623,27 @@ input[type="text"]:focus {
   font-size: 0.8rem;
 }
 
+.btn-icon {
+  min-width: 38px;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 10px;
+  font-size: 1rem;
+}
+
+.btn-delete {
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  color: #fb7185;
+}
+
+.btn-delete:not(:disabled):hover {
+  background: rgba(248, 113, 113, 0.18);
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #fca5a5;
+}
+
 .btn-toggle {
   min-height: 38px;
   min-width: 92px;
@@ -1200,6 +1221,55 @@ input[type="text"]:focus {
   word-break: break-word;
 }
 
+.context-cell {
+  min-width: 220px;
+  display: grid;
+  gap: 8px;
+}
+
+.context-values,
+.gpu-layers-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.gpu-layers-cell {
+  min-width: 220px;
+  display: grid;
+  gap: 8px;
+}
+
+.gpu-layers-cell input[type="range"] {
+  width: 100%;
+  accent-color: #38bdf8;
+  cursor: pointer;
+}
+
+.gpu-layers-cell input[type="range"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.btn-icon,
+.btn-table {
+  pointer-events: auto;
+  position: relative;
+  z-index: 1;
+}
+
+.context-cell input[type="range"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.context-reload-note {
+  color: #fcd34d;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1258,6 +1328,22 @@ input[type="text"]:focus {
 .metadata-table,
 .tensor-table {
   min-width: 100%;
+}
+
+.metadata-table th,
+.metadata-table td {
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  vertical-align: top;
+}
+
+.metadata-table thead th {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .metadata-key {

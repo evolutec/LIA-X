@@ -11,6 +11,7 @@ $controllerScript  = Join-Path $rootDir "controller\llama-host-controller.ps1"
 $controllerServiceHelper = Join-Path $rootDir "scripts\create-lia-services.ps1"
 $runtimeConfigPath = Join-Path $runtimeDir "host-runtime-config.json"
 $runtimeStatePath  = Join-Path $runtimeDir "host-runtime-state.json"
+$hardwareProfilePath = Join-Path $runtimeDir "hardware-profile.json"
 $controllerPort    = 13579
 $llamaPort         = 12434
 $loaderPort           = 3002
@@ -385,16 +386,97 @@ function Get-HardwareProfile {
     $joined = ($names -join ' | ')
 
     if ($joined -match 'NVIDIA') {
-        return @{ vendor = 'nvidia'; label = $joined }
-    }
-    if ($joined -match 'Radeon|AMD') {
-        return @{ vendor = 'amd'; label = $joined }
-    }
-    if ($joined -match 'Intel') {
-        return @{ vendor = 'intel'; label = $joined }
+        $gpuVendor = 'nvidia'
+    } elseif ($joined -match 'Radeon|AMD') {
+        $gpuVendor = 'amd'
+    } elseif ($joined -match 'Intel') {
+        $gpuVendor = 'intel'
+    } else {
+        $gpuVendor = 'cpu'
     }
 
-    return @{ vendor = 'cpu'; label = if ($joined) { $joined } else { 'Aucun GPU détecté' } }
+    $gpuLabel = if ($joined) { $joined } else { 'Aucun GPU détecté' }
+    $gpuDevices = @()
+    foreach ($controller in $controllers) {
+        $gpuDevices += @{
+            name = ($controller.Name ?? '').Trim()
+            driver_version = ($controller.DriverVersion ?? '').Trim()
+            adapter_ram_bytes = [int64]($controller.AdapterRAM ?? 0)
+        }
+    }
+
+    $processor = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+    $cpuProfile = $null
+    if ($processor) {
+        $cpuProfile = @{
+            model = ($processor.Name ?? '').Trim()
+            manufacturer = ($processor.Manufacturer ?? '').Trim()
+            architecture = switch ($processor.Architecture) {
+                0 { 'x86' }
+                1 { 'MIPS' }
+                2 { 'Alpha' }
+                3 { 'PowerPC' }
+                5 { 'ARM' }
+                6 { 'Itanium' }
+                9 { 'x64' }
+                default { [string]$processor.Architecture }
+            }
+            physical_cores = [int]($processor.NumberOfCores ?? 0)
+            logical_processors = [int]($processor.NumberOfLogicalProcessors ?? 0)
+            max_clock_speed_mhz = [int]($processor.MaxClockSpeed ?? 0)
+            current_clock_speed_mhz = [int]($processor.CurrentClockSpeed ?? 0)
+        }
+    }
+
+    $osInfo = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $memoryProfile = $null
+    $osProfile = $null
+    if ($osInfo) {
+        $memoryProfile = @{
+            total_bytes = [int64]($osInfo.TotalVisibleMemorySize ?? 0) * 1024
+            free_bytes = [int64]($osInfo.FreePhysicalMemory ?? 0) * 1024
+        }
+        $osProfile = @{
+            caption = ($osInfo.Caption ?? '').Trim()
+            version = ($osInfo.Version ?? '').Trim()
+            build_number = ($osInfo.BuildNumber ?? '').Trim()
+        }
+    }
+
+    return @{
+        vendor = $gpuVendor
+        label = $gpuLabel
+        gpu = @{
+            vendor = $gpuVendor
+            label = $gpuLabel
+            count = $gpuDevices.Count
+            devices = $gpuDevices
+        }
+        cpu = $cpuProfile
+        memory = $memoryProfile
+        os = $osProfile
+        detected_at = (Get-Date).ToString('o')
+    }
+}
+
+function Save-HardwareProfile([hashtable]$profile) {
+    try {
+        $existing = $null
+        if (Test-Path $hardwareProfilePath) {
+            try {
+                $existing = Get-Content -Path $hardwareProfilePath -Raw | ConvertFrom-Json
+            } catch {
+                $existing = $null
+            }
+        }
+
+        $profile.generation_count = if ($existing -and $existing.generation_count) { [int]$existing.generation_count + 1 } else { 1 }
+        $profile.generated_at = (Get-Date).ToString('o')
+        $profile | ConvertTo-Json -Depth 6 | Set-Content -Path $hardwareProfilePath -Encoding UTF8
+        OK "Profil materiel sauve : $hardwareProfilePath (generation_count=$($profile.generation_count))"
+    } catch {
+        WARN "Impossible de sauvegarder le profil materiel: $($_.Exception.Message)"
+    }
 }
 
 function Get-BackendPlan($hardware) {
@@ -954,7 +1036,14 @@ OK "Docker operationnel"
 
 Step "3/6" "Detection materiel et preparation llama.cpp"
 $hardware = Get-HardwareProfile
+Save-HardwareProfile -profile $hardware
 INFO "Materiel detecte : $($hardware.label)"
+if ($hardware.cpu) {
+    INFO "CPU detecte : $($hardware.cpu.model) | cores physiques : $($hardware.cpu.physical_cores) | threads : $($hardware.cpu.logical_processors)"
+}
+if ($hardware.memory) {
+    INFO "RAM detectee : $([math]::Round($hardware.memory.total_bytes / 1GB, 2)) Go"
+}
 $plan = Get-BackendPlan $hardware
 INFO "Backend cible : $($plan.label)"
 

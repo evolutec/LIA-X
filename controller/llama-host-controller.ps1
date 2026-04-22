@@ -213,7 +213,7 @@ function Get-Config {
     }
 
     if (-not $config.default_context -or [int]$config.default_context -eq 0) {
-        $config.default_context = 8192
+        $config.default_context = 1
         $changed = $true
     }
 
@@ -460,11 +460,21 @@ function Repair-DeadInstances([hashtable]$state) {
         continue
     }
 
-    Write-Host "[Controller] Processus manquant ou arrêté détecté pour $($instance.model) (port $($instance.port)). Redémarrage..."
+    Write-Host "[Controller] Processus manquant ou arrêté détecté pour $($instance.model) (port $($instance.port)). Redémarrage avec configuration utilisateur..."
     try {
         $body = @{ model = $instance.model }
-        if ($instance.context) { $body.context = [int]$instance.context }
-        if ($instance.gpu_layers) { $body.gpu_layers = [int]$instance.gpu_layers }
+        
+        # ✅ PRIORITÉ ABSOLUE: Utiliser LA VALEUR QUE L'UTILISATEUR A SELECTIONNÉ DANS L'UI
+        # Ne JAMAIS utiliser default_context si l'utilisateur a déjà choisi une valeur pour ce modèle
+        if ($instance.context -and [int]$instance.context -gt 0) { 
+            $body.context = [int]$instance.context 
+            Write-Host "[Controller] 🔄 Redémarrage avec contexte UTILISATEUR: $($instance.context)"
+        }
+        if ($instance.gpu_layers -and [int]$instance.gpu_layers -ge 0) { 
+            $body.gpu_layers = [int]$instance.gpu_layers 
+            Write-Host "[Controller] 🔄 Redémarrage avec gpu_layers UTILISATEUR: $($instance.gpu_layers)"
+        }
+        
         if ($instance.active) { $body.activate = $true } else { $body.activate = $false }
         Start-LlamaProcess $body | Out-Null
     } catch {
@@ -774,7 +784,29 @@ Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Start-LlamaProces
         $activate = $true
     }
 
-    if ($existingInstance -and (Test-TcpEndpoint -HostName '127.0.0.1' -Port ([int]$existingInstance.port) -TimeoutMs 1000)) {
+    # ✅ CORRECTION: Vérifier que la configuration correspond (context / gpu_layers)
+    $configurationMatches = $false
+    if ($existingInstance) {
+        $requestedContext = if ($body.context) { [int]$body.context } else { [int]$config.default_context }
+        $requestedGpuLayers = if ($body.gpu_layers) { [int]$body.gpu_layers } else { [int]$config.default_gpu_layers }
+        
+        $existingContext = if ($existingInstance.context) { [int]$existingInstance.context } else { 0 }
+        $existingGpuLayers = if ($existingInstance.gpu_layers) { [int]$existingInstance.gpu_layers } else { 0 }
+
+        $configurationMatches = ($requestedContext -eq $existingContext) -and ($requestedGpuLayers -eq $existingGpuLayers)
+        
+        Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Configuration check: requested ctx=$requestedContext / existing ctx=$existingContext | requested ngl=$requestedGpuLayers / existing ngl=$existingGpuLayers | matches=$configurationMatches"
+    }
+
+    # ✅ SI LA CONFIGURATION NE CORRESPOND PAS: ON DÉTRUIT L'INSTANCE EXISTANTE MÊME SI ELLE EXISTE
+    if ($existingInstance -and -not $configurationMatches) {
+        Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Configuration mismatch detected, destroying existing instance before creating new one"
+        Stop-LlamaProcess @{ id = $existingInstance.id } | Out-Null
+        $existingInstance = $null
+        Start-Sleep -Milliseconds 1500
+    }
+
+    if ($existingInstance -and $configurationMatches -and (Test-TcpEndpoint -HostName '127.0.0.1' -Port ([int]$existingInstance.port) -TimeoutMs 1000)) {
         if ($activate) {
             Write-Host "[controller] Activating existing model instance: $($record.model) on port $($existingInstance.port)"
             Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Promoting existing instance id=$($existingInstance.id)"
@@ -820,7 +852,9 @@ Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Start-LlamaProces
     $arguments = @(
         '--host', '0.0.0.0',
         '--port', ([string]$port),
-        '-m', $record.file.FullName,
+        # Start-Process concatène ArgumentList : un chemin avec espaces doit être explicitement quoté.
+        '-m', ('"{0}"' -f $record.file.FullName),
+        '--ctx-size', ([string]$context),
         '-c', ([string]$context),
         '--cache-ram', '512'
     )
@@ -853,6 +887,8 @@ Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Start-LlamaProces
         server_base_url = "http://127.0.0.1:$port/v1"
         proxy_id = "$($config.proxy_model_id)-$port"
         active = $activate
+        context = $context
+        gpu_layers = $gpuLayers
     }
 
     if ($activate) {
