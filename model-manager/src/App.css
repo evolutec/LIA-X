@@ -1195,6 +1195,113 @@ input[type="text"]:focus {
   background: rgba(255, 255, 255, 0.03);
 }
 
+@media (max-width: 860px) {
+  .model-table {
+    min-width: 0;
+  }
+
+  .model-table thead {
+    display: none;
+  }
+
+  .model-table,
+  .model-table tbody,
+  .model-table tr {
+    display: block;
+    width: 100%;
+  }
+
+  .model-table tr {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-areas:
+      "name status size"
+      "context context context"
+      "vram modified expires"
+      "infos infos infos"
+      "loaded active delete";
+    gap: 10px;
+    padding: 14px 16px;
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    border-radius: 18px;
+    margin-bottom: 16px;
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .model-table td {
+    display: block;
+    padding: 0;
+    border: none;
+  }
+
+  .model-table td:nth-child(1) {
+    grid-area: name;
+  }
+
+  .model-table td:nth-child(2) {
+    grid-area: status;
+  }
+
+  .model-table td:nth-child(3) {
+    grid-area: size;
+  }
+
+  .model-table td:nth-child(4) {
+    grid-area: context;
+  }
+
+  .model-table td:nth-child(5) {
+    grid-area: vram;
+  }
+
+  .model-table td:nth-child(6) {
+    grid-area: modified;
+  }
+
+  .model-table td:nth-child(7) {
+    grid-area: expires;
+  }
+
+  .model-table td:nth-child(8) {
+    grid-area: infos;
+  }
+
+  .model-table td:nth-child(9) {
+    grid-area: loaded;
+  }
+
+  .model-table td:nth-child(10) {
+    grid-area: active;
+  }
+
+  .model-table td:nth-child(11) {
+    grid-area: delete;
+  }
+
+  .table-model-name {
+    font-size: 0.98rem;
+    line-height: 1.3;
+  }
+
+  .model-table td .state-stack,
+  .model-table td .context-cell,
+  .model-table td .gpu-summary {
+    width: 100%;
+  }
+
+  .model-table td .context-values {
+    flex-direction: column;
+  }
+
+  .model-table td input[type="range"] {
+    width: 100%;
+  }
+
+  .model-table td:last-child {
+    justify-self: end;
+  }
+}
+
 .model-table tbody tr {
   transition: background 0.18s ease;
 }
