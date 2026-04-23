@@ -41,12 +41,13 @@ function App() {
         refreshAllModelState({ silent: true });
         fetchControllerHealth();
       }
-    }, 5000);
+    }, 25000);
     return () => window.clearInterval(intervalId);
   }, [loading, pendingAction]);
 
   function log(...args) {
-    console.log('[App]', ...args);
+    // LOGS DÉSACTIVÉS PAR DÉFAUT: commenter pour réactiver
+    // console.log('[App]', ...args);
   }
 
   function normalizeUrl(value) {
@@ -77,10 +78,12 @@ function App() {
       delete init.body;
     }
 
-    log('fetch', init.method, url, options.body || 'no body');
+    // LOGS DÉSACTIVÉS POUR LES REQUÊTES GET SILENCIEUSES
+    // log('fetch', init.method, url, options.body || 'no body');
     const response = await fetch(url, init);
     const payload = await parseJson(response);
-    log('fetch result', init.method, url, response.status, payload);
+    // LOGS DÉSACTIVÉS POUR LES RÉPONSES
+    // log('fetch result', init.method, url, response.status, payload);
     if (!response.ok) {
       const message = payload?.detail || payload?.message || response.statusText || String(payload);
       throw new Error(message);
@@ -180,13 +183,21 @@ function App() {
 
   function getSliderMaxContext(row) {
     const fromMetadata = normalizeContextValue(row?.contextLength);
-    if (fromMetadata) return Math.max(getSliderMinContext(), fromMetadata);
-    return 32768;
+    const recommended = normalizeContextValue(recommendedRuntime?.context);
+    const baseMax = fromMetadata ?? 32768;
+    return Math.max(getSliderMinContext(), baseMax, recommended ?? 0);
   }
 
   function getDefaultContext(row) {
-    const fromMetadata = normalizeContextValue(row?.contextLength);
-    return fromMetadata || 8192;
+    const modelMax = normalizeContextValue(row?.contextLength);
+    const recommended = normalizeContextValue(recommendedRuntime?.context);
+    if (recommended !== null && modelMax !== null) {
+      return Math.min(modelMax, recommended);
+    }
+    if (recommended !== null) {
+      return recommended;
+    }
+    return modelMax || 8192;
   }
 
   function getRequestedContextForRow(row) {
@@ -292,7 +303,8 @@ function App() {
 
   async function refreshAllModelState(options = {}) {
     const { silent = false } = options;
-    log('refreshAllModelState', options);
+    // LOG DÉSACTIVÉ:
+    // log('refreshAllModelState', options);
     try {
       await Promise.all([
         refreshVersion(silent),
@@ -473,6 +485,20 @@ function App() {
         [modelName]: false,
       }));
     }
+    return result;
+  }
+
+  async function handleReloadModel(modelName) {
+    if (!modelName) return;
+    const row = buildRows().find((item) => item.name === modelName);
+    if (!row || !row.loaded) {
+      updateStatus(`${modelName} n'est pas chargé.`);
+      return null;
+    }
+
+    updateStatus(`${modelName} : rechargement pour appliquer le nouveau contexte...`);
+    await handleUnloadModel(modelName);
+    const result = await handleLoadFile(modelName);
     return result;
   }
 
@@ -945,7 +971,17 @@ async function handleDownloadUrl() {
                       aria-label={`Context length pour ${row.name}`}
                     />
                     {row.loaded && modelContextNeedsReload[row.name] && (
-                      <div className="context-reload-note">Modifié: décharger/recharger pour appliquer.</div>
+                      <div className="context-reload-row">
+                        <div className="context-reload-note">Modifié : recharger pour appliquer.</div>
+                        <button
+                          type="button"
+                          className="btn btn-reload btn-sm"
+                          onClick={() => handleReloadModel(row.name)}
+                          disabled={loading || Boolean(pendingAction)}
+                        >
+                          ⟳ Recharger
+                        </button>
+                      </div>
                     )}
                     <div className="gpu-summary">
                       <span className="badge badge-neutral">gpu_layers metadata: {row.gpuLayers ?? '—'}</span>

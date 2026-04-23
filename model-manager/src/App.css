@@ -644,6 +644,16 @@ input[type="text"]:focus {
   color: #fca5a5;
 }
 
+.btn-reload {
+  background: rgba(14, 165, 233, 0.12);
+  color: #0ea5e9;
+  border: 1px solid rgba(14, 165, 233, 0.24);
+}
+
+.btn-reload:not(:disabled):hover {
+  background: rgba(14, 165, 233, 0.18);
+}
+
 .btn-toggle {
   min-height: 38px;
   min-width: 92px;
@@ -1332,6 +1342,19 @@ input[type="text"]:focus {
   min-width: 220px;
   display: grid;
   gap: 8px;
+}
+
+.context-reload-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.context-reload-note {
+  color: var(--text-muted);
+  font-size: 0.88rem;
 }
 
 .context-values,

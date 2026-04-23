@@ -140,9 +140,15 @@ Fichiers: [`model-manager/server.js`](model-manager/server.js:1), [`model-manage
 - **Fonctionnalités** :
   - Import et catalogue de modèles GGUF
   - Proxy OpenAI-compatible (`/v1/*`)
-  - API de gestion des modèles (`/api/models/*`)
-  - Interface React pour la gestion visuelle
+  - Détection des requêtes Roocode / Cline / Coolcline via header HTTP
+  - Si un header personnalisé est présent, le corps de la requête est transmis sans réécriture
   - Circuit breaker pour la résilience
+
+**Configuration Roocode / en-tête personnalisé**
+- Ajoute dans Roocode un header personnalisé : `X-Roocode-Source: true`
+- Si tu veux changer le nom ou la valeur, utilise :
+  - `ROOCODE_SOURCE_HEADER_NAME`
+  - `ROOCODE_SOURCE_HEADER_VALUE`
 
 ### Frontends Docker
 
@@ -201,7 +207,11 @@ User Request
 │  - Receit la requête HTTP           │
 │  - Valide le modèle actif            │
 │  - Construit l'URL du llama-server  │
-│  - Ajoute headers appropriés        │
+│  - Détecte les requêtes Roocode     │
+│    / Cline / Coolcline via header   │
+│  - Envoie le corps sans réécriture  │
+│    si un header personnalisé est     │
+│    présent                         │
 └─────────────────────────────────────┘
     │
     ▼

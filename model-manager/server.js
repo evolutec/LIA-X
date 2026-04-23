@@ -108,6 +108,8 @@ const RUNTIME_STATE_PATH = process.env.RUNTIME_STATE_PATH || '/runtime/host-runt
 const RUNTIME_HARDWARE_PROFILE_PATH = process.env.RUNTIME_HARDWARE_PROFILE_PATH || path.join(path.dirname(RUNTIME_STATE_PATH), 'hardware-profile.json');
 const PORT = Number(process.env.MODEL_MANAGER_PORT || 3002);
 const PROXY_MODEL_ID = process.env.PROXY_MODEL_ID || 'lia-local';
+const ROOCODE_SOURCE_HEADER_NAME = String(process.env.ROOCODE_SOURCE_HEADER_NAME || 'x-roocode-source').trim().toLowerCase();
+const ROOCODE_SOURCE_HEADER_VALUE = String(process.env.ROOCODE_SOURCE_HEADER_VALUE || 'true').trim().toLowerCase();
 const DOCKER_INTERNAL = String(process.env.DOCKER_INTERNAL || 'false').toLowerCase() === 'true';
 const CONTROLLER_START_TIMEOUT_MS = Number(process.env.CONTROLLER_START_TIMEOUT_MS || '120000');
 const OLLAMA_REGISTRY_BASE_URL = 'https://registry.ollama.ai';
@@ -594,16 +596,32 @@ async function buildModelStartRequest(identifier, requestedContext = null, reque
   const details = await getModelGgufDetails(model);
   const profile = await readHardwareProfile();
   const recommended = getRecommendedRuntimeDefaults(profile);
+  const runtimeState = await readRuntimeStateFallback();
+  
   const payload = {
     model: model.name,
   };
 
+  // ✅ 1. PRIORITE ABSOLUE: Valeur explicitement demandée par l'utilisateur (UI) - JAMAIS bridée
   const normalizedContext = normalizeRequestedContext(requestedContext);
   if (normalizedContext !== null) {
     payload.context = normalizedContext;
-  } else if (Number.isInteger(details.context_length) && details.context_length > 0) {
+  } 
+  // ✅ 2. Deuxième priorité: Valeur déjà sauvegardée dans le runtime state pour ce modèle
+  else if (runtimeState && Array.isArray(runtimeState.instances)) {
+    const existingInstance = runtimeState.instances.find(
+      i => i.filename === model.filename && Number.isInteger(i.context) && i.context > 0
+    );
+    if (existingInstance) {
+      payload.context = existingInstance.context;
+    }
+  }
+  // ✅ 3. Seulement si aucune valeur personnalisée: utiliser native modèle + hardware limite
+  else if (Number.isInteger(details.context_length) && details.context_length > 0) {
     payload.context = Math.min(details.context_length, recommended.context);
-  } else {
+  } 
+  // ✅ 4. Fallback final: hardware default
+  else {
     payload.context = recommended.context;
   }
 
@@ -863,57 +881,14 @@ async function readHardwareProfile() {
 }
 
 function getRecommendedRuntimeDefaults(hardwareProfile) {
-  const safe = {
+  // ✅ PLUS AUCUN BRIDAGE AUTOMATIQUE
+  // ✅ La fonction ne retourne PLUS AUCUNE VALEUR PAR DEFAUT
+  // ✅ La fonction est complètement neutralisée
+  return {
     backend: 'cpu',
-    context: 4096,
-    gpu_layers: 0,
+    context: 131072,
+    gpu_layers: 999,
   };
-
-  if (!hardwareProfile || typeof hardwareProfile !== 'object') {
-    return safe;
-  }
-
-  if (hardwareProfile.recommended_runtime && typeof hardwareProfile.recommended_runtime === 'object') {
-    return {
-      backend: String(hardwareProfile.recommended_runtime.backend || safe.backend),
-      context: Number.isFinite(Number(hardwareProfile.recommended_runtime.context))
-        ? Math.max(1, Math.floor(Number(hardwareProfile.recommended_runtime.context)))
-        : safe.context,
-      gpu_layers: Number.isFinite(Number(hardwareProfile.recommended_runtime.gpu_layers))
-        ? Math.max(0, Math.floor(Number(hardwareProfile.recommended_runtime.gpu_layers)))
-        : safe.gpu_layers,
-    };
-  }
-
-  const vendor = String(hardwareProfile.vendor || '').toLowerCase();
-  const totalBytes = Number(hardwareProfile?.memory?.total_bytes ?? 0);
-  const gpuBytes = Number(hardwareProfile?.gpu?.devices?.[0]?.adapter_ram_bytes ?? 0);
-  const GB = 1024 * 1024 * 1024;
-
-  const result = { ...safe };
-  if (vendor === 'nvidia' || vendor === 'amd' || vendor === 'intel') {
-    result.backend = vendor === 'nvidia' ? 'cuda' : 'vulkan';
-    result.gpu_layers = 999;
-    if (gpuBytes >= 24 * GB) {
-      result.context = 8192;
-    } else if (gpuBytes >= 14 * GB) {
-      result.context = 6144;
-    } else if (gpuBytes >= 8 * GB) {
-      result.context = 4096;
-    } else {
-      result.context = 2048;
-    }
-  } else {
-    if (totalBytes >= 32 * GB) {
-      result.context = 8192;
-    } else if (totalBytes >= 16 * GB) {
-      result.context = 4096;
-    } else {
-      result.context = 2048;
-    }
-  }
-
-  return result;
 }
 
 function hasUsefulRuntimeState(runtime) {
@@ -1614,7 +1589,7 @@ function translateToDockerHost(url) {
     .replace(/^http:\/\/localhost(:\d+)/i, 'http://host.docker.internal$1');
 }
 
-function getRuntimeBaseUrl(runtimeStatus) {
+function getRuntimeBaseUrl(runtimeStatus, requestedModel) {
   if (!runtimeStatus || typeof runtimeStatus !== 'object') {
     return translateToDockerHost(LLAMA_SERVER_BASE_URL);
   }
@@ -1624,6 +1599,17 @@ function getRuntimeBaseUrl(runtimeStatus) {
     : runtimeStatus.instances
       ? [runtimeStatus.instances]
       : [];
+
+  if (requestedModel) {
+    const matchedInstance = instances.find((instance) => {
+      const modelId = String(instance.model || instance.filename || instance.proxy_id || instance.id || '').trim();
+      return modelId === requestedModel || String(instance.proxy_id || '').trim() === requestedModel;
+    });
+
+    if (matchedInstance?.server_base_url) {
+      return translateToDockerHost(String(matchedInstance.server_base_url).replace(/\/v1\/?$/, '').replace(/\/$/, ''));
+    }
+  }
 
   const activeInstance = instances.find((instance) => Boolean(instance.active) || Boolean(instance.running));
   if (activeInstance?.server_base_url) {
@@ -1635,6 +1621,34 @@ function getRuntimeBaseUrl(runtimeStatus) {
   }
 
   return translateToDockerHost(LLAMA_SERVER_BASE_URL);
+}
+
+function normalizeHeaderValue(value) {
+  if (typeof value === 'string') {
+    return value.trim().toLowerCase();
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeHeaderValue(item)).join(', ');
+  }
+
+  return '';
+}
+
+function requestContainsRoocodeHeader(req) {
+  const headers = req.headers || {};
+  const headerEntries = Object.entries(headers).map(([name, value]) => ({
+    name: String(name || '').trim().toLowerCase(),
+    value: normalizeHeaderValue(value),
+  }));
+
+  const knownSourcePattern = /roocode|coolcline|cline|roocodeclient|roocode-client|roocode-source/i;
+  const hasKnownSourceHeader = headerEntries.some(({ name, value }) => knownSourcePattern.test(name) || knownSourcePattern.test(value));
+
+  const hasCustomSourceHeader = ROOCODE_SOURCE_HEADER_NAME
+    && headerEntries.some(({ name, value }) => name === ROOCODE_SOURCE_HEADER_NAME && value === ROOCODE_SOURCE_HEADER_VALUE);
+
+  return hasKnownSourceHeader || hasCustomSourceHeader;
 }
 
 async function proxyOpenAiRequest(req, res, endpoint) {
@@ -1656,19 +1670,26 @@ async function proxyOpenAiRequest(req, res, endpoint) {
     const activeInstance = instances.find((instance) => Boolean(instance.active) || Boolean(instance.running));
     const realContextSize = activeInstance?.context || runtimeStatus.default_context || 131072;
 
-    const payload = { ...(req.body || {}) };
-    
-    // ✅ INJECTER AUTOMATIQUEMENT max_tokens AVEC LA VRAIE LIMITE
-    // llama.cpp DEFAULT TOUJOURS À 8192 MÊME SI --ctx-size EST PLUS GRAND !
-    if (!payload.max_tokens && !payload.max_completion_tokens) {
-      payload.max_tokens = Math.floor(realContextSize * 0.95);
-    }
-    const upstreamModel = runtimeStatus.active_filename || runtimeStatus.active_model;
-    if (!payload.model || payload.model === PROXY_MODEL_ID) {
-      payload.model = upstreamModel;
+    const isRoocodeRequest = requestContainsRoocodeHeader(req);
+    const payload = isRoocodeRequest ? (req.body || {}) : { ...(req.body || {}) };
+    const requestedModel = typeof payload.model === 'string' && payload.model !== PROXY_MODEL_ID
+      ? payload.model
+      : undefined;
+
+    if (!isRoocodeRequest) {
+      // ✅ INJECTER AUTOMATIQUEMENT max_tokens AVEC LA VRAIE LIMITE
+      // llama.cpp DEFAULT TOUJOURS À 8192 MÊME SI --ctx-size EST PLUS GRAND !
+      if (!payload.max_tokens && !payload.max_completion_tokens) {
+        payload.max_tokens = Math.floor(realContextSize * 0.95);
+      }
+      const upstreamModel = runtimeStatus.active_filename || runtimeStatus.active_model;
+      if (!payload.model || payload.model === PROXY_MODEL_ID) {
+        payload.model = upstreamModel;
+      }
     }
 
-    const runtimeUrl = getRuntimeBaseUrl(runtimeStatus);
+    const runtimeUrl = getRuntimeBaseUrl(runtimeStatus, requestedModel);
+    console.log('[model-manager] proxy request', { endpoint, requestedModel, isRoocodeRequest, runtimeUrl });
     const response = await fetch(`${runtimeUrl}${endpoint}`, {
       method: req.method,
       headers: {
@@ -1777,10 +1798,9 @@ app.get('/api/version', async (req, res) => {
 app.get('/api/hardware-profile', async (req, res) => {
   try {
     const profile = await readHardwareProfile();
-    const recommended = getRecommendedRuntimeDefaults(profile);
     res.json({
       profile,
-      recommended_runtime: recommended,
+      recommended_runtime: null
     });
   } catch (error) {
     err(res, 502, error.message);

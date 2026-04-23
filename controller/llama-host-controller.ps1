@@ -575,6 +575,8 @@ function Get-LiveInstances([hashtable]$config) {
             estimated_vram_bytes = $null
             server_base_url = "http://127.0.0.1:$port/v1"
             proxy_id = "$($config.proxy_model_id)-$port"
+            context = $null
+            gpu_layers = $null
         }
     }
 
@@ -772,7 +774,8 @@ function Start-LlamaProcess([hashtable]$body) {
     if (-not (Test-Path (Split-Path -Parent $debugLog))) {
         New-Item -ItemType Directory -Path (Split-Path -Parent $debugLog) -Force | Out-Null
     }
-Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Start-LlamaProcess called for model=$($body.model) resolved=$($record.model)"
+    Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Start-LlamaProcess requested ctx=$context gpu_layers=$gpuLayers model=$($record.model)"
+    Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Start-LlamaProcess called for model=$($body.model) resolved=$($record.model)"
     $existingInstance = $state.instances | Where-Object {
         ($_.model -ieq $record.model -or $_.filename -ieq $body.model -or $_.filename -ieq $record.model) -and $_.running
     } | Select-Object -First 1
@@ -1313,8 +1316,12 @@ while ($true) {
                 $existingInstance = $state.instances | Where-Object { $_.model -ieq $body.model -and $_.running } | Select-Object -First 1
                 if ($existingInstance) {
                     if ($body.ContainsKey('activate') -and $body.activate -eq $true) {
-                        Write-Host "[controller] model déjà chargé, promotion en actif : $($body.model)"
-                        Start-LlamaProcess $body | Out-Null
+                        if (-not $existingInstance.active -or $body.ContainsKey('context') -or $body.ContainsKey('gpu_layers')) {
+                            Write-Host "[controller] model déjà chargé, vérification de activation / reload : $($body.model)"
+                            Start-LlamaProcess $body | Out-Null
+                        } else {
+                            Write-Host "[controller] model déjà chargé et déjà actif : $($body.model)"
+                        }
                     } else {
                         Write-Host "[controller] model déjà chargé, reste en mémoire sans promotion : $($body.model)"
                     }
