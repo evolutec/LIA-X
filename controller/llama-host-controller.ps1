@@ -37,6 +37,139 @@ function Initialize-LogsDirectories {
     }
 }
 
+function Get-ProcessMonitorLogPath {
+    $dir = Get-ControllerLogDir
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    return Join-Path $dir 'process-monitor.log'
+}
+
+function Write-ProcessMonitorLog([string]$message, [string]$level = 'info') {
+    $path = Get-ProcessMonitorLogPath
+    $normalizedLevel = $level.ToLower()
+    $line = "[$(Get-Date -Format 'o')] [$($normalizedLevel.ToUpper())] $message"
+    Add-Content -Path $path -Value $line
+}
+
+function Get-LlamaServerProcessInfo([int]$pid) {
+    $process = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    if (-not $process) {
+        return $null
+    }
+
+    $commandLine = ''
+    $creationDate = $null
+    $executablePath = ''
+    try {
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
+        if ($cim) {
+            $commandLine = $cim.CommandLine
+            $executablePath = $cim.ExecutablePath
+            $creationDate = [Management.ManagementDateTimeConverter]::ToDateTime($cim.CreationDate)
+        }
+    } catch {}
+
+    return @{
+        pid = $pid
+        process = $process
+        has_exited = $process.HasExited
+        command_line = $commandLine
+        executable_path = $executablePath
+        creation_date = $creationDate
+        handle_count = $process.HandleCount
+        working_set_mb = [math]::Round($process.WorkingSet64 / 1MB, 1)
+    }
+}
+
+function Get-ProcessListeningPorts([int]$pid) {
+    try {
+        $connections = Get-NetTCPConnection -OwningProcess $pid -State Listen -ErrorAction SilentlyContinue
+        if ($connections) {
+            return $connections | Select-Object -ExpandProperty LocalPort -Unique
+        }
+    } catch {}
+    return @()
+}
+
+function Get-LastLinesFromFile([string]$path, [int]$lineCount = 50) {
+    if (-not (Test-Path $path)) {
+        return ''
+    }
+    try {
+        return (Get-Content -Path $path -ErrorAction SilentlyContinue | Select-Object -Last $lineCount) -join "`n"
+    } catch {
+        return ''
+    }
+}
+
+function Write-LlamaProcessAudit([hashtable]$instance, [string]$event, [string]$details, [string]$level = 'error') {
+    $pid = $instance.pid
+    $port = $instance.port
+    $model = $instance.model
+    $stderr = Get-LastLinesFromFile $instance.stderr_log 20
+    $message = "[Audit] $event pid=$pid port=$port model=$model details=$details"
+    Write-ProcessMonitorLog $message, $level
+    if ($stderr) {
+        Write-ProcessMonitorLog "[Audit] last stderr for pid=$pid`n$stderr", $level
+    }
+}
+
+function Monitor-LlamaInstances {
+    $state = Get-State
+    foreach ($instance in $state.instances) {
+        if (-not $instance.running -or -not $instance.pid) { continue }
+
+        $info = Get-LlamaServerProcessInfo ([int]$instance.pid)
+        if (-not $info) {
+            Write-LlamaProcessAudit $instance 'ProcessMissing' "PID $($instance.pid) absent"
+            continue
+        }
+
+        if ($info.has_exited) {
+            Write-LlamaProcessAudit $instance 'ProcessCrashed' "PID $($instance.pid) a quitté"
+            continue
+        }
+
+        $ports = Get-ProcessListeningPorts ([int]$instance.pid)
+        if (-not ($ports -contains [int]$instance.port)) {
+            Write-LlamaProcessAudit $instance 'PortMismatch' "Processus vivant mais port attendu $($instance.port) non trouvé; ports=$(($ports -join ','))"
+        }
+
+        if ($instance.path -and $info.command_line -and $info.command_line -notlike "*$($instance.path)*") {
+            Write-LlamaProcessAudit $instance 'CommandLineMismatch' "Processus vivant mais CommandLine ne contient pas le modèle attendu"
+        }
+    }
+}
+
+function Register-LlamaServerDeathWatcher {
+    try {
+        $query = "SELECT * FROM __InstanceDeletionEvent WITHIN 5 WHERE TargetInstance ISA 'Win32_Process' AND TargetInstance.Name='llama-server.exe'"
+        Register-WmiEvent -Query $query -SourceIdentifier 'LlamaServerProcessExit' -Action {
+            try {
+                $target = $Event.SourceEventArgs.NewEvent.TargetInstance
+                $pid = [int]$target.ProcessId
+                $cmd = $target.CommandLine
+                $details = "Processus arrêté PID $pid"
+                if ($cmd) { $details += " cmd=`"$cmd`"" }
+                Write-ProcessMonitorLog "[ProcessDeath] $details"
+                $state = Get-State
+                foreach ($instance in $state.instances) {
+                    if ($instance.pid -eq $pid) {
+                        Write-LlamaProcessAudit $instance 'ProcessDeathEvent' "Processus connu arrêté par WMI"
+                        break
+                    }
+                }
+            } catch {
+                Write-ProcessMonitorLog "[ProcessDeath] erreur événement WMI: $($_.Exception.Message)", 'error'
+            }
+        } | Out-Null
+        Write-ProcessMonitorLog 'WMI death watcher registered successfully.', 'info'
+    } catch {
+        Write-ProcessMonitorLog "WMI death watcher registration failed: $($_.Exception.Message)", 'error'
+    }
+}
+
 # Gestionnaire d'arrêt gracieux pour Windows Service
 Register-EngineEvent PowerShell.Exiting -Action {
     Write-Host "`n[Controller] Arrêt gracieux en cours..."
@@ -69,6 +202,7 @@ if (-not $StatePath) {
 
 
 Initialize-LogsDirectories
+Register-LlamaServerDeathWatcher
 
 # --- Relance automatique des modèles actifs au démarrage ---
 try {
@@ -458,6 +592,12 @@ function Repair-DeadInstances([hashtable]$state) {
 
     if ($process -and -not $process.HasExited) {
         continue
+    }
+
+    if ($process -and $process.HasExited) {
+        Write-LlamaProcessAudit $instance 'RepairDeadInstance' "Processus arrêté avec code $($process.ExitCode)"
+    } else {
+        Write-LlamaProcessAudit $instance 'RepairDeadInstance' "Processus absent pour PID $($instance.pid)"
     }
 
     Write-Host "[Controller] Processus manquant ou arrêté détecté pour $($instance.model) (port $($instance.port)). Redémarrage avec configuration utilisateur..."
@@ -867,10 +1007,15 @@ function Start-LlamaProcess([hashtable]$body) {
     }
 
     $process = Start-Process -FilePath $config.binary_path -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+    $commandLine = $arguments -join ' '
+    Write-ProcessMonitorLog "[ProcessStart] pid=$($process.Id) port=$port model=$($record.model) commandline='$commandLine' stdout='$stdoutLog' stderr='$stderrLog'"
 
     # Watchdog: Vérifier que le processus ne crash pas immédiatement
     Start-Sleep -Milliseconds 2000
     if ($process.HasExited) {
+        $stderrTail = Get-LastLinesFromFile $stderrLog 30
+        Write-ProcessMonitorLog "[ProcessStartFail] pid=$($process.Id) port=$port model=$($record.model) exitCode=$($process.ExitCode)"
+        if ($stderrTail) { Write-ProcessMonitorLog "[ProcessStartFail] last stderr:`n$stderrTail" }
         throw "Le processus llama-server s'est arrêté immédiatement. Code de sortie: $($process.ExitCode)"
     }
 
@@ -931,6 +1076,7 @@ function Start-LlamaProcess([hashtable]$body) {
         throw "Timeout attente llama-server sur le port ${port}: le serveur n'a pas répondu correctement"
     }
 
+    Write-ProcessMonitorLog "[ProcessStarted] pid=$($process.Id) port=$port model=$($record.model) ready"
     return Get-ConsistentState
 }
 
@@ -979,6 +1125,8 @@ function Get-RuntimeStatus {
             estimated_vram_bytes = if ($instance.estimated_vram_bytes) { [int64]$instance.estimated_vram_bytes } else { $null }
             server_base_url = [string]$instance.server_base_url
             proxy_id = [string]$instance.proxy_id
+            context = if ($instance.context) { [int]$instance.context } else { $null }
+            gpu_layers = if ($instance.gpu_layers) { [int]$instance.gpu_layers } else { $null }
         }
     } else {
         foreach ($instance in $state.instances) {
@@ -1001,6 +1149,8 @@ function Get-RuntimeStatus {
                 estimated_vram_bytes = if ($instance.estimated_vram_bytes) { [int64]$instance.estimated_vram_bytes } else { $null }
                 server_base_url = [string]$instance.server_base_url
                 proxy_id = [string]$instance.proxy_id
+                context = if ($instance.context) { [int]$instance.context } else { $null }
+                gpu_layers = if ($instance.gpu_layers) { [int]$instance.gpu_layers } else { $null }
             }
         }
     }
@@ -1179,6 +1329,7 @@ Register-ObjectEvent -InputObject $watchdogTimer -EventName Elapsed -Action {
     try {
         Write-Host "[Watchdog] Exécution vérification état..."
         $state = Get-State
+        Monitor-LlamaInstances
         Repair-DeadInstances -state $state
         $state = Get-ConsistentState
         $idleTimeoutMinutes = 30
@@ -1218,6 +1369,7 @@ try {
             if ($mode -eq [Microsoft.Win32.PowerModes]::Resume) {
                 Write-Host "[Controller] Sortie de veille détectée, restauration des instances désirées..."
                 $state = Get-State
+                Monitor-LlamaInstances
                 Repair-DeadInstances -state $state
                 Get-ConsistentState | Out-Null
             }

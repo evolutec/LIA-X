@@ -51,11 +51,40 @@ const CONTAINER_LOG_NODES = (process.env.CONTAINER_LOG_NAMES || 'anythingllm,ope
   .filter(Boolean);
 const CONTAINER_LOG_PATTERNS = CONTAINER_LOG_NODES.map((item) => item.replace(/[-_.]/g, '').toLowerCase());
 
-function pushLogEntry(origin, source, type, message) {
+function normalizeLogLevel(level) {
+  const normalized = String(level || '').trim().toLowerCase();
+  if (normalized === 'critical' || normalized === 'critique') return 'critical';
+  if (normalized === 'error' || normalized === 'erreur') return 'error';
+  if (normalized === 'warn' || normalized === 'warning') return 'critical';
+  return 'info';
+}
+
+function determineLogLevel(type, message, overrideLevel = null) {
+  if (overrideLevel) {
+    return normalizeLogLevel(overrideLevel);
+  }
+
+  const normalizedType = String(type || '').trim().toLowerCase();
+  const lowerMessage = String(message || '').toLowerCase();
+
+  if (normalizedType === 'critical' || normalizedType === 'critique') return 'critical';
+  if (normalizedType === 'error' || normalizedType === 'stderr') return 'error';
+  if (normalizedType === 'warn' || normalizedType === 'warning') return 'critical';
+
+  if (/(critical|critique)/.test(lowerMessage)) return 'critical';
+  if (/(error|erreur|failed|fail|panic)/.test(lowerMessage)) return 'error';
+
+  return 'info';
+}
+
+function pushLogEntry(origin, source, type, message, level = null) {
+  const normalizedType = String(type || '').toLowerCase();
+  const severity = determineLogLevel(normalizedType, message, level);
   const entry = {
     origin,
     source,
-    type,
+    type: normalizedType,
+    level: severity,
     message: String(message || ''),
     timestamp: new Date().toISOString(),
   };
@@ -87,12 +116,12 @@ app.use('/api', (req, res, next) => {
 
 function logRequest(method, path, payload) {
   console.log('[model-manager] incoming', method, path, payload || 'no payload');
-  pushLogEntry('server', path || 'server', 'info', `${method} ${path} ${payload ? JSON.stringify(payload) : ''}`);
+  pushLogEntry('server', path || 'server', 'info', `${method} ${path} ${payload ? JSON.stringify(payload) : ''}`, 'info');
 }
 
 function logError(path, error) {
   console.error('[model-manager] error', path, error?.stack || error);
-  pushLogEntry('server', path || 'server', 'error', error?.stack || error || 'Unknown error');
+  pushLogEntry('server', path || 'server', 'error', error?.stack || error || 'Unknown error', 'error');
 }
 
 app.use((req, res, next) => {
@@ -959,6 +988,7 @@ function buildLoadedModelList(runtime) {
       port: instance.port,
       running: Boolean(instance.running),
       size_vram: instance.estimated_vram_bytes ?? null,
+      context_length: Number.isFinite(Number(instance.context)) ? Number(instance.context) : null,
       expires_at: instance.started_at || null,
       active: activeModel ? instance.model === activeModel : Boolean(instance.active),
     }))
@@ -1016,6 +1046,40 @@ function extractLogEntries(runtime) {
     });
 
   return logs;
+}
+
+async function collectControllerMonitorLogs() {
+  const filePath = path.resolve(__dirname, '..', 'logs', 'controller', 'process-monitor.log');
+  try {
+    const raw = await fs.promises.readFile(filePath, 'utf8');
+    const lines = raw.split(/\r?\n/).filter(Boolean);
+    const tail = lines.slice(-120);
+    return tail.map((line) => {
+      const match = /^\[([^\]]+)\]\s*(.*)$/.exec(line);
+      let timestamp = null;
+      let message = line;
+      if (match) {
+        const parsed = Date.parse(match[1]);
+        if (!Number.isNaN(parsed)) {
+          timestamp = new Date(parsed).toISOString();
+        }
+        message = match[2];
+      }
+
+      const severity = determineLogLevel('stdout', message);
+
+      return {
+        origin: 'controller',
+        source: 'process-monitor',
+        type: severity === 'error' || severity === 'critical' ? 'stderr' : 'stdout',
+        message,
+        timestamp,
+        level: severity,
+      };
+    });
+  } catch {
+    return [];
+  }
 }
 
 function parseDockerLogsBuffer(buffer) {
@@ -1122,12 +1186,16 @@ async function fetchDockerContainerLogs(containerIdentifier, tail = 100, source 
         const entries = parseDockerLogsBuffer(raw);
         const mapped = entries.flatMap((entry) => {
           const lines = entry.text.split(/\r?\n/).filter(Boolean);
-          return lines.map((line) => ({
-            origin: 'container',
-            source: source || String(containerIdentifier),
-            type: entry.streamType === 2 ? 'stderr' : 'stdout',
-            message: line,
-          }));
+          return lines.map((line) => {
+            const streamType = entry.streamType === 2 ? 'stderr' : 'stdout';
+            return {
+              origin: 'container',
+              source: source || String(containerIdentifier),
+              type: streamType,
+              level: determineLogLevel(streamType, line),
+              message: line,
+            };
+          });
         });
         resolve(mapped);
       });
@@ -1279,21 +1347,53 @@ function getRuntimeGpuFallback(runtime) {
   }];
 }
 
+function parseGpuMemoryFromLabel(label) {
+  if (!label || typeof label !== 'string') {
+    return null;
+  }
+
+  const match = label.match(/(\d+(?:[\.,]\d+)?)\s*(GB|Go|MB|Mo)/i);
+  if (!match) {
+    return null;
+  }
+
+  const value = Number(match[1].replace(',', '.'));
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  const unit = match[2].toLowerCase();
+  if (unit.startsWith('g')) {
+    return Math.round(value * 1024 * 1024 * 1024);
+  }
+  if (unit.startsWith('m')) {
+    return Math.round(value * 1024 * 1024);
+  }
+
+  return null;
+}
+
 function formatHardwareProfileGpu(profileGpu) {
   if (!profileGpu || typeof profileGpu !== 'object') {
     return null;
   }
 
-  const totalBytes = profileGpu.devices?.[0]?.adapter_ram_bytes ?? null;
+  const device = profileGpu.devices?.[0] || {};
+  const adapterBytes = device.adapter_ram_bytes ?? profileGpu.memory_total_bytes ?? null;
+  let totalBytes = Number.isFinite(Number(adapterBytes)) ? Number(adapterBytes) : null;
+  if (totalBytes === null) {
+    totalBytes = parseGpuMemoryFromLabel(String(profileGpu.label || profileGpu.model || ''));
+  }
+
   return {
     id: 'gpu-profile',
     type: 'gpu',
     vendor: String(profileGpu.vendor || 'Unknown'),
     model: String(profileGpu.label || profileGpu.model || 'GPU'),
     usage_percent: null,
-    memory_total_bytes: Number.isFinite(Number(totalBytes)) ? Number(totalBytes) : null,
+    memory_total_bytes: totalBytes,
     memory_used_bytes: null,
-    driver: null,
+    driver: String(device.driver_version || profileGpu.driver_version || ''),
   };
 }
 
@@ -1925,7 +2025,8 @@ app.get('/api/models/status', async (req, res) => {
     const loadedModels = buildLoadedModelList(runtime);
     const runtimeLogs = extractLogEntries(runtime);
     const containerLogs = await collectContainerLogs();
-    const logEntries = [...getRecentLogEntries(), ...runtimeLogs, ...containerLogs];
+    const controllerMonitorLogs = await collectControllerMonitorLogs();
+    const logEntries = [...getRecentLogEntries(), ...runtimeLogs, ...containerLogs, ...controllerMonitorLogs];
 
     res.json({
       total_models: models.length,

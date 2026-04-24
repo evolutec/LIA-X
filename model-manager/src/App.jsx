@@ -181,23 +181,32 @@ function App() {
     return 512;
   }
 
+  function getRowRuntimeContext(row) {
+    if (!row) return null;
+    if (row.loaded && normalizeContextValue(row?.runtimeContextLength) !== null) {
+      return normalizeContextValue(row.runtimeContextLength);
+    }
+    return normalizeContextValue(row?.contextLength);
+  }
+
   function getSliderMaxContext(row) {
-    const fromMetadata = normalizeContextValue(row?.contextLength);
+    const runtimeContext = getRowRuntimeContext(row);
     const recommended = normalizeContextValue(recommendedRuntime?.context);
-    const baseMax = fromMetadata ?? 32768;
-    return Math.max(getSliderMinContext(), baseMax, recommended ?? 0);
+    const metadataContext = normalizeContextValue(row?.contextLength);
+    const baseMax = runtimeContext ?? 32768;
+    return Math.max(getSliderMinContext(), baseMax, recommended ?? 0, metadataContext ?? 0);
   }
 
   function getDefaultContext(row) {
-    const modelMax = normalizeContextValue(row?.contextLength);
+    const runtimeContext = getRowRuntimeContext(row);
     const recommended = normalizeContextValue(recommendedRuntime?.context);
-    if (recommended !== null && modelMax !== null) {
-      return Math.min(modelMax, recommended);
+    if (runtimeContext !== null) {
+      return runtimeContext;
     }
     if (recommended !== null) {
       return recommended;
     }
-    return modelMax || 8192;
+    return 8192;
   }
 
   function getRequestedContextForRow(row) {
@@ -248,6 +257,7 @@ function App() {
         vramSize: null,
         expiresAt: null,
         contextLength: normalizeContextValue(file.context_length),
+        runtimeContextLength: null,
         gpuLayers: Number.isFinite(rawGpuLayers) ? rawGpuLayers : null,
       });
     });
@@ -255,6 +265,7 @@ function App() {
     loadedModels.forEach((item) => {
       const name = String(item?.model || '');
       if (!name) return;
+  const itemContext = normalizeContextValue(item.context_length) ?? normalizeContextValue(item.context);
       if (fileMap.has(name)) {
         const base = fileMap.get(name);
         fileMap.set(name, {
@@ -263,7 +274,8 @@ function App() {
           active: name === activeModel,
           vramSize: item.size_vram ?? base.vramSize,
           expiresAt: item.expires_at ?? base.expiresAt,
-          contextLength: base.contextLength ?? null,
+          contextLength: base.contextLength ?? itemContext ?? null,
+          runtimeContextLength: itemContext ?? base.runtimeContextLength ?? null,
           gpuLayers: base.gpuLayers ?? null,
         });
       } else {
@@ -276,7 +288,8 @@ function App() {
           modifiedAt: null,
           vramSize: item.size_vram ?? null,
           expiresAt: item.expires_at ?? null,
-          contextLength: null,
+          contextLength: itemContext ?? null,
+          runtimeContextLength: itemContext ?? null,
           gpuLayers: null,
         });
       }
@@ -840,12 +853,14 @@ async function handleDownloadUrl() {
         vramSize: null,
         expiresAt: null,
         contextLength: normalizeContextValue(file.context_length),
+        runtimeContextLength: null,
         gpuLayers: Number.isFinite(rawGpuLayers) ? rawGpuLayers : null,
       });
     });
     loadedModels.forEach((item) => {
       const name = String(item?.model || '');
       if (!name) return;
+        const itemContext = normalizeContextValue(item.context_length) ?? normalizeContextValue(item.context);
       const existing = rows.get(name) || {};
       rows.set(name, {
         name,
@@ -856,7 +871,8 @@ async function handleDownloadUrl() {
         modifiedAt: existing.modifiedAt ?? null,
         vramSize: item.size_vram ?? null,
         expiresAt: item.expires_at ?? null,
-        contextLength: existing.contextLength ?? null,
+        contextLength: existing.contextLength ?? itemContext ?? null,
+        runtimeContextLength: itemContext ?? existing.runtimeContextLength ?? null,
         gpuLayers: existing.gpuLayers ?? null,
       });
     });
@@ -955,8 +971,7 @@ async function handleDownloadUrl() {
                 <td>
                   <div className="context-cell">
                     <div className="context-values">
-                      <span className="badge badge-neutral">metadata: {row.contextLength ?? '—'}</span>
-                      <span className="badge badge-loaded">n_ctx: {getRequestedContextForRow(row)}</span>
+                      <span className="badge badge-loaded">{getRequestedContextForRow(row)} / {row.contextLength ?? '?'} tokens</span>
                     </div>
                     <input
                       type="range"
