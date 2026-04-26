@@ -7,12 +7,13 @@ param(
 $ErrorActionPreference = "Stop"
 $Global:RequestCounter = @{}
 $Global:LastRequestTime = @{}
+$Global:RepairInProgress = $false
+$Global:StartupInProgress = $true
 
 function Get-RepoRoot {
     if ($PSScriptRoot -match '\\(scripts|controller)$') {
         return Split-Path -Parent $PSScriptRoot
     }
-
     return $PSScriptRoot
 }
 
@@ -37,6 +38,19 @@ function Initialize-LogsDirectories {
     }
 }
 
+function Get-DebugLogPath {
+    return Join-Path (Get-ControllerLogDir) 'controller-debug.log'
+}
+
+function Write-DebugLog([string]$message, [string]$level = 'info') {
+    $path = Get-DebugLogPath
+    if (-not (Test-Path (Split-Path -Parent $path))) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+    }
+    $line = "[$(Get-Date -Format 'o')] [$($level.ToUpper())] $message"
+    Add-Content -Path $path -Value $line
+}
+
 function Get-ProcessMonitorLogPath {
     $dir = Get-ControllerLogDir
     if (-not (Test-Path $dir)) {
@@ -52,8 +66,8 @@ function Write-ProcessMonitorLog([string]$message, [string]$level = 'info') {
     Add-Content -Path $path -Value $line
 }
 
-function Get-LlamaServerProcessInfo([int]$pid) {
-    $process = Get-Process -Id $pid -ErrorAction SilentlyContinue
+function Get-LlamaServerProcessInfo([int]$llamaPid) {
+    $process = Get-Process -Id $llamaPid -ErrorAction SilentlyContinue
     if (-not $process) {
         return $null
     }
@@ -62,34 +76,52 @@ function Get-LlamaServerProcessInfo([int]$pid) {
     $creationDate = $null
     $executablePath = ''
     try {
-        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$llamaPid" -ErrorAction SilentlyContinue
         if ($cim) {
-            $commandLine = $cim.CommandLine
+            $commandLine    = $cim.CommandLine
             $executablePath = $cim.ExecutablePath
-            $creationDate = [Management.ManagementDateTimeConverter]::ToDateTime($cim.CreationDate)
+            $creationDate   = [Management.ManagementDateTimeConverter]::ToDateTime($cim.CreationDate)
         }
     } catch {}
 
     return @{
-        pid = $pid
-        process = $process
-        has_exited = $process.HasExited
-        command_line = $commandLine
+        pid            = $llamaPid
+        process        = $process
+        has_exited     = $process.HasExited
+        command_line   = $commandLine
         executable_path = $executablePath
-        creation_date = $creationDate
-        handle_count = $process.HandleCount
+        creation_date  = $creationDate
+        handle_count   = $process.HandleCount
         working_set_mb = [math]::Round($process.WorkingSet64 / 1MB, 1)
     }
 }
 
-function Get-ProcessListeningPorts([int]$pid) {
+function Get-ProcessListeningPorts([int]$llamaPid) {
     try {
-        $connections = Get-NetTCPConnection -OwningProcess $pid -State Listen -ErrorAction SilentlyContinue
+        $connections = Get-NetTCPConnection -OwningProcess $llamaPid -State Listen -ErrorAction SilentlyContinue
         if ($connections) {
             return $connections | Select-Object -ExpandProperty LocalPort -Unique
         }
     } catch {}
     return @()
+}
+
+function Get-ProcessIdListeningOnPort([int]$port) {
+    try {
+        $connection = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($connection) {
+            return [int]$connection.OwningProcess
+        }
+    } catch {}
+    return $null
+}
+
+function Get-ProcessInfoByPort([int]$port) {
+    $processId = Get-ProcessIdListeningOnPort $port
+    if (-not $processId) {
+        return $null
+    }
+    return Get-LlamaServerProcessInfo $processId
 }
 
 function Get-LastLinesFromFile([string]$path, [int]$lineCount = 50) {
@@ -104,14 +136,14 @@ function Get-LastLinesFromFile([string]$path, [int]$lineCount = 50) {
 }
 
 function Write-LlamaProcessAudit([hashtable]$instance, [string]$event, [string]$details, [string]$level = 'error') {
-    $pid = $instance.pid
-    $port = $instance.port
-    $model = $instance.model
-    $stderr = Get-LastLinesFromFile $instance.stderr_log 20
-    $message = "[Audit] $event pid=$pid port=$port model=$model details=$details"
-    Write-ProcessMonitorLog $message, $level
+    $processId = $instance.pid
+    $port      = $instance.port
+    $model     = $instance.model
+    $stderr    = Get-LastLinesFromFile $instance.stderr_log 20
+    $message   = "[Audit] $event pid=$processId port=$port model=$model details=$details"
+    Write-ProcessMonitorLog $message $level
     if ($stderr) {
-        Write-ProcessMonitorLog "[Audit] last stderr for pid=$pid`n$stderr", $level
+        Write-ProcessMonitorLog "[Audit] last stderr for pid=$processId`n$stderr" $level
     }
 }
 
@@ -143,29 +175,14 @@ function Monitor-LlamaInstances {
 }
 
 function Register-LlamaServerDeathWatcher {
-    # Désactivé temporairement car cause corruption du ScriptBlock
-    Write-ProcessMonitorLog 'WMI death watcher désactivé temporairement', 'info'
+    Write-ProcessMonitorLog 'WMI death watcher désactivé temporairement' 'info'
 }
 
-# Gestionnaire d'arrêt gracieux pour Windows Service
+# Gestionnaire d'arrêt gracieux
 Register-EngineEvent PowerShell.Exiting -Action {
     Write-Host "`n[Controller] Arrêt gracieux en cours..."
-    $state = Get-State
-    foreach ($instance in $state.instances) {
-        if ($instance.pid -and $instance.running) {
-            try {
-                $process = Get-Process -Id $instance.pid -ErrorAction SilentlyContinue
-                if ($process -and -not $process.HasExited) {
-                    Write-Host "[Controller] Arrêt llama-server PID $($instance.pid)"
-                    Stop-Process -Id $instance.pid -ErrorAction SilentlyContinue
-                    Start-Sleep -Milliseconds 1500
-                    if (-not $process.HasExited) {
-                        Stop-Process -Id $instance.pid -Force -ErrorAction SilentlyContinue
-                    }
-                }
-            } catch {}
-        }
-    }
+    Write-Host "[Controller] ✅ LES PROCESSUS llama.server.exe SONT CONSERVÉS et survivent au redémarrage"
+    Write-Host "[Controller] ✅ Ils seront automatiquement réattachés au prochain démarrage"
     Write-Host "[Controller] Arrêt terminé."
 } | Out-Null
 
@@ -177,47 +194,11 @@ if (-not $StatePath) {
     $StatePath = Join-Path (Get-RepoRoot) "runtime\host-runtime-state.json"
 }
 
-
 Initialize-LogsDirectories
 Register-LlamaServerDeathWatcher
 
-# --- Relance automatique des modèles actifs au démarrage ---
-try {
-    $state = Get-State
-    $config = Get-Config
-
-    # NETTOYAGE: Supprimer TOUTES les instances mortes avant toute relance
-    $liveInstances = @()
-    foreach ($instance in $state.instances) {
-        if ($instance.pid) {
-            $process = Get-Process -Id ([int]$instance.pid) -ErrorAction SilentlyContinue
-            if ($process -and -not $process.HasExited) {
-                $liveInstances += $instance
-                continue
-            }
-        }
-    }
-    $state.instances = $liveInstances
-    Save-State $state
-
-    # Relancer UNIQUEMENT le modèle principal s'il est défini
-    if ($state.active_model) {
-        try {
-            $body = @{ model = $state.active_model; activate = $true }
-            Start-LlamaProcess $body | Out-Null
-            Write-Host "[Controller] Modèle principal chargé : $($state.active_model)"
-        } catch {
-            Write-Host "[Controller] Echec chargement modèle principal : $($_.Exception.Message)"
-        }
-    }
-} catch {
-    Write-Host "[Controller] Erreur relance auto modèles : $($_.Exception.Message)"
-}
-
 function ConvertTo-Hashtable($value) {
-    if ($null -eq $value) {
-        return $null
-    }
+    if ($null -eq $value) { return $null }
 
     if ($value -is [System.Collections.IDictionary]) {
         $table = @{}
@@ -251,8 +232,6 @@ function Save-Config([hashtable]$config) {
 }
 
 function Get-BestAvailableBackend {
-    # Détection automatique du meilleur backend disponible avec fallback
-    # 1. NVIDIA CUDA en premier
     $nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
     if ($nvidiaSmi) {
         try {
@@ -263,7 +242,6 @@ function Get-BestAvailableBackend {
         } catch {}
     }
 
-    # 2. AMD ROCm
     $rocmInfo = Get-Command rocm-smi -ErrorAction SilentlyContinue
     if ($rocmInfo) {
         try {
@@ -274,13 +252,11 @@ function Get-BestAvailableBackend {
         } catch {}
     }
 
-    # 3. Intel Arc / Vulkan générique
     $vulkanInfo = Get-Command vulkaninfo -ErrorAction SilentlyContinue
     if ($vulkanInfo) {
         return @{ backend = "vulkan"; label = "Vulkan" }
     }
 
-    # Fallback final CPU
     return @{ backend = "cpu"; label = "CPU" }
 }
 
@@ -288,79 +264,65 @@ function Get-Config {
     if (-not (Test-Path $ConfigPath)) {
         $autoBackend = Get-BestAvailableBackend
         $config = @{
-            controller_port = $Port
-            server_port = 12434
-            server_port_start = 12434
-            server_port_end = 12444
-            max_instances = 6
-            backend = $autoBackend.backend
-            backend_label = $autoBackend.label
-            binary_path = ""
-            models_dir = ""
-            proxy_model_id = "lia-local"
-            default_context = 8192
+            controller_port    = $Port
+            server_port        = 12434
+            server_port_start  = 12434
+            server_port_end    = 12444
+            max_instances      = 6
+            backend            = $autoBackend.backend
+            backend_label      = $autoBackend.label
+            binary_path        = ""
+            models_dir         = ""
+            proxy_model_id     = "lia-local"
+            default_context    = 8192
             default_gpu_layers = 999
+            sleep_idle_seconds = 60
         }
         Save-Config $config
         return $config
     }
 
-    $config = ConvertTo-Hashtable (Get-Content $ConfigPath -Raw | ConvertFrom-Json)
+    $config  = ConvertTo-Hashtable (Get-Content $ConfigPath -Raw | ConvertFrom-Json)
     $changed = $false
 
     if (-not $config.server_port_start -or [int]$config.server_port_start -eq 0) {
-        $config.server_port_start = 12434
-        $changed = $true
+        $config.server_port_start = 12434; $changed = $true
     }
-
     if (-not $config.server_port_end -or [int]$config.server_port_end -lt [int]$config.server_port_start) {
-        $config.server_port_end = 12444
-        $changed = $true
+        $config.server_port_end = 12444; $changed = $true
     }
-
     if (-not $config.server_port -or [int]$config.server_port -eq 0) {
-        $config.server_port = 12434
-        $changed = $true
+        $config.server_port = 12434; $changed = $true
     }
-
     if (-not $config.default_context -or [int]$config.default_context -eq 0) {
-        $config.default_context = 1
-        $changed = $true
+        $config.default_context = 1; $changed = $true
     }
-
     if (-not $config.default_gpu_layers -or [int]$config.default_gpu_layers -eq 0) {
-        $config.default_gpu_layers = 999
-        $changed = $true
+        $config.default_gpu_layers = 999; $changed = $true
+    }
+    if ($null -eq $config.sleep_idle_seconds) {
+        $config.sleep_idle_seconds = -1; $changed = $true
     }
 
-    if ($changed) {
-        Save-Config $config
-    }
-
+    if ($changed) { Save-Config $config }
     return $config
 }
 
 function Get-State {
     if (-not (Test-Path $StatePath)) {
-        return @{
-            instances = @()
-        }
+        return @{ instances = @() }
     }
 
     try {
         $stream = [System.IO.File]::Open($StatePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         try {
-            $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+            $reader  = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
             $content = $reader.ReadToEnd()
-            $parsed = $content | ConvertFrom-Json
+            $parsed  = $content | ConvertFrom-Json
             if ($parsed -is [System.Array]) {
-                if ($parsed.Count -eq 0) {
-                    return @{ instances = @() }
-                }
-
+                if ($parsed.Count -eq 0) { return @{ instances = @() } }
                 $parsed = $parsed[0]
             }
-
             return ConvertTo-Hashtable $parsed
         } finally {
             $reader.Dispose()
@@ -379,7 +341,7 @@ function Save-State([hashtable]$state) {
             $serializableState.instances = @($serializableState.instances)
         }
 
-        $data = $serializableState | ConvertTo-Json -Depth 6
+        $data   = $serializableState | ConvertTo-Json -Depth 6
         $stream = [System.IO.File]::Open($StatePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
         try {
             $writer = New-Object System.IO.StreamWriter($stream, [System.Text.Encoding]::UTF8)
@@ -391,8 +353,10 @@ function Save-State([hashtable]$state) {
         }
     } catch {
         Write-Host ('[controller] Save-State failed writing {0}: {1}' -f $StatePath, $_.Exception.Message)
+        Write-DebugLog "Save-State failed writing path=$StatePath error=$($_.Exception.Message)"
         throw
     }
+    Write-DebugLog "Save-State wrote file path=$StatePath instances=$($serializableState.instances.Count)"
 }
 
 function Convert-LegacyState([hashtable]$state) {
@@ -401,73 +365,92 @@ function Convert-LegacyState([hashtable]$state) {
             return @{
                 instances = @(
                     @{
-                        id = [string](if ($state.server_port) { $state.server_port } else { 12434 })
-                        port = [int](if ($state.server_port) { $state.server_port } else { 12434 })
-                        pid = $state.pid
-                        running = [bool]$state.running
-                        model = [string]$state.active_model
-                        filename = [string]$state.active_filename
-                        path = [string]$state.active_path
-                        started_at = [string]$state.started_at
-                        last_error = [string]$state.last_error
-                        stdout_log = [string]$state.stdout_log
-                        stderr_log = [string]$state.stderr_log
+                        id                   = [string](if ($state.server_port) { $state.server_port } else { 12434 })
+                        port                 = [int](if ($state.server_port) { $state.server_port } else { 12434 })
+                        pid                  = $state.pid
+                        running              = [bool]$state.running
+                        model                = [string]$state.active_model
+                        filename             = [string]$state.active_filename
+                        path                 = [string]$state.active_path
+                        started_at           = [string]$state.started_at
+                        last_error           = [string]$state.last_error
+                        stdout_log           = [string]$state.stdout_log
+                        stderr_log           = [string]$state.stderr_log
                         estimated_vram_bytes = $null
-                        server_base_url = "http://127.0.0.1:$((if ($state.server_port) { $state.server_port } else { 12434 }))/v1"
+                        server_base_url      = "http://127.0.0.1:$((if ($state.server_port) { $state.server_port } else { 12434 }))/v1"
                     }
                 )
             }
         }
-
         return @{ instances = @() }
     }
-
     return $state
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Get-ConsistentState
+# Rôle : synchroniser l'état en mémoire avec les processus vivants.
+# Ne JAMAIS modifier running. Ne JAMAIS appeler Repair pendant startup.
+# ─────────────────────────────────────────────────────────────────────────────
 function Get-ConsistentState {
-    $state = Get-State
-    $state = Convert-LegacyState $state
+    $state   = Get-State
+    $state   = Convert-LegacyState $state
     $changed = $false
-    $graceWindowSeconds = 30
 
+    # ── 1. Détecter les processus vivants sur la plage de ports ──────────────
     $liveInstances = Get-LiveInstances (Get-Config)
+
     if ($liveInstances.Count -gt 0) {
-        # ✅ RÈGLE ABSOLUE: 1 MODELE = MAXIMUM 1 INSTANCE
-        $seenModels = @{}
+        # Règle : 1 modèle = 1 instance max (tuer les doublons)
+        $seenModels   = @{}
         $filteredLive = @()
         foreach ($live in $liveInstances) {
-            $modelKey = $live.filename.ToLowerInvariant()
+            $modelKey = if ($live.filename) { $live.filename.ToLowerInvariant() } else { "port_$($live.port)" }
             if (-not $seenModels.ContainsKey($modelKey)) {
                 $seenModels[$modelKey] = $true
                 $filteredLive += $live
             } else {
-                # ❌ Détruire immédiatement les doublons pour le même modèle
                 try { Stop-Process -Id $live.pid -Force -ErrorAction SilentlyContinue } catch {}
             }
         }
         $liveInstances = $filteredLive
 
-        # ✅ SYNCHRONISATION EXACTE: Ne garder que les instances VRAIMENT en cours d'exécution
-        $mergedInstances = @()
+        # ── 2. Fusionner live → saved (mettre à jour pid/started_at uniquement) ─
         foreach ($live in $liveInstances) {
-            $id = [string]$live.id
-            $existing = $state.instances | Where-Object { [string]$_.id -eq $id } | Select-Object -First 1
-            if ($existing) {
-                # Préserver flags actif et configuration utilisateur
-                $live.active = [bool]$existing.active
-                $live.running = $true
-                $live.context = $existing.context
-                $live.gpu_layers = $existing.gpu_layers
+            $saved = $state.instances | Where-Object { [string]$_.id -eq [string]$live.id } | Select-Object -First 1
+            if ($saved) {
+                # Mettre à jour uniquement les champs dynamiques
+                $saved.pid        = $live.pid
+                $saved.started_at = $live.started_at
+                $saved.running    = $true
+                # Compléter model/filename/path si l'instance était en sleep
+                if (-not $saved.model    -and $live.model)    { $saved.model    = $live.model }
+                if (-not $saved.filename -and $live.filename) { $saved.filename = $live.filename }
+                if (-not $saved.path     -and $live.path)     { $saved.path     = $live.path }
+            } else {
+                # Nouvelle instance non connue du state → l'ajouter
+                $state.instances += $live
             }
-            $mergedInstances += $live
         }
 
-        $state.instances = $mergedInstances
+        # ── 3. Pour les instances saved sans processus vivant : effacer pid ───
+        $liveIds = @{}
+        foreach ($live in $liveInstances) { $liveIds[[string]$live.id] = $true }
+        foreach ($saved in $state.instances) {
+            if (-not $liveIds.ContainsKey([string]$saved.id) -and $saved.pid) {
+                $saved.pid        = $null
+                $saved.started_at = ""
+                $changed          = $true
+                # running reste inchangé → Repair pourra relancer si running=true
+            }
+        }
 
+        # ── 4. Résolution de l'instance active ────────────────────────────────
         $activeInstance = $state.instances | Where-Object { $_.active } | Select-Object -First 1
         if (-not $activeInstance -and $state.active_model) {
-            $activeInstance = $state.instances | Where-Object { $_.model -ieq $state.active_model -or $_.filename -ieq $state.active_filename } | Select-Object -First 1
+            $activeInstance = $state.instances | Where-Object {
+                $_.model -ieq $state.active_model -or $_.filename -ieq $state.active_filename
+            } | Select-Object -First 1
         }
         if (-not $activeInstance) {
             $activeInstance = $state.instances | Where-Object { $_.running } | Select-Object -First 1
@@ -476,134 +459,171 @@ function Get-ConsistentState {
             Set-ObjectProperty $instance 'active' ([bool]($activeInstance -and $instance.id -eq $activeInstance.id)) | Out-Null
         }
 
-        Save-State $state
-        return Get-State
-    }
-
-    # Garantir que instances est toujours un tableau, jamais un objet/hashtable
-    if ($state.instances -is [System.Collections.IDictionary]) {
-        $state.instances = @($state.instances)
-        $changed = $true
-    } elseif ($state.instances -isnot [System.Array]) {
-        $state.instances = @()
         $changed = $true
     }
 
+    # ── 5. Nettoyage : supprimer uniquement les instances avec running=false ──
     $newInstances = @()
     foreach ($instance in $state.instances) {
         if ($instance -isnot [hashtable] -and $instance -isnot [System.Collections.IDictionary]) {
+            continue
+        }
+        # Ne supprimer que si running est explicitement false
+        if ($instance.ContainsKey('running') -and $instance.running -eq $false) {
+            Write-DebugLog "Removing instance id=$($instance.id) model=$($instance.model) because running=false"
             $changed = $true
             continue
         }
-
-        if ($instance.pid) {
-            $process = Get-Process -Id ([int]$instance.pid) -ErrorAction SilentlyContinue
-            if (-not $process -or $process.HasExited) {
-                $startedAt = [datetime]::MinValue
-                $startedOk = [datetime]::TryParse([string]$instance.started_at, [ref]$startedAt)
-                $isWithinGracePeriod = $startedOk -and ((Get-Date) - $startedAt).TotalSeconds -lt $graceWindowSeconds
-
-                if ($isWithinGracePeriod) {
-                    $newInstances += $instance
-                    continue
-                }
-
-                # Ne pas modifier l'état désiré si l'instance était censée être running.
-                # On conserve running=true pour pouvoir relancer le modèle à la sortie de veille ou au redémarrage.
-                $instance.pid = $null
-                $instance.started_at = ""
-                if (-not $instance.running) {
-                    $instance.started_at = ""
-                }
-                $changed = $true
-            }
-        }
-
         $newInstances += $instance
     }
     $state.instances = $newInstances
 
-    $activeInstance = $state.instances | Where-Object { $_.active } | Select-Object -First 1
-    if (-not $activeInstance -and $state.active_model) {
-        $activeInstance = $state.instances | Where-Object { $_.model -ieq $state.active_model } | Select-Object -First 1
-    }
-    if (-not $activeInstance) {
-        $activeInstance = $state.instances | Where-Object { $_.running } | Select-Object -First 1
-    }
-    foreach ($instance in $state.instances) {
-        $shouldBeActive = $activeInstance -and ($instance.id -eq $activeInstance.id)
-        $activeValue = Get-ObjectProperty $instance 'active'
-        if ($activeValue -ne $shouldBeActive) {
-            Set-ObjectProperty $instance 'active' ([bool]$shouldBeActive) | Out-Null
-            $changed = $true
-        }
+    # ── 6. Garantir que instances est un tableau ───────────────────────────
+    if ($state.instances -is [System.Collections.IDictionary]) {
+        $state.instances = @($state.instances); $changed = $true
+    } elseif ($state.instances -isnot [System.Array]) {
+        $state.instances = @(); $changed = $true
     }
 
-    # Auto nettoyage des logs: supprimer les logs plus vieux que 7 jours
-    $runtimeDir = Get-RuntimeLogDir
-    Get-ChildItem -Path $runtimeDir -Filter *.log -File -ErrorAction SilentlyContinue | Where-Object {
-        $_.LastWriteTime -lt (Get-Date).AddDays(-7)
-    } | Remove-Item -Force -ErrorAction SilentlyContinue
+    if ($changed) { Save-State $state }
 
-    if ($changed) {
-        Save-State $state
+    # ── 7. Repair seulement hors startup et hors récursion ────────────────
+    if (-not $Global:StartupInProgress -and -not $Global:RepairInProgress) {
+        Repair-DeadInstances (Get-State)
     }
 
     return Get-State
 }
 
-function Repair-DeadInstances([hashtable]$state) {
-    if (-not $state) {
-        return
-    }
+# ─────────────────────────────────────────────────────────────────────────────
+# Get-LiveInstances
+# Détecte les llama-server.exe actifs sur la plage de ports.
+# Ne filtre PAS sur HTTP — un serveur en sleep ne répond plus.
+# ─────────────────────────────────────────────────────────────────────────────
+function Get-LiveInstances([hashtable]$config) {
+    $instances = @()
+    $savedState = Get-State
+    $start = [int]$config.server_port_start
+    $end   = [int]$config.server_port_end
 
-    foreach ($instance in $state.instances) {
-        if (-not $instance.running -or -not $instance.model) {
-            continue
+    $listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalPort -ge $start -and $_.LocalPort -le $end }
+
+    foreach ($listener in $listeners) {
+        $port      = [int]$listener.LocalPort
+        $processId = [int]$listener.OwningProcess
+        $process   = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if (-not $process -or $process.HasExited) { continue }
+
+        # Vérifier que c'est bien un llama-server
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
+        if (-not $cim -or $cim.CommandLine -notmatch 'llama-server') { continue }
+
+        # Essayer HTTP pour récupérer le modelId (peut échouer si sleep)
+        $modelId = $null
+        try {
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:$port/v1/models" -Method Get -TimeoutSec 2 -ErrorAction Stop
+            if ($response.data -and $response.data.Count -gt 0) {
+                $modelId = [string]$response.data[0].id
+            } elseif ($response.models -and $response.models.Count -gt 0) {
+                $modelId = [string]$response.models[0].model
+            }
+        } catch {
+            # Serveur en sleep ou warmup — on garde l'instance quand même
         }
 
-        $process = $null
-        if ($instance.pid) {
-            $process = Get-Process -Id ([int]$instance.pid) -ErrorAction SilentlyContinue
+        # Compléter les infos depuis le state sauvegardé si HTTP muet
+        $savedInstance = $savedState.instances | Where-Object { [int]$_.port -eq $port } | Select-Object -First 1
+
+        $model    = $null
+        $filename = $null
+        $path     = ""
+
+        if ($modelId) {
+            $filename = $modelId
+            $model    = [IO.Path]::GetFileNameWithoutExtension($modelId)
+        } elseif ($savedInstance) {
+            $model    = $savedInstance.model
+            $filename = $savedInstance.filename
+            $path     = $savedInstance.path
         }
 
-    if ($process -and -not $process.HasExited) {
-        continue
+        $instances += @{
+            id              = [string]$port
+            port            = $port
+            pid             = $processId
+            running         = $true
+            model           = $model
+            filename        = $filename
+            path            = $path
+            started_at      = $process.StartTime.ToString('o')
+            last_error      = ""
+            server_base_url = "http://127.0.0.1:$port/v1"
+            proxy_id        = "$($config.proxy_model_id)-$port"
+        }
     }
 
-    if ($process -and $process.HasExited) {
-        Write-LlamaProcessAudit $instance 'RepairDeadInstance' "Processus arrêté avec code $($process.ExitCode)"
-    } else {
-        Write-LlamaProcessAudit $instance 'RepairDeadInstance' "Processus absent pour PID $($instance.pid)"
-    }
-
-    Write-Host "[Controller] Processus manquant ou arrêté détecté pour $($instance.model) (port $($instance.port)). Redémarrage avec configuration utilisateur..."
-    try {
-        $body = @{ model = $instance.model }
-        
-        # ✅ PRIORITÉ ABSOLUE: Utiliser LA VALEUR QUE L'UTILISATEUR A SELECTIONNÉ DANS L'UI
-        # Ne JAMAIS utiliser default_context si l'utilisateur a déjà choisi une valeur pour ce modèle
-        if ($instance.context -and [int]$instance.context -gt 0) { 
-            $body.context = [int]$instance.context 
-            Write-Host "[Controller] 🔄 Redémarrage avec contexte UTILISATEUR: $($instance.context)"
-        }
-        if ($instance.gpu_layers -and [int]$instance.gpu_layers -ge 0) { 
-            $body.gpu_layers = [int]$instance.gpu_layers 
-            Write-Host "[Controller] 🔄 Redémarrage avec gpu_layers UTILISATEUR: $($instance.gpu_layers)"
-        }
-        
-        if ($instance.active) { $body.activate = $true } else { $body.activate = $false }
-        Start-LlamaProcess $body | Out-Null
-    } catch {
-        Write-Host "[Controller] Échec redémarrage du modèle $($instance.model) : $($_.Exception.Message)"
-        $instance.running = $false
-        $instance.last_error = $_.Exception.Message
-    }
+    return $instances
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Repair-DeadInstances
+# Relance les instances actives (running=true) dont le processus est mort.
+# Protégé contre la récursion et désactivé pendant le startup.
+# ─────────────────────────────────────────────────────────────────────────────
+function Repair-DeadInstances([hashtable]$state) {
+    if ($Global:RepairInProgress -or $Global:StartupInProgress) { return }
+    if (-not $state) { return }
+
+    $Global:RepairInProgress = $true
+    try {
+        foreach ($instance in $state.instances) {
+            if (-not $instance.running -or -not $instance.model) { continue }
+
+            $process = $null
+            if ($instance.pid) {
+                $process = Get-Process -Id ([int]$instance.pid) -ErrorAction SilentlyContinue
+            }
+
+            if ($process -and -not $process.HasExited) { continue }
+
+            if ($process -and $process.HasExited) {
+                Write-LlamaProcessAudit $instance 'RepairDeadInstance' "Processus arrêté avec code $($process.ExitCode)"
+            } else {
+                Write-LlamaProcessAudit $instance 'RepairDeadInstance' "Processus absent pour PID $($instance.pid)"
+            }
+
+            Write-Host "[Controller] Processus mort détecté pour $($instance.model) (port $($instance.port)). Redémarrage..."
+            try {
+                $ctx       = if ($instance.context       -and [int]$instance.context       -gt 0) { [int]$instance.context       } else { [int](Get-Config).default_context }
+                $ngl       = if ($null -ne $instance.gpu_layers -and [int]$instance.gpu_layers -ge 0) { [int]$instance.gpu_layers } else { [int](Get-Config).default_gpu_layers }
+                $sleepSecs = if ($instance.ContainsKey('sleep_idle_seconds')) { [int]$instance.sleep_idle_seconds } else { [int](Get-Config).sleep_idle_seconds }
+
+                $body = @{
+                    model              = if ($instance.filename) { $instance.filename } else { $instance.model }
+                    port               = [int]$instance.port
+                    context            = $ctx
+                    gpu_layers         = $ngl
+                    sleep_idle_seconds = $sleepSecs
+                    activate           = [bool]$instance.active
+                }
+                if ($instance.estimated_vram_bytes) {
+                    $body.estimated_vram_bytes = [int64]$instance.estimated_vram_bytes
+                }
+                Start-LlamaProcess $body | Out-Null
+            } catch {
+                Write-Host "[Controller] Échec redémarrage $($instance.model) : $($_.Exception.Message)"
+                $instance.last_error = $_.Exception.Message
+                # running reste true → on réessaiera au prochain cycle watchdog
+            }
+        }
+    } finally {
+        $Global:RepairInProgress = $false
+    }
 }
 
 function Resolve-ModelRecord([string]$identifier) {
-    $config = Get-Config
+    $config    = Get-Config
     $modelsDir = [string]$config.models_dir
     if (-not $modelsDir -or -not (Test-Path $modelsDir)) {
         throw "Répertoire des modèles introuvable : $modelsDir"
@@ -614,7 +634,7 @@ function Resolve-ModelRecord([string]$identifier) {
         throw "Aucun modèle GGUF trouvé dans $modelsDir"
     }
 
-    $needle = [string]$identifier
+    $needle    = [string]$identifier
     $exactFile = $files | Where-Object { $_.Name -ieq $needle } | Select-Object -First 1
     if ($exactFile) {
         return @{ file = $exactFile; model = [IO.Path]::GetFileNameWithoutExtension($exactFile.Name) }
@@ -629,75 +649,17 @@ function Resolve-ModelRecord([string]$identifier) {
 }
 
 function Get-NextAvailablePort([hashtable]$config, [hashtable]$state) {
-    $start = [int]$config.server_port_start
-    $end = [int]$config.server_port_end
+    $start    = [int]$config.server_port_start
+    $end      = [int]$config.server_port_end
     $occupied = @{}
     foreach ($instance in $state.instances) {
         if ($instance.port) { $occupied[[int]$instance.port] = $true }
     }
 
-    for ($port = $start; $port -le $end; $port++) {
-        if (-not $occupied.ContainsKey($port)) {
-            return $port
-        }
+    for ($p = $start; $p -le $end; $p++) {
+        if (-not $occupied.ContainsKey($p)) { return $p }
     }
-
     return $null
-}
-
-function Get-LiveInstances([hashtable]$config) {
-    $instances = @()
-    $start = [int]$config.server_port_start
-    $end = [int]$config.server_port_end
-    $listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalPort -ge $start -and $_.LocalPort -le $end }
-
-    foreach ($listener in $listeners) {
-        $port = [int]$listener.LocalPort
-        $processId = [int]$listener.OwningProcess
-        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
-        if (-not $process -or $process.HasExited) {
-            continue
-        }
-
-        try {
-            $response = Invoke-RestMethod -Uri "http://127.0.0.1:$port/v1/models" -Method Get -TimeoutSec 2 -ErrorAction Stop
-        } catch {
-            continue
-        }
-
-        $modelId = $null
-        if ($response.data -and $response.data.Count -gt 0) {
-            $modelId = [string]$response.data[0].id
-        } elseif ($response.models -and $response.models.Count -gt 0) {
-            $modelId = [string]$response.models[0].model
-        }
-
-        if (-not $modelId) {
-            continue
-        }
-
-        $instances += @{
-            id = [string]$port
-            port = $port
-            pid = $processId
-            running = $true
-            model = [IO.Path]::GetFileNameWithoutExtension($modelId)
-            filename = $modelId
-            path = ""
-            started_at = $process.StartTime.ToString('o')
-            last_error = ""
-            stdout_log = ""
-            stderr_log = ""
-            estimated_vram_bytes = $null
-            server_base_url = "http://127.0.0.1:$port/v1"
-            proxy_id = "$($config.proxy_model_id)-$port"
-            context = $null
-            gpu_layers = $null
-        }
-    }
-
-    return $instances
 }
 
 function Resolve-InstanceRecord([string]$identifier) {
@@ -709,56 +671,43 @@ function Resolve-InstanceRecord([string]$identifier) {
 
     $lower = $needle.ToLower()
     foreach ($instance in $state.instances) {
-        if ([string]$instance.model -and [string]$instance.model.ToLower() -eq $lower) {
-            return $instance
-        }
-        if ([string]$instance.filename -and [string]$instance.filename.ToLower() -eq $lower) {
-            return $instance
-        }
-        if ([string]$instance.id -and [string]$instance.id.ToLower() -eq $lower) {
-            return $instance
-        }
-        if ([string]$instance.port -and [string]$instance.port -eq $needle) {
-            return $instance
-        }
-        if ([string]$instance.proxy_id -and [string]$instance.proxy_id.ToLower() -eq $lower) {
-            return $instance
-        }
+        if ([string]$instance.model    -and [string]$instance.model.ToLower()    -eq $lower) { return $instance }
+        if ([string]$instance.filename -and [string]$instance.filename.ToLower() -eq $lower) { return $instance }
+        if ([string]$instance.id       -and [string]$instance.id.ToLower()       -eq $lower) { return $instance }
+        if ([string]$instance.port     -and [string]$instance.port               -eq $needle) { return $instance }
+        if ([string]$instance.proxy_id -and [string]$instance.proxy_id.ToLower() -eq $lower) { return $instance }
     }
-
     return $null
 }
 
 function Get-GpuState {
     $controllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
-    $total = [int64]0
-    $used = [int64]0
+    $total  = [int64]0
+    $used   = [int64]0
     $labels = @()
 
-    # Tentative détection précise NVIDIA
     $nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
     if ($nvidiaSmi) {
         try {
             $gpuData = & nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits 2>$null
             if ($gpuData) {
                 foreach ($line in $gpuData) {
-                    $parts = $line.Split(',').Trim()
+                    $parts   = $line.Split(',').Trim()
                     $labels += $parts[0]
-                    $total += [int64]$parts[1] * 1024 * 1024
-                    $used += [int64]$parts[2] * 1024 * 1024
+                    $total  += [int64]$parts[1] * 1024 * 1024
+                    $used   += [int64]$parts[2] * 1024 * 1024
                 }
                 return @{
-                    total_bytes = $total
-                    used_bytes = $used
+                    total_bytes     = $total
+                    used_bytes      = $used
                     available_bytes = $total - $used
-                    label = if ($labels) { ($labels -join ' | ') } else { 'NVIDIA GPU' }
-                    vendor = "nvidia"
+                    label           = if ($labels) { ($labels -join ' | ') } else { 'NVIDIA GPU' }
+                    vendor          = "nvidia"
                 }
             }
         } catch {}
     }
 
-    # Tentative détection AMD
     $rocmSmi = Get-Command rocm-smi -ErrorAction SilentlyContinue
     if ($rocmSmi) {
         try {
@@ -766,72 +715,57 @@ function Get-GpuState {
             if ($amdData) {
                 foreach ($gpu in $amdData.PSObject.Properties) {
                     $labels += $gpu.Value.ProductName
-                    $total += [int64]$gpu.Value.VRAM.Total
-                    $used += [int64]$gpu.Value.VRAM.Used
+                    $total  += [int64]$gpu.Value.VRAM.Total
+                    $used   += [int64]$gpu.Value.VRAM.Used
                 }
                 return @{
-                    total_bytes = $total
-                    used_bytes = $used
+                    total_bytes     = $total
+                    used_bytes      = $used
                     available_bytes = $total - $used
-                    label = if ($labels) { ($labels -join ' | ') } else { 'AMD GPU' }
-                    vendor = "amd"
+                    label           = if ($labels) { ($labels -join ' | ') } else { 'AMD GPU' }
+                    vendor          = "amd"
                 }
             }
         } catch {}
     }
 
-    # Fallback WMI pour Intel et autres
     foreach ($controller in $controllers) {
         $reported = if ($controller.AdapterRAM) { [int64]$controller.AdapterRAM } else { [int64]0 }
-
         $nameVram = [int64]0
         if ($controller.Name -match '\((\d+)\s*GB\)') {
             $nameVram = [int64]$Matches[1] * [int64]1073741824
         }
-
         if ($nameVram -gt 0 -and $reported -lt [int64]6442450944) {
             $total += $nameVram
         } else {
             $total += $reported
         }
-
-        if ($controller.Name) {
-            $labels += [string]$controller.Name
-        }
+        if ($controller.Name) { $labels += [string]$controller.Name }
     }
 
     return @{
-        total_bytes = $total
-        used_bytes = $null
+        total_bytes     = $total
+        used_bytes      = $null
         available_bytes = $null
-        label = if ($labels) { ($labels -join ' | ') } else { 'GPU inconnu' }
-        vendor = "generic"
+        label           = if ($labels) { ($labels -join ' | ') } else { 'GPU inconnu' }
+        vendor          = "generic"
     }
 }
 
 function Stop-LlamaProcess([hashtable]$body) {
-    $state = Get-ConsistentState
+    $state  = Get-ConsistentState
     $target = $null
 
-    if ($body -and $body.model) {
-        $target = Resolve-InstanceRecord([string]$body.model)
-    } elseif ($body -and $body.id) {
-        $target = Resolve-InstanceRecord([string]$body.id)
-    } elseif ($body -and $body.proxy_id) {
-        $target = Resolve-InstanceRecord([string]$body.proxy_id)
-    } elseif ($body -and $body.port) {
-        $target = Resolve-InstanceRecord([string]$body.port)
-    } elseif ($state.instances.Count -eq 1) {
-        $target = $state.instances[0]
-    }
+    if ($body -and $body.model)    { $target = Resolve-InstanceRecord([string]$body.model) }
+    elseif ($body -and $body.id)   { $target = Resolve-InstanceRecord([string]$body.id) }
+    elseif ($body -and $body.proxy_id) { $target = Resolve-InstanceRecord([string]$body.proxy_id) }
+    elseif ($body -and $body.port) { $target = Resolve-InstanceRecord([string]$body.port) }
+    elseif ($state.instances.Count -eq 1) { $target = $state.instances[0] }
 
-    if (-not $target) {
-        return $state
-    }
+    if (-not $target) { return $state }
 
     if ($target.pid) {
         try {
-            # Arrêt gracieux d'abord
             Stop-Process -Id ([int]$target.pid) -ErrorAction Stop
             Start-Sleep -Milliseconds 2000
             $process = Get-Process -Id ([int]$target.pid) -ErrorAction SilentlyContinue
@@ -843,37 +777,38 @@ function Stop-LlamaProcess([hashtable]$body) {
         }
     }
 
-    $target.pid = $null
-    $target.running = $false
+    # Mettre à jour uniquement pid et started_at, marquer running=false pour nettoyage
+    $target.pid        = $null
     $target.started_at = ""
+    $target.running    = $false   # ← seul cas où on met running=false : arrêt explicite
 
-    # FORCER TABLEAU même quand 0 ou 1 élément (comportement PowerShell)
-    $filtered = $state.instances | Where-Object {
-        ($_.id -ne $target.id) -and ($_.port -ne $target.port) -and ($_.model -ne $target.model)
-    }
-    $state.instances = @()
-    if ($filtered) {
-        $state.instances = @($filtered)
-    }
-
-    if ($state.active_model -and $state.active_model -ieq $target.model) {
-        $remainingActive = $state.instances | Where-Object { $_.running } | Select-Object -First 1
-        if ($remainingActive) {
-            $state.active_model = [string]$remainingActive.model
-            $state.active_filename = [string]$remainingActive.filename
-            $state.active_path = [string]$remainingActive.path
-            $state.started_at = [string]$remainingActive.started_at
-            $state.instances = $state.instances | ForEach-Object { $_.active = ($_.id -eq $remainingActive.id); $_ }
+    # Résolution de l'instance active restante
+    $state2 = Get-State
+    if ($state2.active_model -and $state2.active_model -ieq $target.model) {
+        $remaining = $state2.instances | Where-Object { $_.running -and $_.id -ne $target.id } | Select-Object -First 1
+        if ($remaining) {
+            $state2.active_model    = [string]$remaining.model
+            $state2.active_filename = [string]$remaining.filename
+            $state2.active_path     = [string]$remaining.path
+            $state2.started_at      = [string]$remaining.started_at
+            foreach ($inst in $state2.instances) { $inst.active = ($inst.id -eq $remaining.id) }
         } else {
-            $state.active_model = ''
-            $state.active_filename = ''
-            $state.active_path = ''
-            $state.started_at = ''
+            $state2.active_model    = ''
+            $state2.active_filename = ''
+            $state2.active_path     = ''
+            $state2.started_at      = ''
         }
     }
 
-    Save-State $state
-    return $state
+    # Persister running=false dans le fichier pour que Get-ConsistentState nettoie
+    $savedTarget = $state2.instances | Where-Object { $_.id -eq $target.id } | Select-Object -First 1
+    if ($savedTarget) {
+        $savedTarget.pid        = $null
+        $savedTarget.started_at = ""
+        $savedTarget.running    = $false
+    }
+    Save-State $state2
+    return $state2
 }
 
 function Start-LlamaProcess([hashtable]$body) {
@@ -882,80 +817,98 @@ function Start-LlamaProcess([hashtable]$body) {
         throw "Binaire llama-server introuvable : $($config.binary_path)"
     }
 
-    $record = Resolve-ModelRecord([string]$body.model)
-    $context = if ($body.context) { [int]$body.context } else { [int]$config.default_context }
-    $gpuLayers = if ($body.gpu_layers) { [int]$body.gpu_layers } else { [int]$config.default_gpu_layers }
-    $state = Get-ConsistentState
+    $record        = Resolve-ModelRecord([string]$body.model)
+    $context       = if ($body.context    -and [int]$body.context    -gt 0) { [int]$body.context    } else { [int]$config.default_context }
+    $gpuLayers     = if ($null -ne $body.gpu_layers -and [int]$body.gpu_layers -ge 0) { [int]$body.gpu_layers } else { [int]$config.default_gpu_layers }
+    $sleepIdleSecs = if ($body.ContainsKey('sleep_idle_seconds')) { [int]$body.sleep_idle_seconds } elseif ($config.ContainsKey('sleep_idle_seconds')) { [int]$config.sleep_idle_seconds } else { -1 }
 
-    $debugLog = Join-Path (Get-ControllerLogDir) 'controller-debug.log'
-    if (-not (Test-Path (Split-Path -Parent $debugLog))) {
-        New-Item -ItemType Directory -Path (Split-Path -Parent $debugLog) -Force | Out-Null
-    }
-    Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Start-LlamaProcess requested ctx=$context gpu_layers=$gpuLayers model=$($record.model)"
-    Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Start-LlamaProcess called for model=$($body.model) resolved=$($record.model)"
-    $existingInstance = $state.instances | Where-Object {
-        ($_.model -ieq $record.model -or $_.filename -ieq $body.model -or $_.filename -ieq $record.model) -and $_.running
-    } | Select-Object -First 1
-    if ($existingInstance) {
-        Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Found existingInstance id=$($existingInstance.id) model=$($existingInstance.model) filename=$($existingInstance.filename) port=$($existingInstance.port) active=$($existingInstance.active)"
-    }
-    $activate = $false
-    if ($body.ContainsKey('activate') -and $body.activate -eq $true) {
-        $activate = $true
-    }
-
-    # ✅ CORRECTION: Vérifier que la configuration correspond (context / gpu_layers)
-    $configurationMatches = $false
-    if ($existingInstance) {
-        $requestedContext = if ($body.context) { [int]$body.context } else { [int]$config.default_context }
-        $requestedGpuLayers = if ($body.gpu_layers) { [int]$body.gpu_layers } else { [int]$config.default_gpu_layers }
-        
-        $existingContext = if ($existingInstance.context) { [int]$existingInstance.context } else { 0 }
-        $existingGpuLayers = if ($existingInstance.gpu_layers) { [int]$existingInstance.gpu_layers } else { 0 }
-
-        $configurationMatches = ($requestedContext -eq $existingContext) -and ($requestedGpuLayers -eq $existingGpuLayers)
-        
-        Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Configuration check: requested ctx=$requestedContext / existing ctx=$existingContext | requested ngl=$requestedGpuLayers / existing ngl=$existingGpuLayers | matches=$configurationMatches"
-    }
-
-    # ✅ SI LA CONFIGURATION NE CORRESPOND PAS: ON DÉTRUIT L'INSTANCE EXISTANTE MÊME SI ELLE EXISTE
-    if ($existingInstance -and -not $configurationMatches) {
-        Add-Content -Path $debugLog -Value "`[$(Get-Date -Format 'o')] Configuration mismatch detected, destroying existing instance before creating new one"
-        Stop-LlamaProcess @{ id = $existingInstance.id } | Out-Null
-        $existingInstance = $null
-        Start-Sleep -Milliseconds 1500
-    }
-
-    if ($existingInstance -and $configurationMatches -and (Test-TcpEndpoint -HostName '127.0.0.1' -Port ([int]$existingInstance.port) -TimeoutMs 1000)) {
-        if ($activate) {
-            Write-Host "[controller] Activating existing model instance: $($record.model) on port $($existingInstance.port)"
-            Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Promoting existing instance id=$($existingInstance.id)"
-            for ($i = 0; $i -lt $state.instances.Count; $i++) {
-                $instance = $state.instances[$i]
-                if ($null -ne $instance) {
-                    $state.instances[$i]['active'] = ([string]$instance.id -eq [string]$existingInstance.id)
-                }
-            }
-            $state.active_model = [string]$existingInstance.model
-            $state.active_filename = [string]$existingInstance.filename
-            $state.active_path = [string]$existingInstance.path
-            $state.started_at = [string]$existingInstance.started_at
-            Save-State $state
-            Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] Save-State called for active_model=$($state.active_model)"
-            foreach ($instance in $state.instances) {
-                Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'o')] instance $($instance.id) active=$($instance.active) model=$($instance.model)"
-            }
-            return $state
-        }
-
-        return $state
-    }
-
-    $port = Get-NextAvailablePort $config $state
+    $state = Get-State
+    $port  = if ($body.port) { [int]$body.port } else { Get-NextAvailablePort $config $state }
     if (-not $port) {
         throw "Aucune plage de ports disponible pour démarrer un nouveau modèle."
     }
 
+    if ($body.port) {
+        $portRangeStart = [int]$config.server_port_start
+        $portRangeEnd   = [int]$config.server_port_end
+        if ($port -lt $portRangeStart -or $port -gt $portRangeEnd) {
+            throw "Port demandé $port en dehors de la plage autorisée ($portRangeStart-$portRangeEnd)."
+        }
+        $listenerPid = Get-ProcessIdListeningOnPort $port
+        if ($listenerPid) {
+            $conflicting = $state.instances | Where-Object { $_.port -eq $port -and $_.pid -and [int]$_.pid -ne $listenerPid }
+            if ($conflicting) {
+                throw "Le port demandé $port est déjà occupé par un autre processus."
+            }
+        }
+    }
+
+    Write-DebugLog "Start-LlamaProcess model=$($body.model) resolved=$($record.model) ctx=$context ngl=$gpuLayers sleep=$sleepIdleSecs port=$port"
+
+    # ── Vérifier si une instance vivante existe déjà sur ce port/modèle ──────
+    $existingInstance = $null
+    if ($body.port) {
+        $existingInstance = $state.instances | Where-Object {
+            [int]$_.port -eq [int]$body.port -and $_.running -and $_.pid
+        } | Select-Object -First 1
+    }
+    if (-not $existingInstance) {
+        $existingInstance = $state.instances | Where-Object {
+            ($_.model -ieq $record.model -or $_.filename -ieq $body.model -or $_.filename -ieq $record.file.Name) -and $_.running -and $_.pid
+        } | Select-Object -First 1
+    }
+
+    if ($existingInstance) {
+        Write-DebugLog "Found existingInstance id=$($existingInstance.id) pid=$($existingInstance.pid)"
+        # Vérifier que le processus est vraiment vivant
+        $processInfo = Get-LlamaServerProcessInfo ([int]$existingInstance.pid)
+        if (-not $processInfo -or $processInfo.has_exited -or $processInfo.command_line -notmatch 'llama-server') {
+            Write-DebugLog "Existing instance pid=$($existingInstance.pid) is stale. Recreating."
+            $existingInstance = $null
+        }
+    }
+
+    $activate = $body.ContainsKey('activate') -and $body.activate -eq $true
+
+    # ── Vérifier si la configuration correspond ────────────────────────────
+    if ($existingInstance) {
+        $existingContext   = if ($existingInstance.context    -and [int]$existingInstance.context    -gt 0) { [int]$existingInstance.context    } else { 0 }
+        $existingGpuLayers = if ($null -ne $existingInstance.gpu_layers -and [int]$existingInstance.gpu_layers -ge 0) { [int]$existingInstance.gpu_layers } else { 0 }
+        $configMatches     = ($context -eq $existingContext) -and ($gpuLayers -eq $existingGpuLayers)
+        Write-DebugLog "Config check: req ctx=$context/ngl=$gpuLayers vs existing ctx=$existingContext/ngl=$existingGpuLayers matches=$configMatches"
+
+        if (-not $configMatches) {
+            Write-DebugLog "Config mismatch → destruction de l'instance existante"
+            Stop-LlamaProcess @{ id = $existingInstance.id } | Out-Null
+            $existingInstance = $null
+            Start-Sleep -Milliseconds 1500
+        }
+    }
+
+    if ($existingInstance) {
+        $endpointReady = Test-LlamaServerEndpoint -Port ([int]$existingInstance.port)
+        Write-DebugLog "Endpoint test port=$($existingInstance.port) ready=$endpointReady"
+
+        if ($endpointReady -or (Test-TcpEndpoint '127.0.0.1' ([int]$existingInstance.port) 500)) {
+            if ($activate) {
+                $state2 = Get-State
+                foreach ($inst in $state2.instances) {
+                    $inst.active = ([string]$inst.id -eq [string]$existingInstance.id)
+                }
+                $state2.active_model    = [string]$existingInstance.model
+                $state2.active_filename = [string]$existingInstance.filename
+                $state2.active_path     = [string]$existingInstance.path
+                $state2.started_at      = [string]$existingInstance.started_at
+                Save-State $state2
+                Write-DebugLog "Promoted existing instance id=$($existingInstance.id) as active"
+            }
+            return Get-State
+        }
+        # TCP ne répond plus → recréer
+        $existingInstance = $null
+    }
+
+    # ── Lancer un nouveau processus ────────────────────────────────────────
     $runtimeDir = Get-RuntimeLogDir
     if (-not (Test-Path $runtimeDir)) {
         New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
@@ -964,107 +917,156 @@ function Start-LlamaProcess([hashtable]$body) {
     $stdoutLog = Join-Path $runtimeDir "llama-server.$port.stdout.log"
     $stderrLog = Join-Path $runtimeDir "llama-server.$port.stderr.log"
 
-    # Initialiser compteurs pour cette instance
     $portKey = [string]$port
-    $Global:RequestCounter[$portKey] = 0
+    $Global:RequestCounter[$portKey]  = 0
     $Global:LastRequestTime[$portKey] = Get-Date
 
     $arguments = @(
         '--host', '0.0.0.0',
         '--port', ([string]$port),
-        # Start-Process concatène ArgumentList : un chemin avec espaces doit être explicitement quoté.
         '-m', ('"{0}"' -f $record.file.FullName),
         '--ctx-size', ([string]$context),
         '-c', ([string]$context),
         '--cache-ram', '512'
     )
-
     if ($gpuLayers -gt 0 -and $config.backend -ne 'cpu') {
         $arguments += @('-ngl', ([string]$gpuLayers))
     }
+    if ($sleepIdleSecs -ge 0) {
+        $arguments += @('--sleep-idle-seconds', ([string]$sleepIdleSecs))
+    }
 
-    $process = Start-Process -FilePath $config.binary_path -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+    $pi                      = New-Object System.Diagnostics.ProcessStartInfo
+    $pi.FileName             = $config.binary_path
+    $pi.Arguments            = $arguments -join ' '
+    $pi.WindowStyle          = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $pi.CreateNoWindow       = $true
+    $pi.RedirectStandardOutput = $true
+    $pi.RedirectStandardError  = $true
+    $pi.UseShellExecute      = $false
+    $pi.WorkingDirectory     = Split-Path -Parent $config.binary_path
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $pi
+    $process.Start() | Out-Null
+
+    $stdoutWriter           = New-Object System.IO.StreamWriter $stdoutLog, $false
+    $stderrWriter           = New-Object System.IO.StreamWriter $stderrLog, $false
+    $stdoutWriter.AutoFlush = $true
+    $stderrWriter.AutoFlush = $true
+
+    Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action {
+        param($sender, $e)
+        if ($e.Data) { $stdoutWriter.WriteLine($e.Data) }
+    } | Out-Null
+
+    Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action {
+        param($sender, $e)
+        if ($e.Data) { $stderrWriter.WriteLine($e.Data) }
+    } | Out-Null
+
+    $process.BeginOutputReadLine()
+    $process.BeginErrorReadLine()
+
     $commandLine = $arguments -join ' '
-    Write-ProcessMonitorLog "[ProcessStart] pid=$($process.Id) port=$port model=$($record.model) commandline='$commandLine' stdout='$stdoutLog' stderr='$stderrLog'"
+    Write-DebugLog "Launched llama-server pid=$($process.Id) port=$port model=$($record.model) cmd='$commandLine'"
+    Write-ProcessMonitorLog "[ProcessStart] pid=$($process.Id) port=$port model=$($record.model)"
 
-    # Watchdog: Vérifier que le processus ne crash pas immédiatement
+    # Watchdog immédiat : crash au démarrage ?
     Start-Sleep -Milliseconds 2000
     if ($process.HasExited) {
         $stderrTail = Get-LastLinesFromFile $stderrLog 30
-        Write-ProcessMonitorLog "[ProcessStartFail] pid=$($process.Id) port=$port model=$($record.model) exitCode=$($process.ExitCode)"
-        if ($stderrTail) { Write-ProcessMonitorLog "[ProcessStartFail] last stderr:`n$stderrTail" }
-        throw "Le processus llama-server s'est arrêté immédiatement. Code de sortie: $($process.ExitCode)"
+        Write-ProcessMonitorLog "[ProcessStartFail] pid=$($process.Id) port=$port exitCode=$($process.ExitCode)"
+        if ($stderrTail) { Write-ProcessMonitorLog "[ProcessStartFail] stderr:`n$stderrTail" }
+        throw "Le processus llama-server s'est arrêté immédiatement. Code: $($process.ExitCode)"
     }
 
-    $instance = @{
-        id = [string]$port
-        port = [int]$port
-        pid = $process.Id
-        running = $true
-        model = $record.model
-        filename = $record.file.Name
-        path = $record.file.FullName
-        started_at = (Get-Date).ToString('o')
-        last_error = ""
-        stdout_log = $stdoutLog
-        stderr_log = $stderrLog
-        estimated_vram_bytes = if ($body.estimated_vram_bytes) { [int64]$body.estimated_vram_bytes } else { $null }
-        server_base_url = "http://127.0.0.1:$port/v1"
-        proxy_id = "$($config.proxy_model_id)-$port"
-        active = $activate
-        context = $context
-        gpu_layers = $gpuLayers
+    # ── Mettre à jour le state : pid + started_at uniquement ──────────────
+    $state2 = Get-State
+    $savedEntry = $state2.instances | Where-Object {
+        [string]$_.id -eq [string]$port -or [int]$_.port -eq $port
+    } | Select-Object -First 1
+
+    if ($savedEntry) {
+        # Mettre à jour l'entrée existante sans l'écraser
+        $savedEntry.pid        = $process.Id
+        $savedEntry.started_at = (Get-Date).ToString('o')
+        $savedEntry.running    = $true
+        $savedEntry.stdout_log = $stdoutLog
+        $savedEntry.stderr_log = $stderrLog
+        $savedEntry.last_error = ""
+        $savedEntry.context    = $context
+        $savedEntry.gpu_layers = $gpuLayers
+        $savedEntry.sleep_idle_seconds = $sleepIdleSecs
+        $savedEntry.server_base_url    = "http://127.0.0.1:$port/v1"
+        $savedEntry.proxy_id           = "$($config.proxy_model_id)-$port"
+        if ($body.estimated_vram_bytes) { $savedEntry.estimated_vram_bytes = [int64]$body.estimated_vram_bytes }
+        if (-not $savedEntry.path -and $record.file.FullName) { $savedEntry.path = $record.file.FullName }
+    } else {
+        # Nouvelle entrée
+        $newEntry = @{
+            id                   = [string]$port
+            port                 = [int]$port
+            pid                  = $process.Id
+            running              = $true
+            model                = $record.model
+            filename             = $record.file.Name
+            path                 = $record.file.FullName
+            started_at           = (Get-Date).ToString('o')
+            last_error           = ""
+            stdout_log           = $stdoutLog
+            stderr_log           = $stderrLog
+            estimated_vram_bytes = if ($body.estimated_vram_bytes) { [int64]$body.estimated_vram_bytes } else { $null }
+            sleep_idle_seconds   = $sleepIdleSecs
+            server_base_url      = "http://127.0.0.1:$port/v1"
+            proxy_id             = "$($config.proxy_model_id)-$port"
+            active               = $activate
+            context              = $context
+            gpu_layers           = $gpuLayers
+        }
+        $state2.instances = @($newEntry) + $state2.instances
     }
 
     if ($activate) {
-        # Supprimer TOUTES les anciennes instances quand on active un nouveau modèle
-        $state.instances = @($instance)
-        $state.active_model = [string]$instance.model
-        $state.active_filename = [string]$instance.filename
-        $state.active_path = [string]$instance.path
-        $state.started_at = [string]$instance.started_at
-        # Réinitialiser aussi les compteurs
-        $Global:RequestCounter = @{}
-        $Global:LastRequestTime = @{}
-    } else {
-        $state.instances = @($instance) + $state.instances
+        foreach ($inst in $state2.instances) {
+            $inst.active = ([string]$inst.id -eq [string]$port)
+        }
+        $activeSaved = $state2.instances | Where-Object { $_.active } | Select-Object -First 1
+        if ($activeSaved) {
+            $state2.active_model    = [string]$activeSaved.model
+            $state2.active_filename = [string]$activeSaved.filename
+            $state2.active_path     = [string]$activeSaved.path
+            $state2.started_at      = [string]$activeSaved.started_at
+        }
     }
-    Save-State $state
 
-    # Attendre que le serveur soit prêt et réponde correctement
-    # Certains modèles (ex: contexte très large) peuvent prendre >15s à warmup.
-    # On élargit la fenêtre pour éviter les faux positifs "timeout" alors que le chargement continue.
+    Save-State $state2
+    Write-DebugLog "Save-State after launch: pid=$($process.Id) port=$port model=$($record.model) active=$activate"
+
+    # Attente que le serveur réponde (60 × 600ms = 36s max)
     $serverReady = $false
     for ($i = 0; $i -lt 60; $i++) {
         try {
             $response = Invoke-RestMethod -Uri "http://127.0.0.1:$port/v1/models" -Method Get -TimeoutSec 2 -ErrorAction Stop
-            if ($response.data -or $response.models) {
-                $serverReady = $true
-                break
-            }
-        } catch {
-            # Server pas encore prêt, on continue d'attendre
-        }
+            if ($response.data -or $response.models) { $serverReady = $true; break }
+        } catch {}
         Start-Sleep -Milliseconds 600
     }
 
     if (-not $serverReady) {
         try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch {}
-        throw "Timeout attente llama-server sur le port ${port}: le serveur n'a pas répondu correctement"
+        throw "Timeout attente llama-server sur le port ${port}"
     }
 
     Write-ProcessMonitorLog "[ProcessStarted] pid=$($process.Id) port=$port model=$($record.model) ready"
-    return Get-ConsistentState
+    return Get-State
 }
 
 function Test-TcpEndpoint([string]$HostName, [int]$Port, [int]$TimeoutMs = 1000) {
     $client = [System.Net.Sockets.TcpClient]::new()
     try {
         $async = $client.BeginConnect($HostName, $Port, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
-            return $false
-        }
-
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return $false }
         $client.EndConnect($async)
         return $true
     } catch {
@@ -1074,94 +1076,47 @@ function Test-TcpEndpoint([string]$HostName, [int]$Port, [int]$TimeoutMs = 1000)
     }
 }
 
-function Get-RuntimeStatus {
-    $config = Get-Config
-    $state = Get-ConsistentState
-    $instances = @()
-    $requestCounter = ConvertTo-Hashtable $Global:RequestCounter
+function Test-LlamaServerEndpoint([int]$Port) {
+    try {
+        $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/models" -Method Get -TimeoutSec 2 -ErrorAction Stop
+        return ($response.data -or $response.models)
+    } catch {
+        return $false
+    }
+}
 
-    if ($state.instances -is [System.Collections.IDictionary]) {
-        # Cas spécial: si un seul élément PowerShell l'a converti en hashtable unique
-        $instance = $state.instances
-        $portKey = [string]$instance.port
-        $instances += @{
-            id = [string]$instance.id
-            port = [int]$instance.port
-            pid = $instance.pid
-            request_count = if ($requestCounter[$portKey]) { $requestCounter[$portKey] } else { 0 }
-            last_request_at = if ($Global:LastRequestTime[$portKey]) { $Global:LastRequestTime[$portKey].ToString('o') } else { $null }
-            running = [bool]$instance.running
-            model = [string]$instance.model
-            filename = [string]$instance.filename
-            path = [string]$instance.path
-            started_at = [string]$instance.started_at
-            last_error = [string]$instance.last_error
-            stdout_log = [string]$instance.stdout_log
-            stderr_log = [string]$instance.stderr_log
-            active = [bool]$instance.active
-            estimated_vram_bytes = if ($instance.estimated_vram_bytes) { [int64]$instance.estimated_vram_bytes } else { $null }
-            server_base_url = [string]$instance.server_base_url
-            proxy_id = [string]$instance.proxy_id
-            context = if ($instance.context) { [int]$instance.context } else { $null }
-            gpu_layers = if ($instance.gpu_layers) { [int]$instance.gpu_layers } else { $null }
+function Get-ObjectProperty($object, [string]$name) {
+    if ($null -eq $object) { return $null }
+    if ($object -is [System.Collections.IDictionary]) { return $object[$name] }
+    if ($object.PSObject.Properties.Match($name).Count -gt 0) { return $object.$name }
+    return $null
+}
+
+function Set-ObjectProperty($object, [string]$name, $value) {
+    if ($null -eq $object) { return $object }
+    if ($object -is [System.Collections.IDictionary]) { $object[$name] = $value; return $object }
+    $object | Add-Member -NotePropertyName $name -NotePropertyValue $value -Force
+    return $object
+}
+
+function ConvertTo-SerializableObject($value) {
+    if ($null -eq $value) { return $null }
+
+    if ($value -is [System.Collections.IDictionary]) {
+        $obj = [PSCustomObject]@{}
+        foreach ($key in $value.Keys) {
+            $obj | Add-Member -NotePropertyName ([string]$key) -NotePropertyValue (ConvertTo-SerializableObject $value[$key]) -Force
         }
-    } else {
-        foreach ($instance in $state.instances) {
-            $portKey = [string]$instance.port
-            $instances += @{
-                id = [string]$instance.id
-                port = [int]$instance.port
-                pid = $instance.pid
-                request_count = if ($requestCounter[$portKey]) { $requestCounter[$portKey] } else { 0 }
-                last_request_at = if ($Global:LastRequestTime[$portKey]) { $Global:LastRequestTime[$portKey].ToString('o') } else { $null }
-                running = [bool]$instance.running
-                model = [string]$instance.model
-                filename = [string]$instance.filename
-                path = [string]$instance.path
-                started_at = [string]$instance.started_at
-                last_error = [string]$instance.last_error
-                stdout_log = [string]$instance.stdout_log
-                stderr_log = [string]$instance.stderr_log
-                active = [bool]$instance.active
-                estimated_vram_bytes = if ($instance.estimated_vram_bytes) { [int64]$instance.estimated_vram_bytes } else { $null }
-                server_base_url = [string]$instance.server_base_url
-                proxy_id = [string]$instance.proxy_id
-                context = if ($instance.context) { [int]$instance.context } else { $null }
-                gpu_layers = if ($instance.gpu_layers) { [int]$instance.gpu_layers } else { $null }
-            }
-        }
+        return $obj
     }
 
-    $gpu = Get-GpuState
-    $activeInstance = $instances | Where-Object { $_.active } | Select-Object -First 1
-    if (-not $activeInstance -and $instances.Count -gt 0) {
-        $activeInstance = $instances[0]
+    if ($value -is [System.Collections.IEnumerable] -and -not ($value -is [string])) {
+        $items = @()
+        foreach ($item in $value) { $items += ,(ConvertTo-SerializableObject $item) }
+        return $items
     }
 
-    return @{
-        running = [bool]($instances.Count -gt 0)
-        pid = if ($activeInstance) { $activeInstance.pid } else { $null }
-        active_model = if ($activeInstance) { [string]$activeInstance.model } else { '' }
-        active_filename = if ($activeInstance) { [string]$activeInstance.filename } else { '' }
-        active_path = if ($activeInstance) { [string]$activeInstance.path } else { '' }
-        started_at = if ($activeInstance) { [string]$activeInstance.started_at } else { '' }
-        last_error = if ($activeInstance) { [string]$activeInstance.last_error } else { '' }
-        stdout_log = if ($activeInstance) { [string]$activeInstance.stdout_log } else { '' }
-        stderr_log = if ($activeInstance) { [string]$activeInstance.stderr_log } else { '' }
-        backend = [string]$config.backend
-        backend_label = [string]$config.backend_label
-        binary_path = [string]$config.binary_path
-        models_dir = [string]$config.models_dir
-        server_port = [int]$config.server_port
-        server_port_start = [int]$config.server_port_start
-        server_port_end = [int]$config.server_port_end
-        proxy_model_id = [string]$config.proxy_model_id
-        default_context = [int]$config.default_context
-        default_gpu_layers = [int]$config.default_gpu_layers
-        instances = $instances
-        request_counter = $requestCounter
-        gpu = $gpu
-    }
+    return $value
 }
 
 function Get-HttpStatusText([int]$statusCode) {
@@ -1169,171 +1124,293 @@ function Get-HttpStatusText([int]$statusCode) {
         200 { return 'OK' }
         400 { return 'Bad Request' }
         404 { return 'Not Found' }
+        429 { return 'Too Many Requests' }
         500 { return 'Internal Server Error' }
         default { return 'OK' }
     }
 }
 
-function Read-HttpRequest([System.Net.Sockets.NetworkStream]$stream) {
-    $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $false, 1024, $true)
-
-    $requestLine = $reader.ReadLine()
-    if (-not $requestLine) {
-        return $null
-    }
-
-    $parts = $requestLine.Split(' ')
-    if ($parts.Count -lt 2) {
-        throw 'Ligne de requete HTTP invalide.'
-    }
-
-    $headers = @{}
-    while ($true) {
-        $line = $reader.ReadLine()
-        if ($null -eq $line -or $line -eq '') {
-            break
-        }
-
-        $separator = $line.IndexOf(':')
-        if ($separator -gt 0) {
-            $headerName = $line.Substring(0, $separator).Trim()
-            $headerValue = $line.Substring($separator + 1).Trim()
-            $headers[$headerName] = $headerValue
-        }
-    }
-
-    $rawBody = ''
-    $contentLength = 0
-    if ($headers.ContainsKey('Content-Length')) {
-        [void][int]::TryParse([string]$headers['Content-Length'], [ref]$contentLength)
-    }
-
-    if ($contentLength -gt 0) {
-        $buffer = New-Object char[] $contentLength
-        $offset = 0
-        while ($offset -lt $contentLength) {
-            $read = $reader.Read($buffer, $offset, $contentLength - $offset)
-            if ($read -le 0) {
-                break
-            }
-            $offset += $read
-        }
-        if ($offset -gt 0) {
-            $rawBody = -join $buffer[0..($offset - 1)]
-        }
-    }
-
-    return @{
-        method = $parts[0].ToUpperInvariant()
-        path = ([Uri]('http://localhost' + $parts[1])).AbsolutePath.TrimEnd('/')
-        raw_body = $rawBody
-        headers = $headers
-    }
-}
-
-function Read-JsonBody($request) {
-    if (-not $request.raw_body) {
-        return @{}
-    }
-
-    return ConvertTo-Hashtable (ConvertFrom-Json $request.raw_body)
-}
-
-function Get-ObjectProperty($object, [string]$name) {
-    if ($null -eq $object) { return $null }
-    if ($object -is [System.Collections.IDictionary]) {
-        return $object[$name]
-    }
-    if ($object.PSObject.Properties.Match($name).Count -gt 0) {
-        return $object.$name
-    }
-    return $null
-}
-
-function Set-ObjectProperty($object, [string]$name, $value) {
-    if ($null -eq $object) { return $object }
-    if ($object -is [System.Collections.IDictionary]) {
-        $object[$name] = $value
-        return $object
-    }
-    $object | Add-Member -NotePropertyName $name -NotePropertyValue $value -Force
-    return $object
-}
-
-function ConvertTo-SerializableObject($value) {
-    if ($null -eq $value) {
-        return $null
-    }
-
-    if ($value -is [System.Collections.IDictionary]) {
-        $obj = [PSCustomObject]@{}
-        foreach ($key in $value.Keys) {
-            $stringKey = [string]$key
-            $obj | Add-Member -NotePropertyName $stringKey -NotePropertyValue (ConvertTo-SerializableObject $value[$key]) -Force
-        }
-        return $obj
-    }
-
-    if ($value -is [System.Collections.IEnumerable] -and -not ($value -is [string])) {
-        $items = @()
-        foreach ($item in $value) {
-            $items += ,(ConvertTo-SerializableObject $item)
-        }
-        return $items
-    }
-
-    return $value
-}
-
 function Write-Json([System.Net.Sockets.NetworkStream]$stream, [int]$statusCode, $payload) {
     $serializable = ConvertTo-SerializableObject $payload
-    $json = $serializable | ConvertTo-Json -Depth 8 -Compress
-    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-    $statusText = Get-HttpStatusText $statusCode
-    $headerText = "HTTP/1.1 {0} {1}`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: {2}`r`nAccess-Control-Allow-Origin: *`r`nAccess-Control-Allow-Methods: GET, POST, OPTIONS`r`nAccess-Control-Allow-Headers: *`r`nConnection: close`r`n`r`n" -f $statusCode, $statusText, $bodyBytes.Length
-    $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($headerText)
-
+    $json         = $serializable | ConvertTo-Json -Depth 8 -Compress
+    $bodyBytes    = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $statusText   = Get-HttpStatusText $statusCode
+    $headerText   = "HTTP/1.1 {0} {1}`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: {2}`r`nAccess-Control-Allow-Origin: *`r`nAccess-Control-Allow-Methods: GET, POST, OPTIONS`r`nAccess-Control-Allow-Headers: *`r`nConnection: close`r`n`r`n" -f $statusCode, $statusText, $bodyBytes.Length
+    $headerBytes  = [System.Text.Encoding]::ASCII.GetBytes($headerText)
     $stream.Write($headerBytes, 0, $headerBytes.Length)
     $stream.Write($bodyBytes, 0, $bodyBytes.Length)
     $stream.Flush()
 }
 
-# Watchdog background timer qui tourne toutes les 30 secondes
-$watchdogTimer = New-Object System.Timers.Timer
+function Read-HttpRequest([System.Net.Sockets.NetworkStream]$stream) {
+    $reader      = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $false, 1024, $true)
+    $requestLine = $reader.ReadLine()
+    if (-not $requestLine) { return $null }
+
+    $parts = $requestLine.Split(' ')
+    if ($parts.Count -lt 2) { throw 'Ligne de requete HTTP invalide.' }
+
+    $headers = @{}
+    while ($true) {
+        $line = $reader.ReadLine()
+        if ($null -eq $line -or $line -eq '') { break }
+        $separator = $line.IndexOf(':')
+        if ($separator -gt 0) {
+            $headers[$line.Substring(0, $separator).Trim()] = $line.Substring($separator + 1).Trim()
+        }
+    }
+
+    $rawBody       = ''
+    $contentLength = 0
+    if ($headers.ContainsKey('Content-Length')) {
+        [void][int]::TryParse([string]$headers['Content-Length'], [ref]$contentLength)
+    }
+    if ($contentLength -gt 0) {
+        $buffer = New-Object char[] $contentLength
+        $offset = 0
+        while ($offset -lt $contentLength) {
+            $read = $reader.Read($buffer, $offset, $contentLength - $offset)
+            if ($read -le 0) { break }
+            $offset += $read
+        }
+        if ($offset -gt 0) { $rawBody = -join $buffer[0..($offset - 1)] }
+    }
+
+    return @{
+        method   = $parts[0].ToUpperInvariant()
+        path     = ([Uri]('http://localhost' + $parts[1])).AbsolutePath.TrimEnd('/')
+        raw_body = $rawBody
+        headers  = $headers
+    }
+}
+
+function Read-JsonBody($request) {
+    if (-not $request.raw_body) { return @{} }
+    return ConvertTo-Hashtable (ConvertFrom-Json $request.raw_body)
+}
+
+function Get-RuntimeStatus {
+    $config    = Get-Config
+    $state     = Get-ConsistentState
+    $instances = @()
+    $requestCounter = ConvertTo-Hashtable $Global:RequestCounter
+
+    $rawInstances = if ($state.instances -is [System.Collections.IDictionary]) { @($state.instances) } else { $state.instances }
+
+    foreach ($instance in $rawInstances) {
+        $portKey = [string]$instance.port
+        $instances += @{
+            id                   = [string]$instance.id
+            port                 = [int]$instance.port
+            pid                  = $instance.pid
+            request_count        = if ($requestCounter[$portKey]) { $requestCounter[$portKey] } else { 0 }
+            last_request_at      = if ($Global:LastRequestTime[$portKey]) { $Global:LastRequestTime[$portKey].ToString('o') } else { $null }
+            running              = [bool]$instance.running
+            model                = [string]$instance.model
+            filename             = [string]$instance.filename
+            path                 = [string]$instance.path
+            started_at           = [string]$instance.started_at
+            last_error           = [string]$instance.last_error
+            stdout_log           = [string]$instance.stdout_log
+            stderr_log           = [string]$instance.stderr_log
+            active               = [bool]$instance.active
+            estimated_vram_bytes = if ($instance.estimated_vram_bytes) { [int64]$instance.estimated_vram_bytes } else { $null }
+            server_base_url      = [string]$instance.server_base_url
+            proxy_id             = [string]$instance.proxy_id
+            context              = if ($instance.context    -and [int]$instance.context    -gt 0) { [int]$instance.context    } else { $null }
+            gpu_layers           = if ($null -ne $instance.gpu_layers -and [int]$instance.gpu_layers -ge 0) { [int]$instance.gpu_layers } else { $null }
+        }
+    }
+
+    $gpu            = Get-GpuState
+    $activeInstance = $instances | Where-Object { $_.active } | Select-Object -First 1
+    if (-not $activeInstance -and $instances.Count -gt 0) { $activeInstance = $instances[0] }
+
+    return @{
+        running            = [bool]($instances.Count -gt 0)
+        pid                = if ($activeInstance) { $activeInstance.pid } else { $null }
+        active_model       = if ($activeInstance) { [string]$activeInstance.model } else { '' }
+        active_filename    = if ($activeInstance) { [string]$activeInstance.filename } else { '' }
+        active_path        = if ($activeInstance) { [string]$activeInstance.path } else { '' }
+        started_at         = if ($activeInstance) { [string]$activeInstance.started_at } else { '' }
+        last_error         = if ($activeInstance) { [string]$activeInstance.last_error } else { '' }
+        stdout_log         = if ($activeInstance) { [string]$activeInstance.stdout_log } else { '' }
+        stderr_log         = if ($activeInstance) { [string]$activeInstance.stderr_log } else { '' }
+        backend            = [string]$config.backend
+        backend_label      = [string]$config.backend_label
+        binary_path        = [string]$config.binary_path
+        models_dir         = [string]$config.models_dir
+        server_port        = [int]$config.server_port
+        server_port_start  = [int]$config.server_port_start
+        server_port_end    = [int]$config.server_port_end
+        proxy_model_id     = [string]$config.proxy_model_id
+        default_context    = [int]$config.default_context
+        default_gpu_layers = [int]$config.default_gpu_layers
+        instances          = $instances
+        request_counter    = $requestCounter
+        gpu                = $gpu
+    }
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DÉMARRAGE : restaurer TOUTES les instances running=true, quel que soit active.
+# active=true signifie "modèle principal" — pas un état d'activité réelle.
+# Le fichier state est conservé tel quel — seuls pid et started_at sont mis à jour.
+# Ordre : inactifs en premier, actif (le principal) en dernier.
+# ═════════════════════════════════════════════════════════════════════════════
+try {
+    $state  = Get-State
+    $config = Get-Config
+
+    Write-DebugLog "Startup: total instances in state=$($state.instances.Count)"
+
+    $toRestore = @()
+    foreach ($instance in $state.instances) {
+        # Ignorer uniquement les instances explicitement arrêtées
+        if (-not $instance.running) {
+            Write-DebugLog "Startup: skip id=$($instance.id) model=$($instance.model) running=false"
+            continue
+        }
+
+        if ($instance.pid) {
+            $process = Get-Process -Id ([int]$instance.pid) -ErrorAction SilentlyContinue
+            if ($process -and -not $process.HasExited) {
+                # Processus encore vivant → réattacher sans relancer
+                Write-Host "[Controller] Réattachement processus vivant PID=$($instance.pid) port=$($instance.port) model=$($instance.model)"
+                Write-DebugLog "Startup: reattach live pid=$($instance.pid) port=$($instance.port)"
+                $instance.started_at = $process.StartTime.ToString('o')
+                continue
+            }
+        }
+
+        # Processus mort ou absent → à relancer
+        $instance.pid        = $null
+        $instance.started_at = ""
+        $toRestore          += $instance
+        Write-DebugLog "Startup: queued restore id=$($instance.id) model=$($instance.model) port=$($instance.port) active=$($instance.active)"
+    }
+
+    # Sauvegarder l'état nettoyé avant de lancer les processus
+    Save-State $state
+    Write-DebugLog "Startup: state saved before restore, toRestore=$($toRestore.Count)"
+
+    # Lancer les inactifs en premier (ils ne sont pas le modèle principal)
+    foreach ($instance in ($toRestore | Where-Object { -not $_.active })) {
+        try {
+            $ctx       = if ($instance.context       -and [int]$instance.context       -gt 0) { [int]$instance.context       } else { [int]$config.default_context }
+            $ngl       = if ($null -ne $instance.gpu_layers -and [int]$instance.gpu_layers -ge 0) { [int]$instance.gpu_layers } else { [int]$config.default_gpu_layers }
+            $sleepSecs = if ($instance.ContainsKey('sleep_idle_seconds')) { [int]$instance.sleep_idle_seconds } else { [int]$config.sleep_idle_seconds }
+
+            Write-Host "[Controller] Restauration instance : $($instance.model) port=$($instance.port) ctx=$ctx ngl=$ngl active=false"
+            Write-DebugLog "Startup: restoring inactive id=$($instance.id) model=$($instance.model) port=$($instance.port) ctx=$ctx ngl=$ngl"
+
+            $body = @{
+                model              = if ($instance.filename) { $instance.filename } else { $instance.model }
+                context            = $ctx
+                gpu_layers         = $ngl
+                port               = [int]$instance.port
+                activate           = $false
+                sleep_idle_seconds = $sleepSecs
+            }
+            if ($instance.estimated_vram_bytes) { $body.estimated_vram_bytes = [int64]$instance.estimated_vram_bytes }
+
+            Start-LlamaProcess $body | Out-Null
+            Write-Host "[Controller] ✅ Instance restaurée : $($instance.model) port=$($instance.port)"
+        } catch {
+            Write-Host "[Controller] ❌ Echec restauration $($instance.model) port=$($instance.port) : $($_.Exception.Message)"
+            Write-DebugLog "Startup: restore failure id=$($instance.id) error=$($_.Exception.Message)"
+            $state2 = Get-State
+            $saved  = $state2.instances | Where-Object { [string]$_.id -eq [string]$instance.id } | Select-Object -First 1
+            if ($saved) {
+                $saved.pid        = $null
+                $saved.last_error = [string]$_.Exception.Message
+                $saved.started_at = ""
+                # running reste true → watchdog retentera
+            }
+            Save-State $state2
+        }
+    }
+
+    # Lancer le modèle principal (active=true) en dernier
+    $activeInstance = $toRestore | Where-Object { $_.active } | Select-Object -First 1
+    if ($activeInstance) {
+        try {
+            $ctx       = if ($activeInstance.context       -and [int]$activeInstance.context       -gt 0) { [int]$activeInstance.context       } else { [int]$config.default_context }
+            $ngl       = if ($null -ne $activeInstance.gpu_layers -and [int]$activeInstance.gpu_layers -ge 0) { [int]$activeInstance.gpu_layers } else { [int]$config.default_gpu_layers }
+            $sleepSecs = if ($activeInstance.ContainsKey('sleep_idle_seconds')) { [int]$activeInstance.sleep_idle_seconds } else { [int]$config.sleep_idle_seconds }
+
+            Write-Host "[Controller] Restauration modèle principal : $($activeInstance.model) port=$($activeInstance.port) ctx=$ctx ngl=$ngl"
+            Write-DebugLog "Startup: restoring active id=$($activeInstance.id) model=$($activeInstance.model) port=$($activeInstance.port) ctx=$ctx ngl=$ngl"
+
+            $body = @{
+                model              = if ($activeInstance.filename) { $activeInstance.filename } else { $activeInstance.model }
+                context            = $ctx
+                gpu_layers         = $ngl
+                port               = [int]$activeInstance.port
+                activate           = $false   # active est préservé depuis le state, pas besoin de re-promouvoir
+                sleep_idle_seconds = $sleepSecs
+            }
+            if ($activeInstance.estimated_vram_bytes) { $body.estimated_vram_bytes = [int64]$activeInstance.estimated_vram_bytes }
+
+            Start-LlamaProcess $body | Out-Null
+
+            # Restaurer le flag active=true et les champs active_* du state
+            $state2     = Get-State
+            $savedActive = $state2.instances | Where-Object { [string]$_.id -eq [string]$activeInstance.id } | Select-Object -First 1
+            if ($savedActive) {
+                $savedActive.active         = $true
+                $state2.active_model        = [string]$savedActive.model
+                $state2.active_filename     = [string]$savedActive.filename
+                $state2.active_path         = [string]$savedActive.path
+                $state2.started_at          = [string]$savedActive.started_at
+            }
+            Save-State $state2
+            Write-Host "[Controller] ✅ Modèle principal restauré : $($activeInstance.model) port=$($activeInstance.port)"
+        } catch {
+            Write-Host "[Controller] ❌ Echec restauration modèle principal $($activeInstance.model) : $($_.Exception.Message)"
+            Write-DebugLog "Startup: active restore failure id=$($activeInstance.id) error=$($_.Exception.Message)"
+            $state2 = Get-State
+            $saved  = $state2.instances | Where-Object { [string]$_.id -eq [string]$activeInstance.id } | Select-Object -First 1
+            if ($saved) {
+                $saved.pid        = $null
+                $saved.last_error = [string]$_.Exception.Message
+                $saved.started_at = ""
+                # running reste true → watchdog retentera
+            }
+            Save-State $state2
+        }
+    }
+} catch {
+    Write-Host "[Controller] Erreur relance auto : $($_.Exception.Message)"
+    Write-DebugLog "Startup: fatal error $($_.Exception.Message)"
+} finally {
+    # Libérer le verrou startup dans tous les cas
+    $Global:StartupInProgress = $false
+    Write-DebugLog "Startup: sequence terminée, StartupInProgress=false"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# WATCHDOG : vérification toutes les 30 secondes
+# ═════════════════════════════════════════════════════════════════════════════
+$watchdogTimer          = New-Object System.Timers.Timer
 $watchdogTimer.Interval = 30000
 $watchdogTimer.AutoReset = $true
 Register-ObjectEvent -InputObject $watchdogTimer -EventName Elapsed -Action {
     try {
-        Write-Host "[Watchdog] Exécution vérification état..."
-        $state = Get-State
+        Write-Host "[Watchdog] Vérification état..."
         Monitor-LlamaInstances
-        Repair-DeadInstances -state $state
         $state = Get-ConsistentState
-        $idleTimeoutMinutes = 30
+        Repair-DeadInstances $state
 
-        $now = Get-Date
-        foreach ($instance in $state.instances) {
-            if (-not $instance.running -or -not $instance.pid) { continue }
-            
-            $lastRequest = $Global:LastRequestTime[[string]$instance.port]
-            if ($lastRequest) {
-                $idleTime = ($now - $lastRequest).TotalMinutes
-                if ($idleTime -gt $idleTimeoutMinutes) {
-                    Write-Host "[Watchdog] Arrêt instance $($instance.port) inactive depuis $($idleTime.ToString('0.0')) minutes"
-                    Stop-LlamaProcess @{ port = $instance.port } | Out-Null
-                }
-            }
-        }
-
-        # Persister compteurs dans l'état
-        $state.request_counter = ConvertTo-Hashtable $Global:RequestCounter
-        $state.last_request_time = @{}
+        # Persister compteurs
+        $state2 = Get-State
+        $state2.request_counter  = ConvertTo-Hashtable $Global:RequestCounter
+        $state2.last_request_time = @{}
         foreach ($key in $Global:LastRequestTime.Keys) {
-            $state.last_request_time[[string]$key] = $Global:LastRequestTime[$key].ToString('o')
+            $state2.last_request_time[[string]$key] = $Global:LastRequestTime[$key].ToString('o')
         }
-        Save-State $state
-    }
-    catch {
+        Save-State $state2
+    } catch {
         Write-Host "[Watchdog] Erreur: $($_.Exception.Message)"
     }
 } | Out-Null
@@ -1344,33 +1421,31 @@ try {
         try {
             $mode = $Event.SourceEventArgs.Mode
             if ($mode -eq [Microsoft.Win32.PowerModes]::Resume) {
-                Write-Host "[Controller] Sortie de veille détectée, restauration des instances désirées..."
+                Write-Host "[Controller] Sortie de veille, restauration des instances..."
                 $state = Get-State
                 Monitor-LlamaInstances
-                Repair-DeadInstances -state $state
+                Repair-DeadInstances $state
                 Get-ConsistentState | Out-Null
             }
         } catch {
-            Write-Host "[Controller] Erreur lors de la gestion de la sortie de veille : $($_.Exception.Message)"
+            Write-Host "[Controller] Erreur PowerModeChanged : $($_.Exception.Message)"
         }
     } | Out-Null
 } catch {
-    Write-Host "[Controller] Impossible d'enregistrer l'événement PowerModeChanged : $($_.Exception.Message)"
+    Write-Host "[Controller] Impossible d'enregistrer PowerModeChanged : $($_.Exception.Message)"
 }
 
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $Port)
 try {
     $listener.Start()
 } catch {
-    throw "Impossible de demarrer le controleur hote sur 0.0.0.0:$Port. Detail: $($_.Exception.Message)"
+    throw "Impossible de demarrer le controleur sur 0.0.0.0:$Port. Detail: $($_.Exception.Message)"
 }
 
-# Restaurer compteurs depuis l'état si existant
+# Restaurer compteurs depuis l'état
 try {
     $state = Get-State
-    if ($state.request_counter) {
-        $Global:RequestCounter = ConvertTo-Hashtable $state.request_counter
-    }
+    if ($state.request_counter) { $Global:RequestCounter = ConvertTo-Hashtable $state.request_counter }
     if ($state.last_request_time) {
         foreach ($key in $state.last_request_time.Keys) {
             $Global:LastRequestTime[[string]$key] = [datetime]$state.last_request_time[$key]
@@ -1381,45 +1456,39 @@ try {
 Write-Host "[Controller] Démarré sur le port $Port"
 Write-Host "[Controller] Watchdog actif toutes les 30s"
 
+# ═════════════════════════════════════════════════════════════════════════════
+# BOUCLE PRINCIPALE HTTP
+# ═════════════════════════════════════════════════════════════════════════════
 while ($true) {
     $client = $null
     try {
-        # Connexion asynchrone avec timeout pour ne pas bloquer indéfiniment
         $asyncResult = $listener.BeginAcceptTcpClient($null, $null)
-        if (-not $asyncResult.AsyncWaitHandle.WaitOne(1000)) {
-            continue
-        }
+        if (-not $asyncResult.AsyncWaitHandle.WaitOne(1000)) { continue }
 
-        $client = $listener.EndAcceptTcpClient($asyncResult)
+        $client                = $listener.EndAcceptTcpClient($asyncResult)
         $client.ReceiveTimeout = 30000
-        $client.SendTimeout = 60000
+        $client.SendTimeout    = 60000
 
-        $stream = $client.GetStream()
+        $stream  = $client.GetStream()
         $request = Read-HttpRequest $stream
 
-        # Incrémenter compteur de requêtes globales
         $Global:RequestCounter['total'] = if ($Global:RequestCounter['total']) { $Global:RequestCounter['total'] + 1 } else { 1 }
 
-        if (-not $request) {
-            continue
-        }
+        if (-not $request) { continue }
 
-        $path = $request.path
-        if (-not $path) {
-            $path = '/'
-        }
+        $path = if ($request.path) { $request.path } else { '/' }
 
-        # Mettre à jour timestamp dernière requête pour chaque instance appelée
-        foreach ($instance in (Get-ConsistentState).instances) {
+        # Mise à jour timestamp par instance
+        foreach ($instance in (Get-State).instances) {
             if ($request.raw_body -match "\b$($instance.port)\b" -or $request.path -match "\b$($instance.port)\b") {
                 $portKey = [string]$instance.port
                 $Global:LastRequestTime[$portKey] = Get-Date
-                $Global:RequestCounter[$portKey] = if ($Global:RequestCounter[$portKey]) { $Global:RequestCounter[$portKey] + 1 } else { 1 }
+                $Global:RequestCounter[$portKey]  = if ($Global:RequestCounter[$portKey]) { $Global:RequestCounter[$portKey] + 1 } else { 1 }
             }
         }
 
         switch ("$($request.method) $path") {
-            'OPTIONS *' {
+            'OPTIONS /' {
                 Write-Json $stream 200 @{ ok = $true }
                 continue
             }
@@ -1441,26 +1510,25 @@ while ($true) {
                 Write-Host "[controller] POST /start model=$($body.model) context=$($body.context)"
 
                 $config = Get-Config
-                $state = Get-ConsistentState
+                $state  = Get-ConsistentState
                 $existingInstance = $state.instances | Where-Object { $_.model -ieq $body.model -and $_.running } | Select-Object -First 1
                 if ($existingInstance) {
                     if ($body.ContainsKey('activate') -and $body.activate -eq $true) {
                         if (-not $existingInstance.active -or $body.ContainsKey('context') -or $body.ContainsKey('gpu_layers')) {
-                            Write-Host "[controller] model déjà chargé, vérification de activation / reload : $($body.model)"
+                            Write-Host "[controller] model déjà chargé, vérification activation/reload : $($body.model)"
                             Start-LlamaProcess $body | Out-Null
                         } else {
-                            Write-Host "[controller] model déjà chargé et déjà actif : $($body.model)"
+                            Write-Host "[controller] model déjà chargé et actif : $($body.model)"
                         }
                     } else {
-                        Write-Host "[controller] model déjà chargé, reste en mémoire sans promotion : $($body.model)"
+                        Write-Host "[controller] model déjà chargé, pas de promotion : $($body.model)"
                     }
                     Write-Json $stream 200 (Get-RuntimeStatus)
                     continue
                 }
 
-                # Limitation max instances
-                $runningInstances = $state.instances | Where-Object { $_.running } | Measure-Object | Select-Object -ExpandProperty Count
-                if ($runningInstances -ge $config.max_instances) {
+                $runningCount = ($state.instances | Where-Object { $_.running } | Measure-Object).Count
+                if ($runningCount -ge $config.max_instances) {
                     Write-Json $stream 429 @{ detail = "Limite maximum de $($config.max_instances) instances atteinte" }
                     continue
                 }
@@ -1471,14 +1539,14 @@ while ($true) {
             }
             'POST /stop' {
                 $body = Read-JsonBody $request
-                Write-Host "[controller] POST /stop model=$($body.model) id=$($body.id) proxy_id=$($body.proxy_id) port=$($body.port)"
+                Write-Host "[controller] POST /stop model=$($body.model) id=$($body.id) port=$($body.port)"
                 Stop-LlamaProcess $body | Out-Null
                 Write-Json $stream 200 (Get-RuntimeStatus)
                 continue
             }
             'POST /restart' {
                 $body = Read-JsonBody $request
-                Write-Host "[controller] POST /restart model=$($body.model) id=$($body.id) proxy_id=$($body.proxy_id) port=$($body.port)"
+                Write-Host "[controller] POST /restart model=$($body.model) id=$($body.id) port=$($body.port)"
                 Stop-LlamaProcess $body | Out-Null
                 Start-Sleep -Milliseconds 1000
                 Start-LlamaProcess $body | Out-Null
@@ -1492,13 +1560,9 @@ while ($true) {
         }
     } catch {
         if ($client -and $client.Connected) {
-            try {
-                Write-Json $client.GetStream() 500 @{ detail = $_.Exception.Message }
-            } catch {}
+            try { Write-Json $client.GetStream() 500 @{ detail = $_.Exception.Message } } catch {}
         }
     } finally {
-        if ($client) {
-            $client.Dispose()
-        }
+        if ($client) { $client.Dispose() }
     }
 }

@@ -860,6 +860,7 @@ function Write-RuntimeConfig([string]$backend, [string]$backendLabel, [string]$b
         proxy_model_id = 'lia-local'
         default_context = $recommendedContext
         default_gpu_layers = $defaultGpuLayers
+        sleep_idle_seconds = 60
         server_port_start = 12434
         server_port_end = 12444
         max_instances = 6
