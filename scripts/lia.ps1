@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $ScriptName = "lia.ps1"
 $ScriptDir = Split-Path -Parent $PSCommandPath
 $ScriptPath = Join-Path $ScriptDir $ScriptName
@@ -267,6 +267,18 @@ function Normalize-RuntimeConfig {
     }
 }
 
+function Get-LlamaReleaseDirectoryTag([System.IO.DirectoryInfo]$dir, [string]$backend) {
+    if (-not $dir -or -not $dir.Name) {
+        return $null
+    }
+
+    if ($dir.Name -match "^(.*)-$([regex]::Escape($backend))$") {
+        return $matches[1]
+    }
+
+    return $null
+}
+
 function Get-LlamaServerBinaryFromDirectory([string]$directoryPath) {
     if (-not (Test-Path $directoryPath)) {
         return $null
@@ -282,40 +294,135 @@ function Get-LlamaServerBinaryFromDirectory([string]$directoryPath) {
     return $null
 }
 
+function Confirm-LlamaCppUpdate([string]$backend, [string]$localTag, [string]$latestTag) {
+    $localLabel = 'inconnue'
+    if ($localTag) { $localLabel = $localTag }
+    Write-Host "\nUne nouvelle version de llama.cpp est disponible pour le backend $backend." -ForegroundColor Yellow
+    Write-Host "Version locale : $localLabel" -ForegroundColor Gray
+    Write-Host "Derniere version : $latestTag" -ForegroundColor Gray
+    do {
+        $answer = Read-Host 'Voulez-vous telecharger et remplacer le binaire existant ? [O/N]'
+        $normalized = $answer.Trim().ToUpper()
+    } while ($normalized -notin @('O', 'OUI', 'Y', 'YES', 'N', 'NON', 'NO'))
+
+    return $normalized -in @('O', 'OUI', 'Y', 'YES')
+}
+
+function Cleanup-OldLlamaReleaseDirectories([string]$releaseRoot, [string]$backend, [string]$keepDir, [string]$archivePattern = '.*\.zip$') {
+    if (-not (Test-Path $releaseRoot)) {
+        return
+    }
+
+    $keepTag = $null
+    if ($keepDir) {
+        $keepTag = Get-LlamaReleaseDirectoryTag $keepDir $backend
+    }
+
+    $oldDirs = Get-ChildItem -Path $releaseRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^.+-$([regex]::Escape($backend))$" -and $_.FullName -ne $keepDir }
+
+    foreach ($dir in $oldDirs) {
+        try {
+            INFO "Suppression de l'ancien dossier llama-releases : $($dir.Name)"
+            Remove-Item -Path $dir.FullName -Recurse -Force -ErrorAction Stop
+        } catch {
+            WARN "Impossible de supprimer $($dir.FullName) : $($_.Exception.Message)"
+        }
+    }
+
+    $oldZips = Get-ChildItem -Path $releaseRoot -File -Filter '*.zip' -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -match $archivePattern -and
+            (-not $keepTag -or $_.Name -notmatch [regex]::Escape($keepTag))
+        }
+
+    foreach ($zip in $oldZips) {
+        try {
+            INFO "Suppression de l'ancien archive llama-releases : $($zip.Name)"
+            Remove-Item -Path $zip.FullName -Force -ErrorAction Stop
+        } catch {
+            WARN "Impossible de supprimer $($zip.FullName) : $($_.Exception.Message)"
+        }
+    }
+}
+
 function Try-DownloadLlamaCppRelease($plan) {
     $candidates = @(Get-LlamaReleaseCandidates $plan)
     $releaseRoot = Join-Path $runtimeDir 'llama-releases'
     Ensure-Directory $releaseRoot
 
-    # Priorité 1 : réutiliser un binaire déjà téléchargé localement (par backend, le plus récent en premier)
+    # Vérifier la dernière version sur GitHub dès que possible.
+    $latestRelease = $null
+    try {
+        $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest' -Headers @{ 'User-Agent' = 'LIA-setup' }
+    } catch {
+        WARN "Impossible de recuperer la derniere release llama.cpp. Le binaire local sera utilise si disponible."
+    }
+
     foreach ($candidate in $candidates) {
         $localDirs = Get-ChildItem -Path $releaseRoot -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match "^.+-$([regex]::Escape($candidate.backend))$" } |
             Sort-Object Name -Descending
+
         foreach ($dir in $localDirs) {
             $localBinary = Get-LlamaServerBinaryFromDirectory $dir.FullName
-            if ($localBinary) {
-                INFO "Binaire llama.cpp existant réutilisé : $($dir.Name)"
-                return @{ backend = $candidate.backend; label = $candidate.label; binaryPath = $localBinary; source = 'release'; buildDir = $dir.FullName }
+            if (-not $localBinary) {
+                continue
             }
+
+            $localTag = Get-LlamaReleaseDirectoryTag $dir $candidate.backend
+            if ($latestRelease -and $latestRelease.tag_name -and ($localTag -ne $latestRelease.tag_name)) {
+                if (Confirm-LlamaCppUpdate $candidate.backend $localTag $latestRelease.tag_name) {
+                    $asset = $latestRelease.assets | Where-Object { $_.name -match $candidate.assetPattern } | Select-Object -First 1
+                    if ($asset) {
+                        $releaseDir = Join-Path $releaseRoot ("{0}-{1}" -f $latestRelease.tag_name, $candidate.backend)
+                        $archivePath = Join-Path $releaseRoot $asset.name
+
+                        INFO "Telechargement de la nouvelle release llama.cpp : $($asset.name)"
+                        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archivePath -Headers @{ 'User-Agent' = 'LIA-setup' }
+
+                        if (Test-Path $releaseDir) {
+                            Remove-Item $releaseDir -Recurse -Force -ErrorAction Stop
+                        }
+
+                        Expand-Archive -Path $archivePath -DestinationPath $releaseDir -Force
+
+                        $binaryPath = Get-LlamaServerBinaryFromDirectory $releaseDir
+                        if ($binaryPath) {
+                            INFO "Mise a jour de llama.cpp terminee : $($releaseDir)"
+                            Cleanup-OldLlamaReleaseDirectories $releaseRoot $candidate.backend $releaseDir $candidate.assetPattern
+                            return @{ backend = $candidate.backend; label = $candidate.label; binaryPath = $binaryPath; source = 'release'; buildDir = $releaseDir }
+                        }
+
+                        WARN "Le binaire telecharge ne contient pas llama-server.exe : $($asset.name)"
+                    } else {
+                        WARN "Aucun asset correspondant trouve pour le backend $($candidate.backend) sur la release $($latestRelease.tag_name)."
+                    }
+
+                    INFO "Reutilisation du binaire local existant : $($dir.Name)"
+                    Cleanup-OldLlamaReleaseDirectories $releaseRoot $candidate.backend $dir.FullName $candidate.assetPattern
+                    return @{ backend = $candidate.backend; label = $candidate.label; binaryPath = $localBinary; source = 'release'; buildDir = $dir.FullName }
+                }
+            }
+
+            INFO "Binaire llama.cpp existant réutilisé : $($dir.Name)"
+            Cleanup-OldLlamaReleaseDirectories $releaseRoot $candidate.backend $dir.FullName $candidate.assetPattern
+            return @{ backend = $candidate.backend; label = $candidate.label; binaryPath = $localBinary; source = 'release'; buildDir = $dir.FullName }
         }
     }
 
-    # Priorité 2 : télécharger la dernière release GitHub
-    try {
-        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest' -Headers @{ 'User-Agent' = 'LIA-setup' }
-    } catch {
-        WARN "Impossible de recuperer la derniere release llama.cpp."
+    if (-not $latestRelease) {
+        WARN "Aucune release distante disponible et aucun binaire local compatible n'a ete trouve."
         return $null
     }
 
     foreach ($candidate in $candidates) {
-        $asset = $release.assets | Where-Object { $_.name -match $candidate.assetPattern } | Select-Object -First 1
+        $asset = $latestRelease.assets | Where-Object { $_.name -match $candidate.assetPattern } | Select-Object -First 1
         if (-not $asset) {
             continue
         }
 
-        $releaseDir = Join-Path $releaseRoot ("{0}-{1}" -f $release.tag_name, $candidate.backend)
+        $releaseDir = Join-Path $releaseRoot ("{0}-{1}" -f $latestRelease.tag_name, $candidate.backend)
         $archivePath = Join-Path $releaseRoot $asset.name
 
         INFO "Telechargement du binaire officiel llama.cpp : $($asset.name)"
@@ -329,6 +436,7 @@ function Try-DownloadLlamaCppRelease($plan) {
 
         $binaryPath = Get-LlamaServerBinaryFromDirectory $releaseDir
         if ($binaryPath) {
+            Cleanup-OldLlamaReleaseDirectories $releaseRoot $candidate.backend $releaseDir
             return @{ backend = $candidate.backend; label = $candidate.label; binaryPath = $binaryPath; source = 'release'; buildDir = $releaseDir }
         }
 
@@ -382,8 +490,16 @@ function Get-InterfaceChoice {
 
 function Get-HardwareProfile {
     $controllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
-    $names = @($controllers | ForEach-Object { $_.Name })
-    $joined = ($names -join ' | ')
+    $names = @()
+    foreach ($controller in $controllers) {
+        if ($controller.Name) { $names += $controller.Name }
+    }
+
+    if ($names.Count -gt 0) {
+        $joined = $names -join ' | '
+    } else {
+        $joined = ''
+    }
 
     if ($joined -match 'NVIDIA') {
         $gpuVendor = 'nvidia'
@@ -395,22 +511,44 @@ function Get-HardwareProfile {
         $gpuVendor = 'cpu'
     }
 
-    $gpuLabel = if ($joined) { $joined } else { 'Aucun GPU détecté' }
+    if ($joined) { $gpuLabel = $joined } else { $gpuLabel = 'Aucun GPU détecté' }
+
     $gpuDevices = @()
     foreach ($controller in $controllers) {
+        $name = ''
+        if ($controller.Name) { $name = $controller.Name.Trim() }
+        $driverVersion = ''
+        if ($controller.DriverVersion) { $driverVersion = $controller.DriverVersion.Trim() }
+        $adapterRam = 0
+        if ($controller.AdapterRAM -ne $null) { $adapterRam = [int64]$controller.AdapterRAM }
+
         $gpuDevices += @{
-            name = ($controller.Name ?? '').Trim()
-            driver_version = ($controller.DriverVersion ?? '').Trim()
-            adapter_ram_bytes = [int64]($controller.AdapterRAM ?? 0)
+            name = $name
+            driver_version = $driverVersion
+            adapter_ram_bytes = $adapterRam
         }
     }
 
     $processor = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
     $cpuProfile = $null
     if ($processor) {
+        $model = ''
+        if ($processor.Name) { $model = $processor.Name.Trim() }
+        $manufacturer = ''
+        if ($processor.Manufacturer) { $manufacturer = $processor.Manufacturer.Trim() }
+
+        $physicalCores = 0
+        if ($processor.NumberOfCores -ne $null) { $physicalCores = [int]$processor.NumberOfCores }
+        $logicalProcessors = 0
+        if ($processor.NumberOfLogicalProcessors -ne $null) { $logicalProcessors = [int]$processor.NumberOfLogicalProcessors }
+        $maxClockSpeedMhz = 0
+        if ($processor.MaxClockSpeed -ne $null) { $maxClockSpeedMhz = [int]$processor.MaxClockSpeed }
+        $currentClockSpeedMhz = 0
+        if ($processor.CurrentClockSpeed -ne $null) { $currentClockSpeedMhz = [int]$processor.CurrentClockSpeed }
+
         $cpuProfile = @{
-            model = ($processor.Name ?? '').Trim()
-            manufacturer = ($processor.Manufacturer ?? '').Trim()
+            model = $model
+            manufacturer = $manufacturer
             architecture = switch ($processor.Architecture) {
                 0 { 'x86' }
                 1 { 'MIPS' }
@@ -421,10 +559,10 @@ function Get-HardwareProfile {
                 9 { 'x64' }
                 default { [string]$processor.Architecture }
             }
-            physical_cores = [int]($processor.NumberOfCores ?? 0)
-            logical_processors = [int]($processor.NumberOfLogicalProcessors ?? 0)
-            max_clock_speed_mhz = [int]($processor.MaxClockSpeed ?? 0)
-            current_clock_speed_mhz = [int]($processor.CurrentClockSpeed ?? 0)
+            physical_cores = $physicalCores
+            logical_processors = $logicalProcessors
+            max_clock_speed_mhz = $maxClockSpeedMhz
+            current_clock_speed_mhz = $currentClockSpeedMhz
         }
     }
 
@@ -432,14 +570,26 @@ function Get-HardwareProfile {
     $memoryProfile = $null
     $osProfile = $null
     if ($osInfo) {
+        $totalMemory = 0
+        if ($osInfo.TotalVisibleMemorySize -ne $null) { $totalMemory = [int64]$osInfo.TotalVisibleMemorySize }
+        $freeMemory = 0
+        if ($osInfo.FreePhysicalMemory -ne $null) { $freeMemory = [int64]$osInfo.FreePhysicalMemory }
+
         $memoryProfile = @{
-            total_bytes = [int64]($osInfo.TotalVisibleMemorySize ?? 0) * 1024
-            free_bytes = [int64]($osInfo.FreePhysicalMemory ?? 0) * 1024
+            total_bytes = $totalMemory * 1024
+            free_bytes = $freeMemory * 1024
         }
+        $caption = ''
+        if ($osInfo.Caption) { $caption = $osInfo.Caption.Trim() }
+        $version = ''
+        if ($osInfo.Version) { $version = $osInfo.Version.Trim() }
+        $buildNumber = ''
+        if ($osInfo.BuildNumber) { $buildNumber = $osInfo.BuildNumber.Trim() }
+
         $osProfile = @{
-            caption = ($osInfo.Caption ?? '').Trim()
-            version = ($osInfo.Version ?? '').Trim()
-            build_number = ($osInfo.BuildNumber ?? '').Trim()
+            caption = $caption
+            version = $version
+            build_number = $buildNumber
         }
     }
 
@@ -470,7 +620,11 @@ function Save-HardwareProfile([hashtable]$profile) {
             }
         }
 
-        $profile.generation_count = if ($existing -and $existing.generation_count) { [int]$existing.generation_count + 1 } else { 1 }
+        $generationCount = 1
+        if ($existing -and $existing.generation_count) {
+            $generationCount = [int]$existing.generation_count + 1
+        }
+        $profile.generation_count = $generationCount
         $profile.generated_at = (Get-Date).ToString('o')
         $profile.recommended_runtime = Get-RecommendedRuntimeConfig $profile
         $profile | ConvertTo-Json -Depth 6 | Set-Content -Path $hardwareProfilePath -Encoding UTF8
@@ -482,9 +636,15 @@ function Save-HardwareProfile([hashtable]$profile) {
 
 function Get-RecommendedRuntimeConfig([hashtable]$hardware) {
     $GB = 1024 * 1024 * 1024
-    $vendor = [string]($hardware.vendor ?? 'cpu').ToLower()
-    $totalRam = if ($hardware?.memory?.total_bytes) { [int64]$hardware.memory.total_bytes } else { 0 }
-    $gpuRam = if ($hardware?.gpu?.devices?.Count -gt 0) { [int64]$hardware.gpu.devices[0].adapter_ram_bytes } else { 0 }
+    $vendorValue = 'cpu'
+    if ($hardware -and $hardware.vendor) { $vendorValue = $hardware.vendor }
+    $vendor = [string]$vendorValue.ToLower()
+
+    $totalRam = 0
+    if ($hardware -and $hardware.memory -and $hardware.memory.total_bytes) { $totalRam = [int64]$hardware.memory.total_bytes }
+
+    $gpuRam = 0
+    if ($hardware -and $hardware.gpu -and $hardware.gpu.devices -and $hardware.gpu.devices.Count -gt 0) { $gpuRam = [int64]$hardware.gpu.devices[0].adapter_ram_bytes }
 
     $recommended = @{
         backend = 'cpu'
@@ -494,8 +654,13 @@ function Get-RecommendedRuntimeConfig([hashtable]$hardware) {
     }
 
     if ($vendor -in @('nvidia', 'amd', 'intel')) {
-        $recommended.backend = if ($vendor -eq 'nvidia') { 'cuda' } else { 'vulkan' }
-        $recommended.backend_label = if ($vendor -eq 'nvidia') { 'NVIDIA CUDA' } else { 'Vulkan' }
+        if ($vendor -eq 'nvidia') {
+            $recommended.backend = 'cuda'
+            $recommended.backend_label = 'NVIDIA CUDA'
+        } else {
+            $recommended.backend = 'vulkan'
+            $recommended.backend_label = 'Vulkan'
+        }
         $recommended.gpu_layers = 999
 
         if ($gpuRam -ge 24 * $GB) {
@@ -641,7 +806,11 @@ function Ensure-ControllerRunning {
             if ($modelsMatch -and $supportsMulti) {
                 $controllerOk = $true
             } else {
-                $reason = if (-not $modelsMatch) { "chemin different ($($currentStatus.models_dir))" } else { "format legacy (redemarrage requis)" }
+                if (-not $modelsMatch) {
+                    $reason = "chemin different ($($currentStatus.models_dir))"
+                } else {
+                    $reason = "format legacy (redemarrage requis)"
+                }
                 INFO "Contrôleur existant incompatible ($reason), redémarrage..."
                 Stop-LlamaServerProcess
                 Stop-ExistingController
@@ -656,7 +825,11 @@ function Ensure-ControllerRunning {
 
     if (-not $controllerOk) {
         INFO "Démarrage du contrôleur hôte"
-        $pwshExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+        if (Get-Command pwsh -ErrorAction SilentlyContinue) {
+            $pwshExe = 'pwsh'
+        } else {
+            $pwshExe = 'powershell.exe'
+        }
         Start-Process $pwshExe -ArgumentList @(
             '-ExecutionPolicy', 'Bypass',
             '-File', $controllerScript,
@@ -674,6 +847,9 @@ function Ensure-ControllerRunning {
 }
 
 function Write-RuntimeConfig([string]$backend, [string]$backendLabel, [string]$binaryPath, [int]$recommendedContext = 8192, [int]$recommendedGpuLayers = 999) {
+    $defaultGpuLayers = 0
+    if ($backend -ne 'cpu') { $defaultGpuLayers = $recommendedGpuLayers }
+
     $config = @{
         controller_port = $controllerPort
         server_port = $llamaPort
@@ -683,7 +859,7 @@ function Write-RuntimeConfig([string]$backend, [string]$backendLabel, [string]$b
         models_dir = $modelsDir
         proxy_model_id = 'lia-local'
         default_context = $recommendedContext
-        default_gpu_layers = if ($backend -eq 'cpu') { 0 } else { $recommendedGpuLayers }
+        default_gpu_layers = $defaultGpuLayers
         server_port_start = 12434
         server_port_end = 12444
         max_instances = 6
@@ -1106,7 +1282,8 @@ INFO "Backend cible : $($plan.label)"
 INFO "Configuration recommande : contexte=$($plan.recommended_context) gpu_layers=$($plan.recommended_gpu_layers)"
 
 $buildResult = Build-LlamaCpp $plan
-$llamaServerBinary = if ($buildResult.binaryPath) { $buildResult.binaryPath } else { Resolve-LlamaServerBinary $buildResult.buildDir }
+$llamaServerBinary = $buildResult.binaryPath
+if (-not $llamaServerBinary) { $llamaServerBinary = Resolve-LlamaServerBinary $buildResult.buildDir }
 Write-RuntimeConfig -backend $buildResult.backend -backendLabel $buildResult.label -binaryPath $llamaServerBinary -recommendedContext $plan.recommended_context -recommendedGpuLayers $plan.recommended_gpu_layers
 if ($buildResult.source -eq 'release') {
     OK "llama.cpp prepare via binaire officiel avec backend $($buildResult.label)"
@@ -1162,3 +1339,4 @@ if ($interfaceChoice -in @("1", "4")) {
 if ($interfaceChoice -in @("3", "4")) {
     Write-Host "  LibreChat    -> http://localhost:$libreChatPort" -ForegroundColor White
 }
+
