@@ -143,31 +143,8 @@ function Monitor-LlamaInstances {
 }
 
 function Register-LlamaServerDeathWatcher {
-    try {
-        $query = "SELECT * FROM __InstanceDeletionEvent WITHIN 5 WHERE TargetInstance ISA 'Win32_Process' AND TargetInstance.Name='llama-server.exe'"
-        Register-WmiEvent -Query $query -SourceIdentifier 'LlamaServerProcessExit' -Action {
-            try {
-                $target = $Event.SourceEventArgs.NewEvent.TargetInstance
-                $pid = [int]$target.ProcessId
-                $cmd = $target.CommandLine
-                $details = "Processus arrêté PID $pid"
-                if ($cmd) { $details += " cmd=`"$cmd`"" }
-                Write-ProcessMonitorLog "[ProcessDeath] $details"
-                $state = Get-State
-                foreach ($instance in $state.instances) {
-                    if ($instance.pid -eq $pid) {
-                        Write-LlamaProcessAudit $instance 'ProcessDeathEvent' "Processus connu arrêté par WMI"
-                        break
-                    }
-                }
-            } catch {
-                Write-ProcessMonitorLog "[ProcessDeath] erreur événement WMI: $($_.Exception.Message)", 'error'
-            }
-        } | Out-Null
-        Write-ProcessMonitorLog 'WMI death watcher registered successfully.', 'info'
-    } catch {
-        Write-ProcessMonitorLog "WMI death watcher registration failed: $($_.Exception.Message)", 'error'
-    }
+    # Désactivé temporairement car cause corruption du ScriptBlock
+    Write-ProcessMonitorLog 'WMI death watcher désactivé temporairement', 'info'
 }
 
 # Gestionnaire d'arrêt gracieux pour Windows Service

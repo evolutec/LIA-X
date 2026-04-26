@@ -140,7 +140,7 @@ const PROXY_MODEL_ID = process.env.PROXY_MODEL_ID || 'lia-local';
 const ROOCODE_SOURCE_HEADER_NAME = String(process.env.ROOCODE_SOURCE_HEADER_NAME || 'x-roocode-source').trim().toLowerCase();
 const ROOCODE_SOURCE_HEADER_VALUE = String(process.env.ROOCODE_SOURCE_HEADER_VALUE || 'true').trim().toLowerCase();
 const DOCKER_INTERNAL = String(process.env.DOCKER_INTERNAL || 'false').toLowerCase() === 'true';
-const CONTROLLER_START_TIMEOUT_MS = Number(process.env.CONTROLLER_START_TIMEOUT_MS || '120000');
+const CONTROLLER_START_TIMEOUT_MS = Number(process.env.CONTROLLER_START_TIMEOUT_MS || '300000');
 const OLLAMA_REGISTRY_BASE_URL = 'https://registry.ollama.ai';
 const GGUF_METADATA_CACHE = new Map();
 
@@ -730,22 +730,24 @@ async function controllerRequest(endpoint, options = {}) {
 
   const controllerUrl = new URL(`${CONTROLLER_URL}${endpoint}`);
   const agent = controllerUrl.protocol === 'https:' ? httpsAgent : httpAgent;
-  const maxRetries = Number.isFinite(Number(options.maxRetries))
-    ? Number(options.maxRetries)
+  const { timeout: requestTimeout, maxRetries: requestMaxRetries, retryBaseDelayMs: requestRetryBaseDelayMs, ...fetchOptions } = options;
+  const maxRetries = Number.isFinite(Number(requestMaxRetries))
+    ? Number(requestMaxRetries)
     : (endpoint === '/status' ? 1 : 2);
-  const retryBaseDelayMs = Number.isFinite(Number(options.retryBaseDelayMs))
-    ? Number(options.retryBaseDelayMs)
+  const retryBaseDelayMs = Number.isFinite(Number(requestRetryBaseDelayMs))
+    ? Number(requestRetryBaseDelayMs)
     : 300;
+  const effectiveTimeout = Number.isFinite(Number(requestTimeout)) ? Number(requestTimeout) : 15000;
 
   let lastError = null;
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     // Compatibilité NodeJS < 18: AbortController manuel
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), options.timeout || 15000);
+    const timeout = setTimeout(() => controller.abort(), effectiveTimeout);
 
     try {
-      const response = await fetch(`${CONTROLLER_URL}${endpoint}`, {
-        ...options,
+      const response = await fetch(controllerUrl.href, {
+        ...fetchOptions,
         agent,
         signal: controller.signal,
         headers: {
@@ -2094,6 +2096,8 @@ app.post('/api/models/load', async (req, res) => {
       method: 'POST',
       body: JSON.stringify(payload),
       timeout: CONTROLLER_START_TIMEOUT_MS,
+      maxRetries: 3,
+      retryBaseDelayMs: 500,
     });
     invalidateStatusCache();
     res.json({
