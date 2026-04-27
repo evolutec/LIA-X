@@ -943,7 +943,7 @@ function Start-DefaultRuntime {
 
 function Ensure-WindowsFirewallRuleForDockerPorts {
     param(
-        [string[]]$Ports = @('12434-12444','13579','3002'),
+        [string[]]$Ports = @('12434-12444','13579','3002','13610'),
         [string]$RuleName = 'LIA Allow Docker Runtime Access'
     )
 
@@ -1058,8 +1058,81 @@ function Start-LibreChatContainer {
     }
 }
 
+function Start-HostMetricsService {
+    $serviceName = 'LIA WMI'
+    $displayName = 'LIA WMI'
+    $description = 'Service de métriques hôte LIA WMI'
+    $metricsScript = Join-Path $rootDir 'Wmi\host-metrics-service.ps1'
+    $port = 13610
+
+    if (-not (Test-Path $metricsScript)) {
+        WARN "Service de métriques hôte introuvable : $metricsScript"
+        return
+    }
+
+    $existing = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    if ($existing) {
+        $proc = Get-Process -Id $existing.OwningProcess -ErrorAction SilentlyContinue
+        if ($proc -and $proc.Path -and $proc.Path -match 'pwsh|powershell') {
+            OK "Service de métriques hôte déjà en cours d'exécution sur le port $port"
+            return
+        }
+        WARN "Le port $port est déjà occupé par un autre processus : PID $($existing.OwningProcess)." 
+        return
+    }
+
+    $nssm = Get-NssmExecutablePath
+    if ($nssm) {
+        $pwshExe = Get-PreferredPowerShellExecutable
+        $expectedArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$metricsScript`""
+        $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+
+        if (-not $existingService) {
+            & $nssm install $serviceName $pwshExe $expectedArgs | Out-Null
+            & $nssm set $serviceName DisplayName "$displayName" | Out-Null
+            & $nssm set $serviceName Description "$description" | Out-Null
+            & $nssm set $serviceName AppDirectory $rootDir | Out-Null
+            & $nssm set $serviceName AppParameters $expectedArgs | Out-Null
+            & $nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
+            Write-Host "Service $serviceName installé."
+        }
+
+        try {
+            Start-Service -Name $serviceName -ErrorAction Stop
+        } catch {
+            Write-Warning "Démarrage du service $serviceName échoué : $($_.Exception.Message)"
+            try {
+                & $nssm start $serviceName 2>$null | Out-Null
+            } catch {}
+        }
+
+        Start-Sleep -Seconds 3
+        $existing = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+        if ($existing) {
+            OK "Service de métriques hôte démarré sur le port $port"
+            return
+        }
+
+        WARN "Impossible de démarrer le service de métriques hôte sur le port $port après installation."
+        return
+    }
+
+    $pwshExe = Get-PreferredPowerShellExecutable
+    Start-Process -FilePath $pwshExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $metricsScript) -WindowStyle Hidden | Out-Null
+    Start-Sleep -Seconds 2
+
+    $existing = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    if ($existing) {
+        OK "Service de métriques hôte démarré sur le port $port"
+    } else {
+        WARN "Impossible de démarrer le service de métriques hôte. Vérifiez les permissions et le port $port."
+    }
+}
+
 function Start-ModelLoaderContainer {
     Ensure-WindowsFirewallRuleForDockerPorts
+
+    Start-HostMetricsService
 
     Remove-Container 'model-loader'
 
@@ -1089,6 +1162,7 @@ function Start-ModelLoaderContainer {
         '--add-host', 'host.docker.internal:host-gateway',
         '-e', ("LLAMA_HOST_CONTROL_URL=http://host.docker.internal:{0}" -f $controllerPort),
         '-e', ("LLAMA_SERVER_BASE_URL=http://host.docker.internal:{0}" -f $llamaPort),
+        '-e', 'METRICS_HOST_URL=http://host.docker.internal:13610',
         '-e', 'MODEL_STORAGE_DIR=/models',
         '-e', 'RUNTIME_STATE_PATH=/runtime/host-runtime-state.json',
         '-e', 'PROXY_MODEL_ID=lia-local',

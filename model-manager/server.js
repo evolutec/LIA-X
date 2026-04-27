@@ -140,6 +140,7 @@ const PROXY_MODEL_ID = process.env.PROXY_MODEL_ID || 'lia-local';
 const ROOCODE_SOURCE_HEADER_NAME = String(process.env.ROOCODE_SOURCE_HEADER_NAME || 'x-roocode-source').trim().toLowerCase();
 const ROOCODE_SOURCE_HEADER_VALUE = String(process.env.ROOCODE_SOURCE_HEADER_VALUE || 'true').trim().toLowerCase();
 const DOCKER_INTERNAL = String(process.env.DOCKER_INTERNAL || 'false').toLowerCase() === 'true';
+const METRICS_HOST_URL = process.env.METRICS_HOST_URL || (DOCKER_INTERNAL ? 'http://host.docker.internal:13610' : 'http://127.0.0.1:13610');
 const CONTROLLER_START_TIMEOUT_MS = Number(process.env.CONTROLLER_START_TIMEOUT_MS || '300000');
 const OLLAMA_REGISTRY_BASE_URL = 'https://registry.ollama.ai';
 const GGUF_METADATA_CACHE = new Map();
@@ -922,6 +923,124 @@ function getRecommendedRuntimeDefaults(hardwareProfile) {
   };
 }
 
+function normalizeNumber(value) {
+  if (value == null) {
+    return null;
+  }
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function mapHostCpuMetrics(cpuMetrics, hardwareProfile) {
+  const hasCpuMetrics = cpuMetrics && typeof cpuMetrics === 'object';
+  const model = String(
+    (hasCpuMetrics && (cpuMetrics.Name || cpuMetrics.Caption)) ||
+    hardwareProfile?.cpu?.model ||
+    'CPU'
+  );
+  const speed_mhz = normalizeNumber(
+    (hasCpuMetrics && (cpuMetrics.MaxClockSpeed || cpuMetrics.MaxClockSpeedMHz)) ||
+    hardwareProfile?.cpu?.max_clock_speed_mhz ||
+    0
+  );
+  const cores = normalizeNumber(
+    (hasCpuMetrics && (cpuMetrics.NumberOfCores || cpuMetrics.Cores)) ||
+    hardwareProfile?.cpu?.physical_cores ||
+    0
+  );
+  const threads = normalizeNumber(
+    (hasCpuMetrics && cpuMetrics.NumberOfLogicalProcessors) ||
+    hardwareProfile?.cpu?.logical_processors ||
+    0
+  );
+  const usage = normalizeNumber(
+    (hasCpuMetrics && (cpuMetrics.Load || cpuMetrics.CpuLoadPercentage || cpuMetrics.Usage || cpuMetrics.usage_percent)) ||
+    null
+  );
+
+  return [{
+    id: 'cpu-host',
+    type: 'cpu',
+    model,
+    speed_mhz,
+    usage_percent: usage,
+    cores,
+    threads,
+    times: hasCpuMetrics ? cpuMetrics.times || null : null,
+  }];
+}
+
+function mapHostGpuMetrics(gpuMetrics) {
+  if (!gpuMetrics) {
+    return [];
+  }
+
+  const gpus = Array.isArray(gpuMetrics) ? gpuMetrics : [gpuMetrics];
+  return gpus.filter(Boolean).map((gpu, index) => {
+    const vendor = String(gpu.Adapter || gpu.AdapterCompatibility || gpu.Vendor || gpu.vendor || 'Unknown').trim();
+    const model = String(gpu.Description || gpu.Name || gpu.Adapter || gpu.label || gpu.model || 'GPU').trim();
+    const usage = normalizeNumber(gpu.Workload || gpu.AdapterWorkloadPercentage || gpu.utilization || gpu.Usage || gpu.usage_percent);
+    const totalBytes = normalizeNumber(gpu.MemoryTotal || gpu.AdapterMemoryTotal || gpu.memory_total_bytes || gpu.total_bytes);
+    const usedBytes = normalizeNumber(gpu.MemoryUsed || gpu.AdapterMemoryUsage || gpu.memory_used_bytes || gpu.used_bytes);
+
+    return {
+      id: `gpu-host-${index}`,
+      type: 'gpu',
+      vendor: vendor.toUpperCase().includes('INTEL') ? 'Intel' : vendor,
+      model,
+      usage_percent: usage,
+      memory_total_bytes: totalBytes != null ? totalBytes * (totalBytes > 1000000 ? 1 : 1024 * 1024) : null,
+      memory_used_bytes: usedBytes != null ? usedBytes * (usedBytes > 1000000 ? 1 : 1024 * 1024) : null,
+      driver: String(gpu.DriverVersion || gpu.Driver || gpu.driver_version || '').trim(),
+    };
+  });
+}
+
+function normalizeMemoryBytes(value) {
+  const num = normalizeNumber(value);
+  if (num == null) {
+    return null;
+  }
+
+  // If the value is very large, assume bytes already.
+  if (num > 1000) {
+    return num;
+  }
+
+  // Small values are likely GB.
+  return Math.round(num * 1024 * 1024 * 1024);
+}
+
+function mapHostMemoryMetrics(memoryMetrics) {
+  if (!memoryMetrics || typeof memoryMetrics !== 'object') {
+    return null;
+  }
+
+  const total = normalizeMemoryBytes(memoryMetrics.Total || memoryMetrics.TotalPhysicalMemory || memoryMetrics.total_bytes || memoryMetrics.host_total_bytes);
+  const free = normalizeMemoryBytes(memoryMetrics.Free || memoryMetrics.FreePhysicalMemory || memoryMetrics.free_bytes || memoryMetrics.host_free_bytes);
+  const used = normalizeMemoryBytes(memoryMetrics.Used || memoryMetrics.UsedPhysicalMemory || memoryMetrics.used_bytes || (total != null && free != null ? total - free : null));
+
+  return {
+    total_bytes: total,
+    free_bytes: free,
+    used_bytes: used,
+  };
+}
+
+async function fetchHostMetrics() {
+  try {
+    const response = await fetch(`${METRICS_HOST_URL.replace(/\/$/, '')}/metrics/host`, { method: 'GET' });
+    if (!response.ok) {
+      throw new Error(`Host metrics fetch failed ${response.status}`);
+    }
+    const body = await response.json();
+    return body.metrics || body;
+  } catch (error) {
+    console.warn('[model-manager] fetchHostMetrics failed', error.message);
+    return null;
+  }
+}
+
 function hasUsefulRuntimeState(runtime) {
   if (!runtime || typeof runtime !== 'object') {
     return false;
@@ -1401,23 +1520,60 @@ function formatHardwareProfileGpu(profileGpu) {
 
 async function getPerformanceMetrics() {
   const hardwareProfile = await readHardwareProfile();
-  const discoveredGpus = await probeGpuInfo();
+  const hostMetrics = await fetchHostMetrics();
   const runtime = await getRuntimeStatus().catch(() => null);
-  const profileGpu = hardwareProfile?.gpu ? formatHardwareProfileGpu(hardwareProfile.gpu) : null;
-  const hardware = [
-    ...getCpuSnapshot(),
-    ...(discoveredGpus.length > 0
-      ? discoveredGpus
-      : profileGpu
-        ? [profileGpu]
-        : getRuntimeGpuFallback(runtime)),
-  ];
 
-  const memory = {
+  let hardware = [];
+  let memory = {
     total_bytes: os.totalmem(),
     free_bytes: os.freemem(),
     used_bytes: os.totalmem() - os.freemem(),
   };
+  let system = {
+    platform: os.platform(),
+    arch: os.arch(),
+    uptime_seconds: Math.floor(os.uptime()),
+    hostname: os.hostname(),
+    os_profile: hardwareProfile?.os || null,
+  };
+
+  const profileGpu = hardwareProfile?.gpu ? formatHardwareProfileGpu(hardwareProfile.gpu) : null;
+  const baselineCpu = mapHostCpuMetrics(null, hardwareProfile);
+
+  if (hostMetrics) {
+    const hostData = hostMetrics;
+    const hostGpuHardware = mapHostGpuMetrics(hostData.GPU);
+
+    hardware = [
+      ...mapHostCpuMetrics(hostData.System?.CPU || hostData.System, hardwareProfile),
+      ...hostGpuHardware,
+    ].filter((item) => item && item.type);
+
+    const hostMemory = mapHostMemoryMetrics(hostData.System?.Memory || hostData.Memory);
+    if (hostMemory) {
+      memory = {
+        ...memory,
+        host_total_bytes: hostMemory.total_bytes,
+        host_free_bytes: hostMemory.free_bytes,
+        host_used_bytes: hostMemory.used_bytes,
+      };
+    }
+
+    if (hostData.System?.OS) {
+      system = {
+        ...system,
+        os_profile: hostData.System.OS.Caption || hostData.System.OS.Name || system.os_profile,
+        uptime_seconds: normalizeNumber(hostData.System.OS.Uptime) ?? system.uptime_seconds,
+      };
+    }
+  }
+
+  if (hardware.length === 0 || hardware.every((item) => item.type !== 'gpu')) {
+    hardware = [
+      ...baselineCpu,
+      ...(profileGpu ? [profileGpu] : getRuntimeGpuFallback(runtime)),
+    ];
+  }
 
   if (hardwareProfile?.memory?.total_bytes != null) {
     memory.host_total_bytes = Number(hardwareProfile.memory.total_bytes);
@@ -1430,13 +1586,7 @@ async function getPerformanceMetrics() {
   }
 
   return {
-    system: {
-      platform: os.platform(),
-      arch: os.arch(),
-      uptime_seconds: Math.floor(os.uptime()),
-      hostname: os.hostname(),
-      os_profile: hardwareProfile?.os || null,
-    },
+    system,
     memory,
     hardware,
     profile: hardwareProfile || null,
@@ -1822,6 +1972,29 @@ async function proxyOpenAiRequest(req, res, endpoint) {
     }
   }
 }
+
+app.get('/metrics/host', async (req, res) => {
+  try {
+    const metricsUrl = `${METRICS_HOST_URL.replace(/\/$/, '')}/metrics/host`;
+    const hostResponse = await fetch(metricsUrl, { method: 'GET' });
+
+    if (!hostResponse.ok) {
+      const responseText = await hostResponse.text();
+      throw new Error(`Host metrics service returned ${hostResponse.status}: ${responseText}`);
+    }
+
+    const hostMetrics = await hostResponse.json();
+    res.json({
+      source: 'host-metrics-service',
+      metricsHostUrl: metricsUrl,
+      hostMetrics,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    logError('/metrics/host', error);
+    res.status(500).json({ error: `Error requesting host metrics: ${error.message}` });
+  }
+});
 
 app.get('/health', async (req, res) => {
   try {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -61,36 +61,62 @@ function Performance() {
 
     setMemoryHistory((previous) => {
       const next = [...previous, { timestamp: Date.now(), used: hostUsed, total: hostTotal }];
-      return next.slice(-34);
+      return next.slice(-25);
     });
   };
 
-  const fetchPerformance = async () => {
-    setLoading(true);
+  const isFetchingRef = useRef(false);
+
+  const fetchPerformance = async (isInitial = false) => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+    if (isInitial) setLoading(true);
     try {
       const response = await fetch(`${apiBase}/api/performance`);
-      const payload = await response.json();
+      
+      // Gérer les réponses 204 No Content
+      if (response.status === 204) {
+        setError("API indisponible");
+        return;
+      }
+      
+      let payload;
+      try {
+        payload = await response.json();
+      } catch (e) {
+        throw new Error("Réponse API invalide");
+      }
+      
       if (!response.ok) {
         throw new Error(payload?.detail || response.statusText || "Erreur API");
       }
+      
       setPerformance(payload);
+      
+      // Ajouter le point mémoire à chaque mise à jour, pas seulement au chargement
       appendMemoryPoint(payload);
       setError("");
     } catch (err) {
       setError(err?.message || "Impossible de récupérer les métriques");
     } finally {
-      setLoading(false);
+      if (isInitial) setLoading(false);
+      isFetchingRef.current = false;
     }
   };
 
   useEffect(() => {
-    fetchPerformance();
-    const interval = window.setInterval(fetchPerformance, 5000);
+    fetchPerformance(true);
+    // Augmenter l'intervalle de 100ms à 1000ms pour réduire la charge
+    const interval = window.setInterval(() => fetchPerformance(false), 1000);
     return () => window.clearInterval(interval);
   }, []);
 
   const cpuItems = useMemo(() => (performance?.hardware || []).filter((item) => item.type === "cpu"), [performance]);
   const cpuProfile = performance?.profile?.cpu || null;
+
+  // Fallback vers les capacités natives du navigateur
+  const deviceMemory = navigator.deviceMemory ? Number(navigator.deviceMemory) : null;
+  const webgpu = typeof navigator.gpu !== 'undefined' ? navigator.gpu : null;
 
   const cpuSummary = useMemo(() => {
     if (cpuItems.length > 0) {
@@ -109,57 +135,66 @@ function Performance() {
         })),
       };
     }
-    if (cpuProfile) {
+    
+    // Fallback vers les données natives si l'API ne fournit pas CPU
+    if (deviceMemory != null) {
       return {
-        model: cpuProfile.model || '—',
-        usage_percent: cpuProfile.usage_percent ?? null,
-        logical_processors: cpuProfile.logical_processors || null,
-        physical_cores: cpuProfile.physical_cores || null,
-        current_clock_speed_mhz: cpuProfile.current_clock_speed_mhz || cpuProfile.max_clock_speed_mhz || null,
-        max_clock_speed_mhz: cpuProfile.max_clock_speed_mhz || null,
+        model: 'Navigateur',
+        usage_percent: null,
+        logical_processors: null,
+        physical_cores: null,
+        current_clock_speed_mhz: null,
+        max_clock_speed_mhz: null,
         cores: [],
       };
     }
+    
     return null;
-  }, [cpuItems, cpuProfile]);
+  }, [cpuItems, cpuProfile, deviceMemory]);
 
   const gpuItems = useMemo(() => (performance?.hardware || []).filter((item) => item.type === "gpu"), [performance]);
   const gpuProfile = performance?.profile?.gpu || null;
-
-  const parseGpuMemoryFromLabel = (label) => {
-    if (!label || typeof label !== 'string') return null;
-    const match = label.match(/(\d+(?:[\.,]\d+)?)\s*(GB|Go|MB|Mo)/i);
-    if (!match) return null;
-    const value = Number(match[1].replace(',', '.'));
-    if (!Number.isFinite(value)) return null;
-    const unit = match[2].toLowerCase();
-    if (unit.startsWith('g')) return Math.round(value * 1024 * 1024 * 1024);
-    if (unit.startsWith('m')) return Math.round(value * 1024 * 1024);
-    return null;
-  };
 
   const gpuSummary = useMemo(() => {
     if (gpuItems.length > 0) {
       return gpuItems[0];
     }
+    
     if (gpuProfile) {
       const device = gpuProfile.devices?.[0] || {};
+      // Utiliser directement les valeurs numériques, pas de parsing de texte
       const totalBytes = Number.isFinite(Number(device.adapter_ram_bytes))
         ? Number(device.adapter_ram_bytes)
-        : parseGpuMemoryFromLabel(gpuProfile.label || gpuProfile.model || '');
+        : null;
+      
       return {
         id: 'gpu-profile',
         type: 'gpu',
         vendor: gpuProfile.vendor || device.name || gpuProfile.label || 'GPU',
         model: gpuProfile.label || device.name || 'GPU',
         usage_percent: null,
-        memory_total_bytes: totalBytes,
+        memory_total_bytes: totalBytes ?? 0,
         memory_used_bytes: null,
         driver: device.driver_version || null,
       };
     }
+    
+    // Fallback vers WebGPU si disponible
+    if (webgpu) {
+      return {
+        id: 'webgpu',
+        type: 'gpu',
+        vendor: 'WebGPU',
+        model: 'Navigateur',
+        usage_percent: null,
+        memory_total_bytes: 0,
+        memory_used_bytes: null,
+        driver: null,
+      };
+    }
+    
     return null;
-  }, [gpuItems, gpuProfile]);
+  }, [gpuItems, gpuProfile, webgpu]);
 
   const memoryInfo = useMemo(() => {
     const hostTotal = performance?.memory?.host_total_bytes ?? performance?.memory?.total_bytes ?? null;
