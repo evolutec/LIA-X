@@ -609,6 +609,9 @@ function Get-HardwareProfile {
     }
 }
 
+# GPU-specific tool installation has been removed.
+# Host hardware is detected in lia.ps1, and GPU metrics collection is done via PowerShell.HardwareMonitor in scripts/gpu-collector.ps1.
+
 function Save-HardwareProfile([hashtable]$profile) {
     try {
         $existing = $null
@@ -626,7 +629,6 @@ function Save-HardwareProfile([hashtable]$profile) {
         }
         $profile.generation_count = $generationCount
         $profile.generated_at = (Get-Date).ToString('o')
-        $profile.recommended_runtime = Get-RecommendedRuntimeConfig $profile
         $profile | ConvertTo-Json -Depth 6 | Set-Content -Path $hardwareProfilePath -Encoding UTF8
         OK "Profil materiel sauve : $hardwareProfilePath (generation_count=$($profile.generation_count))"
     } catch {
@@ -846,9 +848,47 @@ function Ensure-ControllerRunning {
     OK "Contrôleur hôte prêt"
 }
 
+function Get-ActiveRuntimeContextConfig {
+    if (-not (Test-Path $runtimeStatePath)) { return $null }
+
+    try {
+        $state = Get-Content -Path $runtimeStatePath -Raw | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+
+    $instances = @($state.instances) | Where-Object { $_ -and $_.running -eq $true }
+    if (-not $instances -or $instances.Count -eq 0) { return $null }
+
+    $latest = $instances |
+        Sort-Object {
+            try { [datetime]::Parse([string]$_.started_at) } catch { [datetime]::MinValue }
+        } -Descending |
+        Select-Object -First 1
+
+    if (-not $latest) { return $null }
+
+    return @{
+        context = if ($latest.context) { [int]$latest.context } else { $null }
+        gpu_layers = if ($latest.gpu_layers) { [int]$latest.gpu_layers } else { $null }
+    }
+}
+
 function Write-RuntimeConfig([string]$backend, [string]$backendLabel, [string]$binaryPath, [int]$recommendedContext = 8192, [int]$recommendedGpuLayers = 999) {
+    $defaultContext = $recommendedContext
     $defaultGpuLayers = 0
+
     if ($backend -ne 'cpu') { $defaultGpuLayers = $recommendedGpuLayers }
+
+    $stateConfig = Get-ActiveRuntimeContextConfig
+    if ($stateConfig) {
+        if ($stateConfig.context -and $stateConfig.context -gt 0) {
+            $defaultContext = $stateConfig.context
+        }
+        if ($backend -ne 'cpu' -and $stateConfig.gpu_layers -and $stateConfig.gpu_layers -gt 0) {
+            $defaultGpuLayers = $stateConfig.gpu_layers
+        }
+    }
 
     $config = @{
         controller_port = $controllerPort
@@ -858,7 +898,7 @@ function Write-RuntimeConfig([string]$backend, [string]$backendLabel, [string]$b
         binary_path = $binaryPath
         models_dir = $modelsDir
         proxy_model_id = 'lia-local'
-        default_context = $recommendedContext
+        default_context = $defaultContext
         default_gpu_layers = $defaultGpuLayers
         sleep_idle_seconds = 60
         server_port_start = 12434
@@ -954,13 +994,13 @@ function Ensure-WindowsFirewallRuleForDockerPorts {
             return
         }
 
-        New-NetFirewallRule -DisplayName $RuleName \
-            -Direction Inbound \
-            -Action Allow \
-            -Protocol TCP \
-            -LocalPort ($Ports -join ',') \
-            -Profile Any \
-            -Description 'Autorise le trafic Docker vers les ports du runtime LIA et du contrôleur.' \
+        New-NetFirewallRule -DisplayName $RuleName `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -LocalPort ($Ports -join ',') `
+            -Profile Any `
+            -Description 'Autorise le trafic Docker vers les ports du runtime LIA et du contrôleur.' `
             -Enabled True | Out-Null
     } catch {
         WARN "Impossible de créer ou de mettre à jour la règle pare-feu Windows pour Docker : $($_.Exception.Message)"
@@ -1059,10 +1099,10 @@ function Start-LibreChatContainer {
 }
 
 function Start-HostMetricsService {
-    $serviceName = 'LIA WMI'
-    $displayName = 'LIA WMI'
-    $description = 'Service de métriques hôte LIA WMI'
-    $metricsScript = Join-Path $rootDir 'Wmi\host-metrics-service.ps1'
+    $serviceName = 'LIA GPU Metrics'
+    $displayName = 'LIA GPU Metrics'
+    $description = 'Service de métriques hôte LIA GPU'
+    $metricsScript = Join-Path $rootDir 'scripts\gpu-metrics-service.ps1'
     $port = 13610
 
     if (-not (Test-Path $metricsScript)) {
@@ -1084,26 +1124,48 @@ function Start-HostMetricsService {
     $nssm = Get-NssmExecutablePath
     if ($nssm) {
         $pwshExe = Get-PreferredPowerShellExecutable
-        $expectedArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$metricsScript`""
+        $expectedArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $metricsScript)
+        $expectedArgsString = ($expectedArgs | ForEach-Object {
+            if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+        }) -join ' '
         $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 
         if (-not $existingService) {
-            & $nssm install $serviceName $pwshExe $expectedArgs | Out-Null
+            & $nssm install $serviceName $pwshExe @expectedArgs | Out-Null
             & $nssm set $serviceName DisplayName "$displayName" | Out-Null
             & $nssm set $serviceName Description "$description" | Out-Null
             & $nssm set $serviceName AppDirectory $rootDir | Out-Null
-            & $nssm set $serviceName AppParameters $expectedArgs | Out-Null
+            & $nssm set $serviceName AppParameters $expectedArgsString | Out-Null
             & $nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
             Write-Host "Service $serviceName installé."
+        } else {
+            & $nssm set $serviceName Application $pwshExe | Out-Null
+            & $nssm set $serviceName AppParameters $expectedArgsString | Out-Null
+            & $nssm set $serviceName AppDirectory $rootDir | Out-Null
         }
 
         try {
-            Start-Service -Name $serviceName -ErrorAction Stop
+            $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+            if ($service -and $service.Status -eq 'Paused') {
+                try {
+                    Resume-Service -Name $serviceName -ErrorAction Stop
+                } catch {
+                    Write-Warning "Impossible de reprendre le service $serviceName : $($_.Exception.Message)"
+                }
+            }
+
+            if (-not $service -or $service.Status -ne 'Running') {
+                Start-Service -Name $serviceName -ErrorAction Stop
+            }
         } catch {
             Write-Warning "Démarrage du service $serviceName échoué : $($_.Exception.Message)"
             try {
-                & $nssm start $serviceName 2>$null | Out-Null
-            } catch {}
+                $nssmStatus = & $nssm status $serviceName 2>&1
+                Write-Warning "NSSM status: $nssmStatus"
+                & $nssm restart $serviceName 2>$null | Out-Null
+            } catch {
+                Write-Warning "Impossible de redemarrer le service via NSSM : $($_.Exception.Message)"
+            }
         }
 
         Start-Sleep -Seconds 3
@@ -1118,14 +1180,14 @@ function Start-HostMetricsService {
     }
 
     $pwshExe = Get-PreferredPowerShellExecutable
-    Start-Process -FilePath $pwshExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $metricsScript) -WindowStyle Hidden | Out-Null
-    Start-Sleep -Seconds 2
+    Start-Process -FilePath $pwshExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $metricsScript) -WorkingDirectory $rootDir -WindowStyle Hidden | Out-Null
+    Start-Sleep -Seconds 4
 
     $existing = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
     if ($existing) {
         OK "Service de métriques hôte démarré sur le port $port"
     } else {
-        WARN "Impossible de démarrer le service de métriques hôte. Vérifiez les permissions et le port $port."
+        WARN "Impossible de démarrer le service de métriques hôte. Vérifiez les permissions, le port $port et les logs NSSM."
     }
 }
 
@@ -1162,7 +1224,6 @@ function Start-ModelLoaderContainer {
         '--add-host', 'host.docker.internal:host-gateway',
         '-e', ("LLAMA_HOST_CONTROL_URL=http://host.docker.internal:{0}" -f $controllerPort),
         '-e', ("LLAMA_SERVER_BASE_URL=http://host.docker.internal:{0}" -f $llamaPort),
-        '-e', 'METRICS_HOST_URL=http://host.docker.internal:13610',
         '-e', 'MODEL_STORAGE_DIR=/models',
         '-e', 'RUNTIME_STATE_PATH=/runtime/host-runtime-state.json',
         '-e', 'PROXY_MODEL_ID=lia-local',
@@ -1338,12 +1399,6 @@ OK "Docker operationnel"
 Step "3/6" "Detection materiel et preparation llama.cpp"
 $hardware = Get-HardwareProfile
 $plan = Get-BackendPlan $hardware
-$hardware.recommended_runtime = @{
-    backend = $plan.backend
-    label = $plan.label
-    context = $plan.recommended_context
-    gpu_layers = $plan.recommended_gpu_layers
-}
 Save-HardwareProfile -profile $hardware
 INFO "Materiel detecte : $($hardware.label)"
 if ($hardware.cpu) {
@@ -1354,7 +1409,6 @@ if ($hardware.memory) {
     INFO "RAM detectee : $([math]::Round($hardware.memory.total_bytes / $GB, 2)) Go"
 }
 INFO "Backend cible : $($plan.label)"
-INFO "Configuration recommande : contexte=$($plan.recommended_context) gpu_layers=$($plan.recommended_gpu_layers)"
 
 $buildResult = Build-LlamaCpp $plan
 $llamaServerBinary = $buildResult.binaryPath

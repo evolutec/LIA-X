@@ -52,9 +52,9 @@ function Performance() {
       return;
     }
 
-    const hostTotal = payload.memory.host_total_bytes ?? payload.memory.total_bytes ?? null;
-    const hostFree = payload.memory.host_free_bytes ?? payload.memory.free_bytes ?? null;
-    const hostUsed = payload.memory.host_used_bytes ?? payload.memory.used_bytes ?? (hostTotal != null && hostFree != null ? hostTotal - hostFree : null);
+    const hostTotal = payload.memory.TotalBytes ?? payload.memory.host_total_bytes ?? payload.memory.total_bytes ?? null;
+    const hostFree = payload.memory.FreeBytes ?? payload.memory.host_free_bytes ?? payload.memory.free_bytes ?? null;
+    const hostUsed = payload.memory.UsedBytes ?? payload.memory.host_used_bytes ?? payload.memory.used_bytes ?? (hostTotal != null && hostFree != null ? hostTotal - hostFree : null);
     if (hostTotal == null || hostUsed == null) {
       return;
     }
@@ -67,18 +67,12 @@ function Performance() {
 
   const isFetchingRef = useRef(false);
 
-  const fetchPerformance = async (isInitial = false) => {
+const fetchPerformance = async (isInitial = false) => {
     if (isFetchingRef.current) return;
     isFetchingRef.current = true;
     if (isInitial) setLoading(true);
     try {
-      const response = await fetch(`${apiBase}/api/performance`);
-      
-      // Gérer les réponses 204 No Content
-      if (response.status === 204) {
-        setError("API indisponible");
-        return;
-      }
+      const response = await fetch(`http://127.0.0.1:13610/metrics/host`);
       
       let payload;
       try {
@@ -88,13 +82,55 @@ function Performance() {
       }
       
       if (!response.ok) {
-        throw new Error(payload?.detail || response.statusText || "Erreur API");
+        throw new Error(response.statusText || "Erreur API");
       }
       
-      setPerformance(payload);
+      // Adapter le format de l'API
+      const adapted = {
+        hardware: [],
+        profile: {
+          cpu: payload.system?.CPU,
+          gpu: { vendor: payload.gpuType, label: payload.metrics?.GPU?.Name }
+        },
+        memory: payload.metrics?.Memory,
+        system: {
+          platform: payload.system?.OS?.Caption,
+          arch: payload.system?.CPU?.Name,
+          uptime_seconds: payload.system?.OS?.Uptime
+        }
+      };
+
+      // Ajouter CPU
+      if (payload.metrics?.CPU?.Cores) {
+        payload.metrics.CPU.Cores.forEach((core, idx) => {
+          adapted.hardware.push({
+            type: 'cpu',
+            id: core.CoreId,
+            model: payload.system?.CPU?.Name,
+            usage_percent: core.LoadPercent,
+            speed_mhz: core.FrequencyMHz
+          });
+        });
+      }
+
+      // Ajouter GPU
+      if (payload.metrics?.GPU) {
+        adapted.hardware.push({
+          type: 'gpu',
+          id: 'gpu-0',
+          vendor: payload.gpuType,
+          model: payload.metrics.GPU.Name,
+          usage_percent: payload.metrics.GPU.LoadPercent,
+          memory_total_bytes: payload.metrics.GPU.AdapterRAMBytes,
+          memory_used_bytes: payload.metrics.GPU.VramUsedBytes,
+          driver: payload.metrics.GPU.DriverVersion
+        });
+      }
+
+      setPerformance(adapted);
       
-      // Ajouter le point mémoire à chaque mise à jour, pas seulement au chargement
-      appendMemoryPoint(payload);
+      // Ajouter le point mémoire à chaque mise à jour
+      appendMemoryPoint(payload.metrics);
       setError("");
     } catch (err) {
       setError(err?.message || "Impossible de récupérer les métriques");
@@ -106,8 +142,7 @@ function Performance() {
 
   useEffect(() => {
     fetchPerformance(true);
-    // Augmenter l'intervalle de 100ms à 1000ms pour réduire la charge
-    const interval = window.setInterval(() => fetchPerformance(false), 1000);
+    const interval = window.setInterval(() => fetchPerformance(false), 500);
     return () => window.clearInterval(interval);
   }, []);
 
@@ -118,9 +153,25 @@ function Performance() {
   const deviceMemory = navigator.deviceMemory ? Number(navigator.deviceMemory) : null;
   const webgpu = typeof navigator.gpu !== 'undefined' ? navigator.gpu : null;
 
+  // Moyenne glissante sur 8 échantillons
+  const [cpuAvgHistory, setCpuAvgHistory] = useState([]);
+  const [memAvgHistory, setMemAvgHistory] = useState([]);
+
+  useEffect(() => {
+    if (performance && performance.hardware) {
+      const averageUsage = cpuItems.reduce((sum, cpu) => sum + (Number(cpu.usage_percent) || 0), 0) / cpuItems.length;
+      setCpuAvgHistory(prev => [...prev, averageUsage].slice(-8));
+
+      const memPct = performance?.memory?.UsedPercent ?? 0;
+      setMemAvgHistory(prev => [...prev, memPct].slice(-8));
+    }
+  }, [performance]);
+
   const cpuSummary = useMemo(() => {
     if (cpuItems.length > 0) {
-      const averageUsage = cpuItems.reduce((sum, cpu) => sum + (Number(cpu.usage_percent) || 0), 0) / cpuItems.length;
+      const averageUsage = cpuAvgHistory.length > 0 
+        ? cpuAvgHistory.reduce((sum, v) => sum + v, 0) / cpuAvgHistory.length
+        : cpuItems.reduce((sum, cpu) => sum + (Number(cpu.usage_percent) || 0), 0) / cpuItems.length;
       return {
         model: cpuItems[0].model || cpuProfile?.model || '—',
         usage_percent: averageUsage,
@@ -197,10 +248,12 @@ function Performance() {
   }, [gpuItems, gpuProfile, webgpu]);
 
   const memoryInfo = useMemo(() => {
-    const hostTotal = performance?.memory?.host_total_bytes ?? performance?.memory?.total_bytes ?? null;
-    const hostFree = performance?.memory?.host_free_bytes ?? performance?.memory?.free_bytes ?? null;
-    const hostUsed = performance?.memory?.host_used_bytes ?? performance?.memory?.used_bytes ?? (hostTotal != null && hostFree != null ? hostTotal - hostFree : null);
-    const memoryUsage = hostTotal != null && hostUsed != null ? (hostUsed / hostTotal) * 100 : null;
+    const hostTotal = performance?.memory?.TotalBytes ?? performance?.memory?.host_total_bytes ?? performance?.memory?.total_bytes ?? null;
+    const hostFree = performance?.memory?.FreeBytes ?? performance?.memory?.host_free_bytes ?? performance?.memory?.free_bytes ?? null;
+    const hostUsed = performance?.memory?.UsedBytes ?? performance?.memory?.host_used_bytes ?? performance?.memory?.used_bytes ?? (hostTotal != null && hostFree != null ? hostTotal - hostFree : null);
+    const memoryUsage = memAvgHistory.length > 0
+      ? memAvgHistory.reduce((sum, v) => sum + v, 0) / memAvgHistory.length
+      : performance?.memory?.UsedPercent ?? (hostTotal != null && hostUsed != null ? (hostUsed / hostTotal) * 100 : null);
     return {
       total_bytes: hostTotal,
       used_bytes: hostUsed,
@@ -243,11 +296,13 @@ function Performance() {
   const memoryHostUsed = memoryInfo.used_bytes;
   const memoryUsagePercent = memoryInfo.usage_percent;
   const gpuVendorLabel = gpuSummary ? normalizeGpuVendor(gpuSummary.vendor, gpuSummary.model) : null;
+  const metricsSource = performance?.source ? String(performance.source) : 'host-metrics';
 
   return (
     <div className="card performance-card">
       <div className="card-title">💻 Performance</div>
       <p className="card-subtitle">Vue unifiée du CPU, GPU et de la santé du système.</p>
+      <div className="performance-source">Source métriques : {metricsSource}</div>
 
       {error && <div className="notification error">{error}</div>}
 
@@ -277,10 +332,6 @@ function Performance() {
               <strong>{cpuSummary?.logical_processors ?? '—'}</strong>
             </div>
           </div>
-          <div className="performance-metric">
-            <span>RAM système</span>
-            <strong>{formatBytes(memoryHostUsed)} / {formatBytes(memoryHostTotal)}</strong>
-          </div>
           {cpuSummary?.cores?.length > 0 && (
             <div className="core-usage-list">
               {cpuSummary.cores.map((core) => (
@@ -294,6 +345,49 @@ function Performance() {
               ))}
             </div>
           )}
+        </div>
+
+        <div className="performance-hero-card memory-card">
+          <div className="performance-hero-head">
+            <div>
+              <div className="performance-hero-label">Mémoire</div>
+              <div className="performance-hero-name">Hôte physique</div>
+            </div>
+            <div className="performance-chip">{memoryUsagePercent != null ? formatPercent(memoryUsagePercent) : '—'}</div>
+          </div>
+          <div className="performance-meta-row">
+            <div className="performance-metric">
+              <span>Total</span>
+              <strong>{formatBytes(memoryHostTotal)}</strong>
+            </div>
+            <div className="performance-metric">
+              <span>Utilisé</span>
+              <strong>{formatBytes(memoryHostUsed)}</strong>
+            </div>
+          </div>
+          <div className="memory-chart">
+            <div className="memory-chart-visual" style={{ height: '160px', marginBottom: '12px' }}>
+              <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="memory-chart-svg" aria-label="Graphique d’usage mémoire">
+                <rect x="0" y="0" width="100" height="100" fill="none" />
+                {memoryChartPoints && (
+                  <polyline
+                    points={memoryChartPoints.used}
+                    fill="none"
+                    stroke="#a855f7"
+                    strokeWidth="3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="memory-chart-line memory-chart-line-used"
+                  />
+                )}
+              </svg>
+              <div className="memory-chart-rules">
+                {[...Array(4)].map((_, idx) => (
+                  <div key={idx} />
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="performance-hero-card gpu-card">
@@ -332,70 +426,12 @@ function Performance() {
           <div className="hardware-detail">CPU : {cpuSummary?.model || '—'}</div>
           <div className="hardware-detail">GPU : {gpuSummary?.model || 'Aucun'}</div>
         </div>
-        <div className="memory-card">
-          <div className="hardware-card-title">Mémoire</div>
-          <div className="hardware-card-meta">Hôte physique</div>
-          <div className="hardware-detail">Total : {formatBytes(memoryHostTotal)}</div>
-          <div className="hardware-detail">Utilisé : {formatBytes(memoryHostUsed)}</div>
-          <div className="hardware-detail">Libre : {formatBytes(memoryInfo.free_bytes)}</div>
-          <div className="hardware-detail">Charge : {memoryUsagePercent != null ? formatPercent(memoryUsagePercent) : '—'}</div>
-          <div className="memory-chart">
-            <div className="memory-chart-visual">
-              <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="memory-chart-svg" aria-label="Graphique d’usage mémoire">
-                <defs>
-                  <linearGradient id="memoryChartGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="rgba(34, 197, 94, 0.5)" />
-                    <stop offset="100%" stopColor="rgba(34, 197, 94, 0.05)" />
-                  </linearGradient>
-                </defs>
-                <rect x="0" y="0" width="100" height="100" fill="none" />
-                {memoryChartPoints && (
-                  <polyline
-                    points={memoryChartPoints.used}
-                    fill="none"
-                    stroke="#5eead4"
-                    strokeWidth="2"
-                    className="memory-chart-line memory-chart-line-used"
-                  />
-                )}
-                {memoryChartPoints && (
-                  <polyline
-                    points={memoryChartPoints.free}
-                    fill="none"
-                    stroke="#60a5fa"
-                    strokeWidth="2"
-                    strokeDasharray="4 4"
-                    className="memory-chart-line memory-chart-line-free"
-                  />
-                )}
-                {memoryChartPoints && (
-                  <polygon
-                    points={`${memoryChartPoints.used} 100,100 0,100`}
-                    fill="url(#memoryChartGradient)"
-                    className="memory-chart-fill"
-                  />
-                )}
-              </svg>
-              <div className="memory-chart-rules">
-                {[...Array(4)].map((_, idx) => (
-                  <div key={idx} />
-                ))}
-              </div>
-            </div>
-            <div className="memory-chart-footer">
-              <div className="memory-chart-legend">
-                <span className="memory-chart-legend-item used">Utilisé</span>
-                <span className="memory-chart-legend-item free">Libre</span>
-              </div>
-              <span>{memoryHistory.length} points</span>
-            </div>
-          </div>
-        </div>
         <div className="hardware-card">
           <div className="hardware-card-title">Profil matériel</div>
           <div className="hardware-card-meta">{performance?.profile?.gpu?.label || performance?.profile?.cpu?.model || '—'}</div>
           <div className="hardware-detail">CPU : {cpuSummary?.model || '—'}</div>
           <div className="hardware-detail">GPU : {gpuSummary?.model || 'Aucun'}</div>
+          <div className="hardware-detail">OS profil : {performance?.system?.os_profile || '—'}</div>
         </div>
       </div>
 

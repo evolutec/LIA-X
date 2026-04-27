@@ -231,6 +231,8 @@ function Install-Or-Update-LiaService {
         & $nssm set $ServiceName AppDirectory $expectedAppDir
         & $nssm set $ServiceName AppParameters $expectedArgs
         & $nssm set $ServiceName Start SERVICE_AUTO_START
+        & $nssm set $ServiceName Type SERVICE_INTERACTIVE_PROCESS
+        & $nssm set $ServiceName ObjectName LocalSystem
         Write-Host "Service $ServiceName installé ou mis à jour."
     }
 

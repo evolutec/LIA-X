@@ -289,9 +289,15 @@ body {
   box-shadow: 0 34px 90px rgba(0, 0, 0, 0.22);
 }
 
+.performance-source {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
 .performance-hero {
   display: grid;
-  grid-template-columns: 1.6fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 22px;
   margin-top: 24px;
 }

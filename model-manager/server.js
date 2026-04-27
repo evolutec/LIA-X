@@ -939,17 +939,17 @@ function mapHostCpuMetrics(cpuMetrics, hardwareProfile) {
     'CPU'
   );
   const speed_mhz = normalizeNumber(
-    (hasCpuMetrics && (cpuMetrics.MaxClockSpeed || cpuMetrics.MaxClockSpeedMHz)) ||
+    (hasCpuMetrics && (cpuMetrics.MaxClockSpeed || cpuMetrics.MaxClockSpeedMHz || cpuMetrics.Speed || cpuMetrics.CurrentFrequency)) ||
     hardwareProfile?.cpu?.max_clock_speed_mhz ||
     0
   );
   const cores = normalizeNumber(
-    (hasCpuMetrics && (cpuMetrics.NumberOfCores || cpuMetrics.Cores)) ||
+    (hasCpuMetrics && (cpuMetrics.NumberOfCores || cpuMetrics.Cores || cpuMetrics.CoreCount)) ||
     hardwareProfile?.cpu?.physical_cores ||
     0
   );
   const threads = normalizeNumber(
-    (hasCpuMetrics && cpuMetrics.NumberOfLogicalProcessors) ||
+    (hasCpuMetrics && (cpuMetrics.NumberOfLogicalProcessors || cpuMetrics.LogicalProcessors || cpuMetrics.ThreadCount)) ||
     hardwareProfile?.cpu?.logical_processors ||
     0
   );
@@ -1590,6 +1590,7 @@ async function getPerformanceMetrics() {
     memory,
     hardware,
     profile: hardwareProfile || null,
+    source: hostMetrics?.source || 'host-metrics',
   };
 }
 
@@ -2525,6 +2526,7 @@ app.all(['/api/models/*', '/models/*'], async (req, res) => {
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
+
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Model Loader] UI: http://0.0.0.0:${PORT} -> controller: ${CONTROLLER_URL}`);
