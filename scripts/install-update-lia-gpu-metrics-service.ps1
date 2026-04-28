@@ -1,5 +1,5 @@
-# create-lia-services.ps1
-# Script d'installation du service LIA Controller
+# install-update-lia-gpu-metrics-service.ps1
+# Script d'installation et mise à jour du service LIA GPU Metrics
 # À exécuter en tant qu'administrateur
 
 param(
@@ -64,37 +64,39 @@ function Wait-ServiceRemoved {
 
 function Remove-ServiceIfExists {
     param([string]$nssm, [string]$serviceName)
+    
+    # 1. Arrêter proprement le service s'il est actif
+    try {
+        $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') {
+            Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        }
+    } catch {}
+    
+    # 2. Supprimer via NSSM
     try {
         & $nssm remove $serviceName confirm 2>$null | Out-Null
     } catch {}
+    
+    # 3. Forcer via sc.exe si NSSM échoue
     try {
         sc.exe delete $serviceName 2>$null | Out-Null
     } catch {}
-    Wait-ServiceRemoved -serviceName $serviceName -timeoutSeconds 20 | Out-Null
-}
-
-function Remove-LegacyServices {
-    param(
-        [string[]]$serviceNames = @('LIA Controller Service', 'LIA Controller Launcher')
-    )
-
-    $nssm = Get-NssmExecutable
-    foreach ($serviceName in $serviceNames) {
-        Remove-ServiceIfExists -nssm $nssm -serviceName $serviceName
-    }
-}
-
-function Stop-LegacyControllerProcesses {
-    $legacyProcesses = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -and $_.CommandLine -match 'llama-host-controller\.ps1' }
-
-    foreach ($proc in $legacyProcesses) {
-        Write-Host "Arrêt du processus legacy PID $($proc.ProcessId) : $($proc.CommandLine)"
-        try {
-            Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
-        } catch {
-            Write-Warning "Impossible d'arrêter le processus $($proc.ProcessId) : $($_.Exception.Message)"
+    
+    # 4. Tuer tout processus nssm.exe lié à ce service
+    try {
+        $nssmProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq 'nssm.exe' -and $_.CommandLine -match [regex]::Escape($serviceName) }
+        foreach ($proc in $nssmProcs) {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
         }
+    } catch {}
+    
+    # 5. Attendre que Windows finalise la suppression dans le SCM
+    $removed = Wait-ServiceRemoved -serviceName $serviceName -timeoutSeconds 30
+    if (-not $removed) {
+        Start-Sleep -Seconds 5
     }
 }
 
@@ -127,13 +129,13 @@ function Install-Or-Update-LiaService {
             $sameStart = (Normalize-Value $currentConfig.Start) -ieq 'SERVICE_AUTO_START'
 
             if ($sameApp -and $sameArgs -and $sameDir -and $sameDisplay -and $sameDesc -and $sameStart) {
-                # Vérifier si le service est running et écoute sur le port 13579
+                # Vérifier si le service est running et écoute sur le port 13620
                 $svc = Get-Service -Name $ServiceName -ErrorAction Stop
                 if ($svc.Status -eq 'Running') {
-                    # Vérifier si un processus pwsh écoute sur 13579
+                    # Vérifier si un processus écoute sur 13620
                     $portUsed = $false
                     try {
-                        $tcp = Get-NetTCPConnection -LocalPort 13579 -State Listen -ErrorAction Stop
+                        $tcp = Get-NetTCPConnection -LocalPort 13620 -State Listen -ErrorAction Stop
                         if ($tcp) {
                             $processId = $tcp.OwningProcess
                             $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
@@ -143,30 +145,30 @@ function Install-Or-Update-LiaService {
                         }
                     } catch {}
                     if ($portUsed) {
-                        Write-Host "Service $ServiceName déjà configuré, en cours d'exécution et écoute sur le port 13579. Rien à faire."
+                        Write-Host "Service $ServiceName déjà configuré, en cours d'exécution et écoute sur le port 13620. Rien à faire."
                         $skipInstall = $true
                         $installNeeded = $false
                     } else {
-                        Write-Host "Service $ServiceName running mais ne semble pas écouter sur le port 13579. Tentative de redémarrage..."
+                        Write-Host "Service $ServiceName running mais ne semble pas écouter sur le port 13620. Tentative de redémarrage..."
                         try {
                             Restart-Service -Name $ServiceName -Force -ErrorAction Stop
                             Start-Sleep -Seconds 3
                             # Vérifier à nouveau si le port est écouté
                             $tcp2 = $null
                             try {
-                            $tcp2 = Get-NetTCPConnection -LocalPort 13579 -State Listen -ErrorAction Stop
-                        } catch {}
-                        if ($tcp2) {
-                            $processId2 = $tcp2.OwningProcess
-                            $proc2 = Get-Process -Id $processId2 -ErrorAction SilentlyContinue
-                            if ($proc2 -and $proc2.ProcessName -match 'pwsh') {
-                                    Write-Host "Redémarrage réussi, le service écoute maintenant sur le port 13579."
+                                $tcp2 = Get-NetTCPConnection -LocalPort 13620 -State Listen -ErrorAction Stop
+                            } catch {}
+                            if ($tcp2) {
+                                $processId2 = $tcp2.OwningProcess
+                                $proc2 = Get-Process -Id $processId2 -ErrorAction SilentlyContinue
+                                if ($proc2 -and $proc2.ProcessName -match 'pwsh') {
+                                    Write-Host "Redémarrage réussi, le service écoute maintenant sur le port 13620."
                                     $skipInstall = $true
                                     $installNeeded = $false
                                     return
                                 }
                             }
-                            Write-Host "Après redémarrage, le service n'écoute toujours pas sur le port 13579. Réinstallation nécessaire."
+                            Write-Host "Après redémarrage, le service n'écoute toujours pas sur le port 13620. Réinstallation nécessaire."
                         } catch {
                             Write-Warning "Redémarrage du service $ServiceName a échoué : $($_.Exception.Message). Réinstallation nécessaire."
                         }
@@ -179,28 +181,30 @@ function Install-Or-Update-LiaService {
                         # Vérifier si le port est écouté
                         $tcp2 = $null
                         try {
-                            $tcp2 = Get-NetTCPConnection -LocalPort 13579 -State Listen -ErrorAction Stop
+                            $tcp2 = Get-NetTCPConnection -LocalPort 13620 -State Listen -ErrorAction Stop
                         } catch {}
                         if ($tcp2) {
                             $processId2 = $tcp2.OwningProcess
                             $proc2 = Get-Process -Id $processId2 -ErrorAction SilentlyContinue
                             if ($proc2 -and $proc2.ProcessName -match 'pwsh') {
-                                Write-Host "Démarrage réussi, le service écoute maintenant sur le port 13579."
+                                Write-Host "Démarrage réussi, le service écoute maintenant sur le port 13620."
                                 $skipInstall = $true
                                 $installNeeded = $false
                                 return
                             }
                         }
-                        Write-Host "Après démarrage, le service n'écoute toujours pas sur le port 13579. Réinstallation nécessaire."
+                        Write-Host "Après démarrage, le service n'écoute toujours pas sur le port 13620. Réinstallation nécessaire."
                     } catch {
                         Write-Warning "Démarrage du service $ServiceName a échoué : $($_.Exception.Message). Réinstallation nécessaire."
                     }
                 }
             } else {
                 Write-Host "Reconfiguration du service $ServiceName..."
+                Remove-ServiceIfExists -nssm $nssm -serviceName $ServiceName
             }
         } else {
             Write-Host "Service $ServiceName existant mais pas géré par NSSM, on le recrée."
+            Remove-ServiceIfExists -nssm $nssm -serviceName $ServiceName
         }
     }
 
@@ -231,8 +235,6 @@ function Install-Or-Update-LiaService {
         & $nssm set $ServiceName AppDirectory $expectedAppDir
         & $nssm set $ServiceName AppParameters $expectedArgs
         & $nssm set $ServiceName Start SERVICE_AUTO_START
-        & $nssm set $ServiceName Type SERVICE_INTERACTIVE_PROCESS
-        & $nssm set $ServiceName ObjectName LocalSystem
         Write-Host "Service $ServiceName installé ou mis à jour."
     }
 
@@ -265,12 +267,21 @@ function Install-Or-Update-LiaService {
     }
 }
 
-# Nettoyer les anciens services legacy et processus de contrôleur avant d'installer le service unique
-Stop-LegacyControllerProcesses
-Remove-LegacyServices
+# Arrêter les anciens processus du service GPU Metrics
+$legacyProcesses = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -match 'gpu-metrics-service\.ps1' }
 
-# LIA Controller: service principal qui lance llama-host-controller.ps1
-$controllerScript = Join-Path $RootDir 'controller\llama-host-controller.ps1'
-Install-Or-Update-LiaService -ServiceName 'LIA Controller' -DisplayName 'LIA Controller' -Description 'Service de controle hote LIA' -ScriptPath $controllerScript
+foreach ($proc in $legacyProcesses) {
+    Write-Host "Arrêt du processus legacy PID $($proc.ProcessId) : $($proc.CommandLine)"
+    try {
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+    } catch {
+        Write-Warning "Impossible d'arrêter le processus $($proc.ProcessId) : $($_.Exception.Message)"
+    }
+}
 
-Write-Host "Installation du service LIA Controller terminée."
+# LIA GPU Metrics: service de collecte de métriques GPU et système
+$metricsScript = Join-Path $RootDir 'scripts\gpu-metrics-service.ps1'
+Install-Or-Update-LiaService -ServiceName 'LIA GPU Metrics' -DisplayName 'LIA GPU Metrics' -Description 'Service de collecte de métriques système et GPU pour LIA' -ScriptPath $metricsScript
+
+Write-Host "Installation du service LIA GPU Metrics terminée."

@@ -1,0 +1,14 @@
+{
+  "terminal.integrated.defaultProfile.windows": "PowerShell",
+  "terminal.integrated.profiles.windows": {
+    "PowerShell": {
+      "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
+    }
+  },
+  "folder-color.pathColors": [
+    {
+      "filePath": "LIA-X\\.blackboxrules",
+      "color": "foldercolorizer.color_00afd7"
+    }
+  ]
+}

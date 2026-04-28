@@ -72,7 +72,7 @@ const fetchPerformance = async (isInitial = false) => {
     isFetchingRef.current = true;
     if (isInitial) setLoading(true);
     try {
-      const response = await fetch(`http://127.0.0.1:13610/metrics/host`);
+      const response = await fetch(`http://127.0.0.1:13620/metrics/host`);
       
       let payload;
       try {
@@ -103,27 +103,54 @@ const fetchPerformance = async (isInitial = false) => {
       // Ajouter CPU
       if (payload.metrics?.CPU?.Cores) {
         payload.metrics.CPU.Cores.forEach((core, idx) => {
-          adapted.hardware.push({
-            type: 'cpu',
-            id: core.CoreId,
-            model: payload.system?.CPU?.Name,
-            usage_percent: core.LoadPercent,
-            speed_mhz: core.FrequencyMHz
-          });
+           adapted.hardware.push({
+             type: 'cpu',
+             id: core.CoreId,
+             model: payload.system?.CPU?.Name,
+             usage_percent: core.LoadPercent / 100,
+             speed_mhz: core.FrequencyMHz
+           });
         });
       }
 
-      // Ajouter GPU
-      if (payload.metrics?.GPU) {
+      // Ajouter GPU(s) - CORRECTION: GPUs est un OBJECT dans l'API pas un ARRAY, on transforme en tableau
+      let gpuList = [];
+      if (payload.metrics?.GPUs) {
+        if (Array.isArray(payload.metrics.GPUs)) {
+          gpuList = payload.metrics.GPUs;
+        } else {
+          // Cas ou l'API retourne directement un objet unique au lieu d'un tableau
+          gpuList = [ payload.metrics.GPUs ];
+        }
+      }
+
+      if (gpuList.length > 0) {
+        gpuList.forEach((gpu, idx) => {
+          adapted.hardware.push({
+            type: 'gpu',
+            id: `gpu-${idx}`,
+            vendor: normalizeGpuVendor(gpu.Vendor, gpu.Name),
+            model: gpu.Name,
+           usage_percent: gpu.LoadPercent / 100,
+           memory_total_bytes: gpu.AdapterRAMBytes,
+           memory_used_bytes: gpu.VramUsedBytes,
+            temperature_celsius: gpu.TemperatureCelsius,
+            power_draw_watts: gpu.PowerDrawWatts,
+            driver: gpu.DriverVersion,
+            source: gpu.Source
+          });
+        });
+      } else if (payload.metrics?.GPU) {
         adapted.hardware.push({
           type: 'gpu',
           id: 'gpu-0',
           vendor: payload.gpuType,
           model: payload.metrics.GPU.Name,
-          usage_percent: payload.metrics.GPU.LoadPercent,
-          memory_total_bytes: payload.metrics.GPU.AdapterRAMBytes,
-          memory_used_bytes: payload.metrics.GPU.VramUsedBytes,
-          driver: payload.metrics.GPU.DriverVersion
+           usage_percent: payload.metrics.GPU.LoadPercent / 100,
+           memory_total_bytes: payload.metrics.GPU.AdapterRAMBytes,
+           memory_used_bytes: payload.metrics.GPU.VramUsedBytes,
+          driver: payload.metrics.GPU.DriverVersion,
+          source: payload.metrics.GPU.Source
         });
       }
 
@@ -203,7 +230,17 @@ const fetchPerformance = async (isInitial = false) => {
     return null;
   }, [cpuItems, cpuProfile, deviceMemory]);
 
-  const gpuItems = useMemo(() => (performance?.hardware || []).filter((item) => item.type === "gpu"), [performance]);
+  const gpuItems = useMemo(() => {
+    const items = (performance?.hardware || []).filter((item) => item.type === "gpu");
+    // Prioriser les GPUs avec des métriques réelles (usage non-null, plus de VRAM)
+    return items.sort((a, b) => {
+      const aHasData = a.usage_percent != null || a.memory_total_bytes > 0;
+      const bHasData = b.usage_percent != null || b.memory_total_bytes > 0;
+      if (aHasData && !bHasData) return -1;
+      if (!aHasData && bHasData) return 1;
+      return (b.memory_total_bytes || 0) - (a.memory_total_bytes || 0);
+    });
+  }, [performance]);
   const gpuProfile = performance?.profile?.gpu || null;
 
   const gpuSummary = useMemo(() => {
@@ -407,14 +444,55 @@ const fetchPerformance = async (isInitial = false) => {
               <span>Driver</span>
               <strong>{gpuSummary?.driver || '—'}</strong>
             </div>
+            {gpuSummary?.temperature_celsius != null && (
+              <div>
+                <span>Température</span>
+                <strong>{gpuSummary.temperature_celsius.toFixed(1)} °C</strong>
+              </div>
+            )}
+            {gpuSummary?.power_draw_watts != null && (
+              <div>
+                <span>Puissance</span>
+                <strong>{gpuSummary.power_draw_watts.toFixed(1)} W</strong>
+              </div>
+            )}
           </div>
           <div className="gpu-usage-bar">
             <div className="gpu-usage-track">
               <div className="gpu-usage-fill" style={{ width: `${Math.min(Math.max(gpuSummary?.usage_percent ?? 0, 0), 100)}%` }} />
             </div>
-            <span>{gpuSummary?.usage_percent != null ? formatPercent(gpuSummary.usage_percent) : 'Pas de métrique'} </span>
+            <span>{gpuSummary?.usage_percent != null ? formatPercent(gpuSummary.usage_percent) : 'Pas de métrique'}</span>
           </div>
-          <div className="gpu-chipset-note">{gpuSummary ? `Détecté comme ${gpuVendorLabel}` : 'Aucun GPU supporté détecté'}</div>
+          <div className="gpu-chipset-note">
+            {gpuSummary ? `Détecté comme ${gpuVendorLabel}${gpuSummary.source ? ` · Source: ${gpuSummary.source}` : ''}` : 'Aucun GPU supporté détecté'}
+          </div>
+          
+          {/* GPUs additionnels si multi-GPU */}
+          {gpuItems.length > 1 && (
+            <div className="gpu-additional-list" style={{ marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '12px' }}>
+              <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)', marginBottom: '8px' }}>GPUs additionnels</div>
+              {gpuItems.slice(1).map((gpu, idx) => {
+                const vendor = normalizeGpuVendor(gpu.vendor, gpu.model);
+                return (
+                  <div key={gpu.id || `gpu-extra-${idx}`} className="gpu-additional-item" style={{ marginBottom: '8px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                      <span style={{ fontSize: '12px' }}>{gpu.model || 'GPU'}</span>
+                      <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)' }}>{vendor}{gpu.source ? ` · ${gpu.source}` : ''}</span>
+                    </div>
+                    <div className="gpu-usage-track" style={{ height: '4px' }}>
+                      <div className="gpu-usage-fill" style={{ width: `${Math.min(Math.max(gpu.usage_percent ?? 0, 0), 100)}%`, height: '4px' }} />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '2px' }}>
+                      <span style={{ fontSize: '11px' }}>{gpu.usage_percent != null ? formatPercent(gpu.usage_percent) : '—'}</span>
+                      <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)' }}>
+                        {gpu.memory_used_bytes != null ? `${formatBytes(gpu.memory_used_bytes)} / ${formatBytes(gpu.memory_total_bytes)}` : formatBytes(gpu.memory_total_bytes)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
 

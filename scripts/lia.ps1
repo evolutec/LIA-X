@@ -8,7 +8,7 @@ $runtimeDir        = Join-Path $rootDir "runtime"
 $modelsDir         = Join-Path $rootDir "models"
 $llamaRepoDir      = Join-Path $runtimeDir "llama.cpp"
 $controllerScript  = Join-Path $rootDir "controller\llama-host-controller.ps1"
-$controllerServiceHelper = Join-Path $rootDir "scripts\create-lia-services.ps1"
+$controllerServiceHelper = Join-Path $rootDir "scripts\install-update-lia-controller-service.ps1"
 $runtimeConfigPath = Join-Path $runtimeDir "host-runtime-config.json"
 $runtimeStatePath  = Join-Path $runtimeDir "host-runtime-state.json"
 $hardwareProfilePath = Join-Path $runtimeDir "hardware-profile.json"
@@ -47,66 +47,18 @@ function Get-PreferredPowerShellExecutable {
     return (Get-Command powershell.exe -ErrorAction Stop).Source
 }
 
-function Get-NssmExecutablePath {
-    $cmd = Get-Command nssm.exe -ErrorAction SilentlyContinue
-    if ($cmd) {
-        return $cmd.Source
+function Start-HostMetricsService {
+    $metricsScript = Join-Path $rootDir 'scripts\install-update-lia-gpu-metrics-service.ps1'
+    if (-not (Test-Path $metricsScript)) {
+        WARN "Service de metriques hôte introuvable : $metricsScript"
+        return
     }
 
-    $candidates = @(
-        (Join-Path ${env:ProgramFiles} 'nssm\win64\nssm.exe'),
-        (Join-Path ${env:ProgramFiles} 'nssm\win32\nssm.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'nssm\win64\nssm.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'nssm\win32\nssm.exe')
-    )
-    if ($env:ChocolateyInstall) {
-        $candidates += (Join-Path $env:ChocolateyInstall 'bin\nssm.exe')
-    }
-
-    foreach ($candidate in $candidates) {
-        if ($candidate -and (Test-Path $candidate)) {
-            return $candidate
-        }
-    }
-
-    return $null
-}
-
-function Ensure-NssmAvailable {
-    $existing = Get-NssmExecutablePath
-    if ($existing) {
-        OK "NSSM detecte: $existing"
-        return $true
-    }
-
-    if (-not (Confirm-Command "winget")) {
-        WARN "NSSM introuvable et winget indisponible."
-        return $false
-    }
-
-    INFO "NSSM introuvable. Tentative d'installation automatique..."
-    $candidateIds = @('NSSM.NSSM', 'nssm.nssm', 'NSSM')
-    foreach ($id in $candidateIds) {
-        try {
-            winget install --id $id -e --silent --accept-source-agreements --accept-package-agreements | Out-Null
-        } catch {}
-
-        $existing = Get-NssmExecutablePath
-        if ($existing) {
-            OK "NSSM installe: $existing"
-            return $true
-        }
-    }
-
-    WARN "Installation automatique de NSSM impossible."
-    return $false
+    pwsh -NoProfile -ExecutionPolicy Bypass -File $metricsScript
 }
 
 function Ensure-ControllerServiceInstalled {
     if (Test-IsAdministrator) {
-        if (-not (Ensure-NssmAvailable)) {
-            FAIL "NSSM est requis pour installer le service LIA Controller."
-        }
         & $controllerServiceHelper -RootDir $rootDir
         return
     }
@@ -115,22 +67,7 @@ function Ensure-ControllerServiceInstalled {
     $pwshExe = Get-PreferredPowerShellExecutable
     $escapedRoot = $rootDir.Replace("'", "''")
     $escapedHelper = $controllerServiceHelper.Replace("'", "''")
-    $elevatedCommand = @"
-`$ErrorActionPreference = 'Stop'
-`$nssm = Get-Command nssm.exe -ErrorAction SilentlyContinue
-if (-not `$nssm) {
-  `$ids = @('NSSM.NSSM', 'nssm.nssm', 'NSSM')
-  foreach (`$id in `$ids) {
-    try {
-      winget install --id `$id -e --silent --accept-source-agreements --accept-package-agreements | Out-Null
-    } catch {}
-    `$nssm = Get-Command nssm.exe -ErrorAction SilentlyContinue
-    if (`$nssm) { break }
-  }
-}
-if (-not `$nssm) { throw 'NSSM introuvable apres tentative d installation.' }
-& '$escapedHelper' -RootDir '$escapedRoot'
-"@
+    $elevatedCommand = "& '$escapedHelper' -RootDir '$escapedRoot'"
 
     try {
         $proc = Start-Process -FilePath $pwshExe -Verb RunAs -Wait -PassThru -ArgumentList @(
@@ -1098,99 +1035,6 @@ function Start-LibreChatContainer {
     }
 }
 
-function Start-HostMetricsService {
-    $serviceName = 'LIA GPU Metrics'
-    $displayName = 'LIA GPU Metrics'
-    $description = 'Service de métriques hôte LIA GPU'
-    $metricsScript = Join-Path $rootDir 'scripts\gpu-metrics-service.ps1'
-    $port = 13610
-
-    if (-not (Test-Path $metricsScript)) {
-        WARN "Service de métriques hôte introuvable : $metricsScript"
-        return
-    }
-
-    $existing = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-    if ($existing) {
-        $proc = Get-Process -Id $existing.OwningProcess -ErrorAction SilentlyContinue
-        if ($proc -and $proc.Path -and $proc.Path -match 'pwsh|powershell') {
-            OK "Service de métriques hôte déjà en cours d'exécution sur le port $port"
-            return
-        }
-        WARN "Le port $port est déjà occupé par un autre processus : PID $($existing.OwningProcess)." 
-        return
-    }
-
-    $nssm = Get-NssmExecutablePath
-    if ($nssm) {
-        $pwshExe = Get-PreferredPowerShellExecutable
-        $expectedArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $metricsScript)
-        $expectedArgsString = ($expectedArgs | ForEach-Object {
-            if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
-        }) -join ' '
-        $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-
-        if (-not $existingService) {
-            & $nssm install $serviceName $pwshExe @expectedArgs | Out-Null
-            & $nssm set $serviceName DisplayName "$displayName" | Out-Null
-            & $nssm set $serviceName Description "$description" | Out-Null
-            & $nssm set $serviceName AppDirectory $rootDir | Out-Null
-            & $nssm set $serviceName AppParameters $expectedArgsString | Out-Null
-            & $nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
-            Write-Host "Service $serviceName installé."
-        } else {
-            & $nssm set $serviceName Application $pwshExe | Out-Null
-            & $nssm set $serviceName AppParameters $expectedArgsString | Out-Null
-            & $nssm set $serviceName AppDirectory $rootDir | Out-Null
-        }
-
-        try {
-            $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-            if ($service -and $service.Status -eq 'Paused') {
-                try {
-                    Resume-Service -Name $serviceName -ErrorAction Stop
-                } catch {
-                    Write-Warning "Impossible de reprendre le service $serviceName : $($_.Exception.Message)"
-                }
-            }
-
-            if (-not $service -or $service.Status -ne 'Running') {
-                Start-Service -Name $serviceName -ErrorAction Stop
-            }
-        } catch {
-            Write-Warning "Démarrage du service $serviceName échoué : $($_.Exception.Message)"
-            try {
-                $nssmStatus = & $nssm status $serviceName 2>&1
-                Write-Warning "NSSM status: $nssmStatus"
-                & $nssm restart $serviceName 2>$null | Out-Null
-            } catch {
-                Write-Warning "Impossible de redemarrer le service via NSSM : $($_.Exception.Message)"
-            }
-        }
-
-        Start-Sleep -Seconds 3
-        $existing = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-        if ($existing) {
-            OK "Service de métriques hôte démarré sur le port $port"
-            return
-        }
-
-        WARN "Impossible de démarrer le service de métriques hôte sur le port $port après installation."
-        return
-    }
-
-    $pwshExe = Get-PreferredPowerShellExecutable
-    Start-Process -FilePath $pwshExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $metricsScript) -WorkingDirectory $rootDir -WindowStyle Hidden | Out-Null
-    Start-Sleep -Seconds 4
-
-    $existing = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-    if ($existing) {
-        OK "Service de métriques hôte démarré sur le port $port"
-    } else {
-        WARN "Impossible de démarrer le service de métriques hôte. Vérifiez les permissions, le port $port et les logs NSSM."
-    }
-}
-
 function Start-ModelLoaderContainer {
     Ensure-WindowsFirewallRuleForDockerPorts
 
@@ -1422,6 +1266,7 @@ if ($buildResult.source -eq 'release') {
 
 Step "4/6" "Controleur hote et runtime"
 Ensure-ControllerServiceInstalled
+Start-HostMetricsService
 Ensure-ControllerRunning
 Start-DefaultRuntime
 

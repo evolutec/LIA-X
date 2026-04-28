@@ -1546,11 +1546,18 @@ while ($true) {
             }
             'POST /restart' {
                 $body = Read-JsonBody $request
-                Write-Host "[controller] POST /restart model=$($body.model) id=$($body.id) port=$($body.port)"
-                Stop-LlamaProcess $body | Out-Null
-                Start-Sleep -Milliseconds 1000
-                Start-LlamaProcess $body | Out-Null
-                Write-Json $stream 200 (Get-RuntimeStatus)
+
+                Write-Host "[controller] POST /start model=$($body.model) context=$($body.context)"
+                
+                # Toujours activer le modèle par défaut quand on lance depuis /start
+                if (-not $body.ContainsKey('activate')) {
+                    $body.activate = $true
+                }
+                
+                $result = Start-LlamaProcess $body
+                $state = Get-ConsistentState
+
+                Write-JsonResponse $listener $state
                 continue
             }
             default {

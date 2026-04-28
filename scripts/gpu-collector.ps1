@@ -1,5 +1,5 @@
 # GPU Collector - lia.ps1
-# Collecteur de métriques hôte via PowerShell.HardwareMonitor
+# Collecteur de métriques hôte avec hw-smi (ProjectPhysX) + fallback HardwareMonitor
 
 param(
     [string]$OutputJson,
@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $toolsDir = Join-Path $repoRoot 'tools'
 $moduleName = 'HardwareMonitor'
+$hwSmiPath = Join-Path $toolsDir 'hw-smi\hw-smi.exe'
 
 function Ensure-Directory([string]$path) {
     if (-not (Test-Path $path)) {
@@ -192,7 +193,58 @@ function Parse-HardwareMonitorSensors($sensors) {
     return [array]$gpuGroups.Values
 }
 
+function Get-HwSmiMetrics {
+    if (-not (Test-Path $hwSmiPath)) { return $null }
+
+    try {
+        $jsonOutput = & $hwSmiPath --json 2>$null | Out-String
+        if ($LASTEXITCODE -ne 0) { return $null }
+        $data = $jsonOutput | ConvertFrom-Json -ErrorAction Stop
+
+        $gpuList = @()
+        foreach ($gpu in $data.gpus) {
+            $gpuList += [ordered]@{
+                Vendor = $gpu.vendor
+                Name = $gpu.name
+                usage_percent = $gpu.gpu_utilization_percent
+                memory_total_bytes = $gpu.memory_total_bytes
+                memory_used_bytes = $gpu.memory_used_bytes
+                core_clock_mhz = $gpu.core_clock_mhz
+                memory_clock_mhz = $gpu.memory_clock_mhz
+                power_watts = $gpu.power_draw_watts
+                power_limit_watts = $gpu.power_limit_watts
+                temperature_c = $gpu.temperature_c
+                temperature_hotspot_c = $gpu.temperature_hotspot_c
+                temperature_memory_c = $gpu.temperature_memory_c
+                fan_speed_rpm = $gpu.fan_speed_rpm
+                fan_speed_percent = $gpu.fan_speed_percent
+                driver = $gpu.driver_version
+                pci_link_width = $gpu.pci_link_width
+                pci_link_gen = $gpu.pci_link_gen
+            }
+        }
+
+        return [ordered]@{
+            source = 'hw-smi'
+            vendor = if ($gpuList.Count -gt 0) { $gpuList[0].Vendor } else { 'SYSTEM' }
+            GPU = $gpuList
+            tool = 'hw-smi'
+            tool_path = $hwSmiPath
+            cpu = $data.cpu
+            memory = $data.memory
+            disks = $data.disks
+            network = $data.network
+            timestamp = (Get-Date).ToString('o')
+        }
+    } catch {
+        return $null
+    }
+}
+
 function Get-MainMetrics {
+    $metrics = Get-HwSmiMetrics
+    if ($metrics) { return $metrics }
+
     $vendor = Get-GpuVendor
     $sensors = Get-HardwareMonitorSensors
     $gpuMetrics = Parse-HardwareMonitorSensors $sensors
