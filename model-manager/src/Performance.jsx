@@ -107,7 +107,7 @@ const fetchPerformance = async (isInitial = false) => {
              type: 'cpu',
              id: core.CoreId,
              model: payload.system?.CPU?.Name,
-             usage_percent: core.LoadPercent / 100,
+              usage_percent: core.LoadPercent,
              speed_mhz: core.FrequencyMHz
            });
         });
@@ -131,7 +131,7 @@ const fetchPerformance = async (isInitial = false) => {
             id: `gpu-${idx}`,
             vendor: normalizeGpuVendor(gpu.Vendor, gpu.Name),
             model: gpu.Name,
-           usage_percent: gpu.LoadPercent / 100,
+            usage_percent: gpu.LoadPercent,
            memory_total_bytes: gpu.AdapterRAMBytes,
            memory_used_bytes: gpu.VramUsedBytes,
             temperature_celsius: gpu.TemperatureCelsius,
@@ -146,7 +146,7 @@ const fetchPerformance = async (isInitial = false) => {
           id: 'gpu-0',
           vendor: payload.gpuType,
           model: payload.metrics.GPU.Name,
-           usage_percent: payload.metrics.GPU.LoadPercent / 100,
+            usage_percent: payload.metrics.GPU.LoadPercent,
            memory_total_bytes: payload.metrics.GPU.AdapterRAMBytes,
            memory_used_bytes: payload.metrics.GPU.VramUsedBytes,
           driver: payload.metrics.GPU.DriverVersion,
