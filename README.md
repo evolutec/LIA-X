@@ -122,7 +122,7 @@ LIA-X est une plateforme locale pour tester et déployer des modèles GGUF sur W
 
 ### Contrôleur Hôte (Controller Host)
 
-Fichier: [`controller/llama-host-controller.ps1`](controller/llama-host-controller.ps1:1)
+Fichier: [`services/controller/llama-host-controller.ps1`](services/controller/llama-host-controller.ps1:1)
 
 - **Rôle** : Lance et supervise les instances `llama-server`
 - **Fonctionnalités** :
@@ -149,6 +149,18 @@ Fichiers: [`model-manager/server.js`](model-manager/server.js:1), [`model-manage
 - Si tu veux changer le nom ou la valeur, utilise :
   - `ROOCODE_SOURCE_HEADER_NAME`
   - `ROOCODE_SOURCE_HEADER_VALUE`
+
+### Service GPU Metrics
+
+Fichier: [`services/gpu-metrics/service.ps1`](services/gpu-metrics/service.ps1:1)
+
+- **Rôle** : Collecte et expose les métriques GPU en temps réel
+- **Fonctionnalités** :
+  - Mesure de l'utilisation GPU (Utilization Percentage)
+  - Mesure de la mémoire dédiée (Dedicated Usage)
+  - Exposition d'API sur le port 13620
+  - Fallback vers les compteurs Windows si `hw-smi.exe` n'est pas disponible
+  - Exposition des logs GPU dans les logs du Model Loader
 
 ### Frontends Docker
 
@@ -186,6 +198,7 @@ Fichier: [`runtime/host-runtime-config.json`](runtime/host-runtime-config.json:1
 | LibreChat | http://localhost:3004 | Frontend OpenAI-compatible |
 | Contrôleur hôte | http://127.0.0.1:13579 | Contrôle des processus `llama-server` |
 | `llama-server` | http://127.0.0.1:12434-12444 | Instance par modèle sur ports dynamiques |
+| GPU Metrics | http://127.0.0.1:13620 | Collecte et expose les métriques GPU (utilisation, mémoire) |
 
 ## Flux de données
 
@@ -437,7 +450,7 @@ Les modèles GGUF sont stockés dans le dossier [`models/`](models/) et doivent 
 
 1. Vérifier la santé du contrôleur : `http://127.0.0.1:13579/status`
 2. Vérifier la santé du Model Loader : `http://127.0.0.1:3002/api/models/status`
-3. Redémarrer le contrôleur via l'interface ou en relançant [`controller/llama-host-controller.ps1`](controller/llama-host-controller.ps1:1)
+3. Redémarrer le contrôleur via l'interface ou en relançant [`services/controller/llama-host-controller.ps1`](services/controller/llama-host-controller.ps1:1)
 
 ### LibreChat ne démarre pas
 
@@ -480,9 +493,16 @@ Les logs sont stockés dans :
 │   ├── Dockerfile.model-loader
 │   ├── Dockerfile.openwebui
 │   └── librechat.yaml
-├── controller/
-│   └── llama-host-controller.ps1
 ├── install.ps1
+├── services/
+│   ├── controller/
+│   │   ├── install-service.ps1
+│   │   └── llama-host-controller.ps1
+│   ├── gpu-metrics/
+│   │   ├── install-service.ps1
+│   │   └── service.ps1
+│   └── shared/
+│       └── service-helpers.ps1
 ├── model-manager/
 │   ├── index.html
 │   ├── package.json
@@ -495,7 +515,6 @@ Les logs sont stockés dans :
 │       ├── App.jsx
 │       └── main.jsx
 ├── scripts/
-│   ├── create-lia-services.ps1
 │   ├── fix-runtime-state.ps1
 │   ├── lia.ps1
 │   └── uninstall-lia-services.ps1

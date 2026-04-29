@@ -1,0 +1,48 @@
+{
+  "ports": {
+    "controller": 13579,
+    "llama": 12434,
+    "loader": 3002,
+    "anything": 3001,
+    "openWebUi": 3003,
+    "libreChat": 3004,
+    "libreChatInternal": 3080,
+    "gpuMetrics": 13620
+  },
+  "docker": {
+    "network": "lia-network",
+    "images": {
+      "modelLoader": "lia-model-loader:latest",
+      "anythingllm": "mintplexlabs/anythingllm:latest",
+      "openWebUi": "ghcr.io/open-webui/open-webui:main",
+      "libreChat": "ghcr.io/danny-avila/librechat:latest"
+    },
+    "liaImages": {
+      "modelLoader": "lia-model-loader:latest",
+      "anythingllm": "lia-anythingllm:latest",
+      "openWebUi": "lia-openwebui:latest",
+      "libreChat": "lia-librechat:latest"
+    }
+  },
+  "paths": {
+    "runtimeDir": "runtime",
+    "modelsDir": "models",
+    "llamaRepoDir": "runtime/llama.cpp",
+    "controllerScript": "services/controller/llama-host-controller.ps1",
+    "gpuMetricsScript": "services/gpu-metrics/service.ps1",
+    "controllerServiceHelper": "services/controller/install-service.ps1",
+    "gpuMetricsServiceHelper": "services/gpu-metrics/install-service.ps1",
+    "runtimeConfigPath": "runtime/host-runtime-config.json",
+    "runtimeStatePath": "runtime/host-runtime-state.json",
+    "hardwareProfilePath": "runtime/hardware-profile.json"
+  },
+  "timeout": {
+    "httpRetries": 40,
+    "httpDelay": 3,
+    "serviceStart": 30,
+    "serviceDelay": 2
+  },
+  "proxy": {
+    "modelId": "lia-local"
+  }
+}

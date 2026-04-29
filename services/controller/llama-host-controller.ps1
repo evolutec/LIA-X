@@ -11,8 +11,8 @@ $Global:RepairInProgress = $false
 $Global:StartupInProgress = $true
 
 function Get-RepoRoot {
-    if ($PSScriptRoot -match '\\(scripts|controller)$') {
-        return Split-Path -Parent $PSScriptRoot
+    if ($PSScriptRoot -match '\\(scripts|controller|services\\controller)$') {
+        return Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     }
     return $PSScriptRoot
 }

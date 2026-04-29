@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import ContainerLogs from "./ContainerLogs";
 import Performance from "./Performance";
 import Loader from "./Loader";
+import Documentation from "./Documentation";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -904,9 +905,13 @@ async function handleDownloadUrl() {
         <div className="card">
           <div className="card-title">💬 Chat</div>
           <p className="card-subtitle">Interface de conversation. Implémentation à venir.</p>
-          <div className="placeholder-block">Préparez ici l’intégration d’un chat avec le runtime sous-jacent.</div>
+          <div className="placeholder-block">Préparez ici l'intégration d'un chat avec le runtime sous-jacent.</div>
         </div>
       );
+    }
+
+    if (currentPage === 'documentation') {
+      return <Documentation />;
     }
 
     return (
@@ -1048,12 +1053,13 @@ async function handleDownloadUrl() {
           </div>
         </div>
         <nav className="app-nav">
-          {[
-            { key: 'home', label: 'Accueil' },
-            { key: 'logs', label: 'Logs' },
-            { key: 'performance', label: 'Performance' },
-            { key: 'chat', label: 'Chat' },
-          ].map((item) => (
+           {[
+             { key: 'home', label: 'Accueil' },
+             { key: 'logs', label: 'Logs' },
+             { key: 'performance', label: 'Performance' },
+             { key: 'chat', label: 'Chat' },
+             { key: 'documentation', label: 'Documentation' },
+           ].map((item) => (
             <button
               key={item.key}
               type="button"

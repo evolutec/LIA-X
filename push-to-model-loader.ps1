@@ -1,1 +1,0 @@
-cd "c:\Users\evolu\Documents\Github-repo\LIA-X" ; docker cp model-manager/server.js model-loader:/app/model-manager/server.js ; docker cp model-manager/dist/. model-loader:/app/model-manager/dist/ ; docker exec model-loader sh -c 'cp /app/model-manager/server.js /app/model-manager/server.cjs' ; docker restart model-loader
