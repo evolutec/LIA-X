@@ -6,7 +6,7 @@ endpoints:
   custom:
     - name: "LIA Local"
       apiKey: "not-used"
-      baseURL: "http://model-loader:3002/v1"
+      baseURL: "http://model-loader:3005/v1"
       models:
         default:
           - "lia-local"

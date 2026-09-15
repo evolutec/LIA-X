@@ -55,7 +55,7 @@ LIA-X est une plateforme locale pour tester et déployer des modèles GGUF sur W
 │  LAYER 3: FRONTENDS (Docker Containers)                                         │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
 │  │ AnythingLLM  │  │ Open WebUI   │  │ LibreChat     │  │ Model Loader  │       │
-│  │ :3001        │  │ :3003        │  │ :3004         │  │ :3002         │       │
+│  │ :3006        │  │ :3008        │  │ :3007         │  │ :3005         │       │
 │  │              │  │              │  │               │  │              │       │
 │  │ LLM Provider │  │ OpenAI API   │  │ OpenAI API    │  │ Proxy + UI    │       │
 │  │ Generic OpenAI│  │ ENABLED      │  │ ENABLED       │  │              │       │
@@ -166,9 +166,9 @@ Fichier: [`services/gpu-metrics/service.ps1`](services/gpu-metrics/service.ps1:1
 
 | Frontend | Image Docker | Port | Configuration |
 |----------|--------------|------|---------------|
-| AnythingLLM | `mintplexlabs/anythingllm:latest` | 3001 | `GENERIC_OPEN_AI_BASE_PATH=http://host.docker.internal:3002/v1` |
-| Open WebUI | `ghcr.io/open-webui/open-webui:main` | 3003 | `ENABLE_OPENAI_API=true`, `OPENAI_API_BASE_URL=http://host.docker.internal:3002/v1` |
-| LibreChat | `ghcr.io/danny-avila/librechat:latest` | 3004 | `OPENAI_BASE_URL=http://host.docker.internal:3002/v1`, `OPENAI_MODELS=lia-local` |
+| AnythingLLM | `mintplexlabs/anythingllm:latest` | 3006 | `GENERIC_OPEN_AI_BASE_PATH=http://host.docker.internal:3005/v1` |
+| Open WebUI | `ghcr.io/open-webui/open-webui:main` | 3008 | `ENABLE_OPENAI_API=true`, `OPENAI_API_BASE_URL=http://host.docker.internal:3005/v1` |
+| LibreChat | `ghcr.io/danny-avila/librechat:latest` | 3007 | `OPENAI_BASE_URL=http://host.docker.internal:3005/v1`, `OPENAI_MODELS=lia-local` |
 
 ### Runtime Configuration
 
@@ -192,10 +192,10 @@ Fichier: [`runtime/host-runtime-config.json`](runtime/host-runtime-config.json:1
 
 | Service | URL | Rôle |
 |---------|-----|------|
-| Model Loader | http://localhost:3002 | Import GGUF, métadonnées, catalogue, proxy OpenAI |
-| AnythingLLM | http://localhost:3001 | Interface de chat principale |
-| Open WebUI | http://localhost:3003 | Interface de chat alternative |
-| LibreChat | http://localhost:3004 | Frontend OpenAI-compatible |
+| Model Loader | http://localhost:3005 | Import GGUF, métadonnées, catalogue, proxy OpenAI |
+| AnythingLLM | http://localhost:3006 | Interface de chat principale |
+| Open WebUI | http://localhost:3008 | Interface de chat alternative |
+| LibreChat | http://localhost:3007 | Frontend OpenAI-compatible |
 | Contrôleur hôte | http://127.0.0.1:13579 | Contrôle des processus `llama-server` |
 | `llama-server` | http://127.0.0.1:12434-12444 | Instance par modèle sur ports dynamiques |
 | GPU Metrics | http://127.0.0.1:13620 | Collecte et expose les métriques GPU (utilisation, mémoire) |
@@ -321,7 +321,7 @@ User Action (Import GGUF)
 }
 ```
 
-### Model Loader (Port 3002)
+### Model Loader (Port 3005)
 
 #### API de gestion des modèles
 
@@ -391,9 +391,9 @@ docker build -t librechat -f Dockerfiles/Dockerfile.librechat .
 
 # 2. Démarrer les services
 docker network create lia-network
-docker run -d --name anythingllm --network lia-network -p 3001:3001 mintplexlabs/anythingllm:latest
-docker run -d --name openwebui --network lia-network -p 3003:8080 ghcr.io/open-webui/open-webui:main
-docker run -d --name librechat --network lia-network -p 3004:3080 ghcr.io/danny-avila/librechat:latest
+docker run -d --name anythingllm --network lia-network -p 3006:3001 mintplexlabs/anythingllm:latest
+docker run -d --name openwebui --network lia-network -p 3008:8080 ghcr.io/open-webui/open-webui:main
+docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-avila/librechat:latest
 
 # 3. Démarrer le contrôleur
 .\controller\llama-host-controller.ps1
@@ -406,13 +406,13 @@ docker run -d --name librechat --network lia-network -p 3004:3080 ghcr.io/danny-
 .\install.ps1
 
 # Vérifier la santé du Model Loader
-Invoke-WebRequest -Uri "http://127.0.0.1:3002/health" -UseBasicParsing
+Invoke-WebRequest -Uri "http://127.0.0.1:3005/health" -UseBasicParsing
 
 # Vérifier le contrôleur
 Invoke-WebRequest -Uri "http://127.0.0.1:13579/status" -UseBasicParsing
 
 # Vérifier les modèles chargés
-Invoke-WebRequest -Uri "http://127.0.0.1:3002/api/models/status" -UseBasicParsing
+Invoke-WebRequest -Uri "http://127.0.0.1:3005/api/models/status" -UseBasicParsing
 
 # Arrêter tous les services
 docker stop $(docker ps -q)
@@ -428,10 +428,10 @@ docker rm $(docker ps -aq)
 
 Les ports sont définis dans [`scripts/lia.ps1`](scripts/lia.ps1:16-22) :
 
-- `loaderPort = 3002` - Model Loader
-- `anythingPort = 3001` - AnythingLLM
-- `openWebUiPort = 3003` - Open WebUI
-- `libreChatPort = 3004` - LibreChat
+- `loaderPort = 3005` - Model Loader
+- `anythingPort = 3006` - AnythingLLM
+- `openWebUiPort = 3008` - Open WebUI
+- `libreChatPort = 3007` - LibreChat
 - `libreChatInternalPort = 3080` - LibreChat interne
 - `controllerPort = 13579` - Contrôleur hôte
 - `llamaPort = 12434` - Base des ports llama-server
@@ -449,7 +449,7 @@ Les modèles GGUF sont stockés dans le dossier [`models/`](models/) et doivent 
 ### lia-local ne répond pas
 
 1. Vérifier la santé du contrôleur : `http://127.0.0.1:13579/status`
-2. Vérifier la santé du Model Loader : `http://127.0.0.1:3002/api/models/status`
+2. Vérifier la santé du Model Loader : `http://127.0.0.1:3005/api/models/status`
 3. Redémarrer le contrôleur via l'interface ou en relançant [`services/controller/llama-host-controller.ps1`](services/controller/llama-host-controller.ps1:1)
 
 ### LibreChat ne démarre pas

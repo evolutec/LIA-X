@@ -2,10 +2,10 @@
   "ports": {
     "controller": 13579,
     "llama": 12434,
-    "loader": 3002,
-    "anything": 3001,
-    "openWebUi": 3003,
-    "libreChat": 3004,
+    "loader": 3005,
+    "anything": 3006,
+    "openWebUi": 3008,
+    "libreChat": 3007,
     "libreChatInternal": 3080,
     "gpuMetrics": 13620
   },

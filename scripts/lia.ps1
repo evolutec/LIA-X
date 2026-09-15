@@ -46,9 +46,9 @@ function Start-ModelLoaderContainer {
         '--mount', $modelMountArg,
         '--mount', $runtimeMountArg,
         '--restart', 'unless-stopped',
-        '--health-cmd', 'curl -fsS http://localhost:3002/health > /dev/null || exit 1',
+        '--health-cmd', 'curl -fsS http://127.0.0.1:3005/health > /dev/null || exit 1',
         '--health-interval', '15s',
-        '--health-timeout', '3s',
+        '--health-timeout', '10s',
         '--health-retries', '2'
     )
 
@@ -56,7 +56,7 @@ function Start-ModelLoaderContainer {
         -ContainerName 'model-loader' `
         -ImageName $Config.docker.images.modelLoader `
         -LiaImageName $Config.docker.liaImages.modelLoader `
-        -InternalPort 3002 `
+        -InternalPort 3005 `
         -ExternalPort $Config.ports.loader `
         -NetworkName $Config.docker.network `
         -Config $Config `

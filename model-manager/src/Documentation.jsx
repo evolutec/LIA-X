@@ -55,9 +55,9 @@ docker build -t librechat -f Dockerfiles/Dockerfile.librechat .
 
 # 2. Démarrer les services
 docker network create lia-network
-docker run -d --name anythingllm --network lia-network -p 3001:3001 mintplexlabs/anythingllm:latest
-docker run -d --name openwebui --network lia-network -p 3003:8080 ghcr.io/open-webui/open-webui:main
-docker run -d --name librechat --network lia-network -p 3004:3080 ghcr.io/danny-avila/librechat:latest
+docker run -d --name anythingllm --network lia-network -p 3006:3001 mintplexlabs/anythingllm:latest
+docker run -d --name openwebui --network lia-network -p 3008:8080 ghcr.io/open-webui/open-webui:main
+docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-avila/librechat:latest
 
 # 3. Démarrer le contrôleur
 .\controller\llama-host-controller.ps1</code></pre>
@@ -84,22 +84,22 @@ docker run -d --name librechat --network lia-network -p 3004:3080 ghcr.io/danny-
                 <tbody>
                   <tr>
                     <td className="doc-table-cell"><strong>Model Loader</strong></td>
-                    <td className="doc-table-cell">http://localhost:3002</td>
+                    <td className="doc-table-cell">http://localhost:3005</td>
                     <td className="doc-table-cell">Import GGUF, métadonnées, catalogue, proxy OpenAI</td>
                   </tr>
                   <tr>
                     <td className="doc-table-cell"><strong>AnythingLLM</strong></td>
-                    <td className="doc-table-cell">http://localhost:3001</td>
+                    <td className="doc-table-cell">http://localhost:3006</td>
                     <td className="doc-table-cell">Interface de chat principale</td>
                   </tr>
                   <tr>
                     <td className="doc-table-cell"><strong>Open WebUI</strong></td>
-                    <td className="doc-table-cell">http://localhost:3003</td>
+                    <td className="doc-table-cell">http://localhost:3008</td>
                     <td className="doc-table-cell">Interface de chat alternative</td>
                   </tr>
                   <tr>
                     <td className="doc-table-cell"><strong>LibreChat</strong></td>
-                    <td className="doc-table-cell">http://localhost:3004</td>
+                    <td className="doc-table-cell">http://localhost:3007</td>
                     <td className="doc-table-cell">Frontend OpenAI-compatible</td>
                   </tr>
                   <tr>
@@ -194,7 +194,7 @@ docker run -d --name librechat --network lia-network -p 3004:3080 ghcr.io/danny-
             </div>
 
             <div className="doc-section">
-              <h3 className="doc-subheading">Model Loader (port 3002)</h3>
+              <h3 className="doc-subheading">Model Loader (port 3005)</h3>
               <p className="doc-note">Serveur Node.js avec proxy OpenAI-compatible et API de gestion des modèles.</p>
 
               <h4 className="doc-subheading">API de gestion des modèles</h4>
@@ -348,10 +348,10 @@ docker run -d --name librechat --network lia-network -p 3004:3080 ghcr.io/danny-
               <h3 className="doc-subheading">Ports</h3>
               <p className="doc-note">Les ports sont définis dans <code>config.json</code> :</p>
               <ul className="doc-list">
-                <li><code>loaderPort = 3002</code> - Model Loader</li>
-                <li><code>anythingPort = 3001</code> - AnythingLLM</li>
-                <li><code>openWebUiPort = 3003</code> - Open WebUI</li>
-                <li><code>libreChatPort = 3004</code> - LibreChat</li>
+                <li><code>loaderPort = 3005</code> - Model Loader</li>
+                <li><code>anythingPort = 3006</code> - AnythingLLM</li>
+                <li><code>openWebUiPort = 3008</code> - Open WebUI</li>
+                <li><code>libreChatPort = 3007</code> - LibreChat</li>
                 <li><code>libreChatInternalPort = 3080</code> - LibreChat interne</li>
                 <li><code>controllerPort = 13579</code> - Contrôleur hôte</li>
                 <li><code>llamaPort = 12434</code> - Base des ports llama-server</li>
@@ -444,7 +444,7 @@ docker run -d --name librechat --network lia-network -p 3004:3080 ghcr.io/danny-
               <h3 className="doc-subheading">lia-local ne répond pas</h3>
               <ol className="doc-list">
                 <li>Vérifier la santé du contrôleur : <code>http://127.0.0.1:13579/status</code></li>
-                <li>Vérifier la santé du Model Loader : <code>http://127.0.0.1:3002/api/models/status</code></li>
+                <li>Vérifier la santé du Model Loader : <code>http://127.0.0.1:3005/api/models/status</code></li>
                 <li>Redémarrer le contrôleur via l'interface ou en relançant <code>services/controller/llama-host-controller.ps1</code></li>
               </ol>
             </div>

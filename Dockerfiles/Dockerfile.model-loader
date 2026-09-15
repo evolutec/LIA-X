@@ -33,7 +33,7 @@ RUN cp /app/model-manager/server.js /app/model-manager/server.cjs
 
 # Configuration
 ENV NODE_ENV=production
-ENV MODEL_MANAGER_PORT=3002
+ENV MODEL_MANAGER_PORT=3005
 ENV MODEL_STORAGE_DIR=/models
 ENV PROXY_MODEL_ID=lia-local
 ENV CONTROLLER_PORT=13579
@@ -41,12 +41,12 @@ ENV LLAMA_PORT=12434
 ENV METRICS_HOST_URL=http://host.docker.internal:13610
 ENV DOCKER_INTERNAL=true
 
-EXPOSE 3002
+EXPOSE 3005
 EXPOSE 13579
 EXPOSE 12434
 
-HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:3002/health > /dev/null || exit 1
+HEALTHCHECK --interval=15s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:3005/health > /dev/null || exit 1
 
 # Start command
 CMD ["node", "/app/model-manager/server.cjs"]
