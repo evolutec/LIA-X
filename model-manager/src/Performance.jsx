@@ -169,7 +169,7 @@ const fetchPerformance = async (isInitial = false) => {
 
   useEffect(() => {
     fetchPerformance(true);
-    const interval = window.setInterval(() => fetchPerformance(false), 500);
+    const interval = window.setInterval(() => fetchPerformance(false), 1000);
     return () => window.clearInterval(interval);
   }, []);
 

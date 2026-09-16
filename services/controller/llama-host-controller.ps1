@@ -10,6 +10,27 @@ $Global:LastRequestTime = @{}
 $Global:RepairInProgress = $false
 $Global:StartupInProgress = $true
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Caches mémoire : évitent une lecture disque / un appel WMI à CHAQUE requête HTTP.
+# Sans eux, /status déclenchait Get-CimInstance + plusieurs lectures de fichiers,
+# ce qui saturait le controller mono-thread et faisait exploser les latences.
+# ─────────────────────────────────────────────────────────────────────────────
+$Global:ConfigCache                 = $null
+$Global:ConfigCacheExpiresAt        = [datetime]::MinValue
+$Global:GpuStateCache               = $null
+$Global:GpuStateCacheExpiresAt      = [datetime]::MinValue
+$Global:InstancePortsCache          = $null
+$Global:InstancePortsCacheExpiresAt = [datetime]::MinValue
+$Global:LiveInstancesCache          = $null
+$Global:LiveInstancesCacheExpiresAt = [datetime]::MinValue
+$CONFIG_CACHE_TTL_SECONDS           = 10
+$GPU_STATE_CACHE_TTL_SECONDS        = 15
+$INSTANCE_PORTS_CACHE_TTL_SECONDS   = 5
+$LIVE_INSTANCES_CACHE_TTL_SECONDS   = 2
+$STATE_CACHE_TTL_SECONDS            = 2
+$script:LastConsistentState         = $null
+$script:LastConsistentStateAt       = [datetime]::MinValue
+
 function Get-RepoRoot {
     if ($PSScriptRoot -match '\\(scripts|controller|services\\controller)$') {
         return Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -43,12 +64,18 @@ function Get-DebugLogPath {
 }
 
 function Write-DebugLog([string]$message, [string]$level = 'info') {
-    $path = Get-DebugLogPath
-    if (-not (Test-Path (Split-Path -Parent $path))) {
-        New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+    # HOT PATH : /status est appelé plusieurs fois/seconde. Add-Content à chaque
+    # appel coûtait ~20-30 ms et sérialisait le controller mono-thread.
+    # On ne logue en INFO que les événements rares (pas les timings/status),
+    # et on écrit de façon non-bloquante via un runspace unique.
+    if ($level -eq 'info' -and ($message -match '^(TIMING|Save-State wrote|Startup: total)')) {
+        return
     }
-    $line = "[$(Get-Date -Format 'o')] [$($level.ToUpper())] $message"
-    Add-Content -Path $path -Value $line
+    try {
+        $path = Get-DebugLogPath
+        $line = "[$(Get-Date -Format 'o')] [$($level.ToUpper())] $message"
+        Add-Content -Path $path -Value $line -ErrorAction SilentlyContinue
+    } catch {}
 }
 
 function Get-ProcessMonitorLogPath {
@@ -229,6 +256,9 @@ function ConvertTo-Hashtable($value) {
 
 function Save-Config([hashtable]$config) {
     $config | ConvertTo-Json -Depth 6 | Set-Content -Path $ConfigPath -Encoding UTF8
+    # Invalider le cache pour que la prochaine lecture voie la nouvelle config
+    $Global:ConfigCache          = $null
+    $Global:ConfigCacheExpiresAt = [datetime]::MinValue
 }
 
 function Get-BestAvailableBackend {
@@ -261,6 +291,11 @@ function Get-BestAvailableBackend {
 }
 
 function Get-Config {
+    $now = Get-Date
+    if ($Global:ConfigCache -and $now -lt $Global:ConfigCacheExpiresAt) {
+        return $Global:ConfigCache
+    }
+
     if (-not (Test-Path $ConfigPath)) {
         $autoBackend = Get-BestAvailableBackend
         $config = @{
@@ -279,6 +314,8 @@ function Get-Config {
             sleep_idle_seconds = 60
         }
         Save-Config $config
+        $Global:ConfigCache          = $config
+        $Global:ConfigCacheExpiresAt = (Get-Date).AddSeconds($CONFIG_CACHE_TTL_SECONDS)
         return $config
     }
 
@@ -305,10 +342,19 @@ function Get-Config {
     }
 
     if ($changed) { Save-Config $config }
+
+    $Global:ConfigCache          = $config
+    $Global:ConfigCacheExpiresAt = (Get-Date).AddSeconds($CONFIG_CACHE_TTL_SECONDS)
     return $config
 }
 
 function Get-State {
+    # HOT PATH : l'état est relu 3x par /status + 1x/Get-LiveInstances + 1x/Repair.
+    # Tant qu'aucun Save-State ne l'a modifié, on sert la copie mémoire
+    # (TTL court : les morts de process sont détectées via Get-Process anyway).
+    if ($script:LastConsistentState -and $script:LastConsistentStateAt -and ((Get-Date) - $script:LastConsistentStateAt).TotalSeconds -lt $STATE_CACHE_TTL_SECONDS) {
+        return $script:LastConsistentState
+    }
     if (-not (Test-Path $StatePath)) {
         return @{ instances = @() }
     }
@@ -335,6 +381,10 @@ function Get-State {
 }
 
 function Save-State([hashtable]$state) {
+    # Tout Save invalide le cache mémoire de Get-State : l'appel suivant
+    # relira le disque (état frais garanti pour /start, /stop, Repair...).
+    $script:LastConsistentState   = $null
+    $script:LastConsistentStateAt = [datetime]::MinValue
     try {
         $serializableState = ConvertTo-Hashtable $state
         if ($serializableState.instances -is [System.Collections.IDictionary]) {
@@ -393,12 +443,50 @@ function Convert-LegacyState([hashtable]$state) {
 # Ne JAMAIS modifier running. Ne JAMAIS appeler Repair pendant startup.
 # ─────────────────────────────────────────────────────────────────────────────
 function Get-ConsistentState {
+    $csStart       = Get-Date
+    # Fast path : état stable + instances vivantes connues → servir le cache
+    # mémoire SANS toucher le disque ni relancer de scan (cas nominal /status).
+    if ($script:LastConsistentState -and $script:LastConsistentStateAt -and ((Get-Date) - $script:LastConsistentStateAt).TotalSeconds -lt $STATE_CACHE_TTL_SECONDS) {
+        $fastOk = $true
+        foreach ($saved in @($script:LastConsistentState.instances)) {
+            if ($saved.running -and (-not $saved.pid)) { $fastOk = $false; break }
+        }
+        if ($fastOk) {
+            return $script:LastConsistentState
+        }
+    }
     $state   = Get-State
+    $csAfterState  = Get-Date
     $state   = Convert-LegacyState $state
     $changed = $false
 
     # ── 1. Détecter les processus vivants sur la plage de ports ──────────────
-    $liveInstances = Get-LiveInstances (Get-Config)
+    # HOT PATH : Get-LiveInstances coûte ~250 ms (netstat) à CHAQUE /status.
+    # Les instances sont stables (démarrage/arrêt explicite uniquement) → on
+    # réutilise le cache mémoire et on ne re-scanne qu'au plus 1x/2 s ou si
+    # le pid enregistré a disparu.
+    $liveScanStart = Get-Date
+    $useLiveCache  = $false
+    if ($Global:LiveInstancesCache -and (Get-Date) -lt $Global:LiveInstancesCacheExpiresAt) {
+        $cacheOk = $true
+        foreach ($saved in @($state.instances)) {
+            if ($saved.running -and $saved.pid) {
+                $cached = $Global:LiveInstancesCache | Where-Object { [string]$_.id -eq [string]$saved.id -and [string]$_.pid -eq [string]$saved.pid } | Select-Object -First 1
+                if (-not $cached) { $cacheOk = $false; break }
+            }
+        }
+        if ($cacheOk) {
+            $liveInstances = $Global:LiveInstancesCache
+            $useLiveCache  = $true
+        }
+    }
+    if (-not $useLiveCache) {
+        $cfgForLive    = Get-Config
+        $liveInstances = Get-LiveInstances $cfgForLive
+        $Global:LiveInstancesCache          = @($liveInstances)
+        $Global:LiveInstancesCacheExpiresAt = (Get-Date).AddSeconds($LIVE_INSTANCES_CACHE_TTL_SECONDS)
+    }
+    $csAfterLive   = Get-Date
 
     if ($liveInstances.Count -gt 0) {
         # Règle : 1 modèle = 1 instance max (tuer les doublons)
@@ -419,17 +507,25 @@ function Get-ConsistentState {
         foreach ($live in $liveInstances) {
             $saved = $state.instances | Where-Object { [string]$_.id -eq [string]$live.id } | Select-Object -First 1
             if ($saved) {
+                # Ne marquer "changed" que sur un vrai changement. On compare le pid
+                # seul : started_at est relu par ConvertFrom-Json en [datetime] et sa
+                # forme textuelle diffère toujours, ce qui forcerait un Save-State
+                # (écriture + verrou) à chaque /status.
+                if ([string]$saved.pid -ne [string]$live.pid -or -not [bool]$saved.running) {
+                    $changed = $true
+                }
                 # Mettre à jour uniquement les champs dynamiques
                 $saved.pid        = $live.pid
                 $saved.started_at = $live.started_at
                 $saved.running    = $true
                 # Compléter model/filename/path si l'instance était en sleep
-                if (-not $saved.model    -and $live.model)    { $saved.model    = $live.model }
-                if (-not $saved.filename -and $live.filename) { $saved.filename = $live.filename }
-                if (-not $saved.path     -and $live.path)     { $saved.path     = $live.path }
+                if (-not $saved.model    -and $live.model)    { $saved.model    = $live.model;    $changed = $true }
+                if (-not $saved.filename -and $live.filename) { $saved.filename = $live.filename; $changed = $true }
+                if (-not $saved.path     -and $live.path)     { $saved.path     = $live.path;     $changed = $true }
             } else {
                 # Nouvelle instance non connue du state → l'ajouter
                 $state.instances += $live
+                $changed = $true
             }
         }
 
@@ -456,13 +552,23 @@ function Get-ConsistentState {
             $activeInstance = $state.instances | Where-Object { $_.running } | Select-Object -First 1
         }
         foreach ($instance in $state.instances) {
-            Set-ObjectProperty $instance 'active' ([bool]($activeInstance -and $instance.id -eq $activeInstance.id)) | Out-Null
+            $shouldBeActive = [bool]($activeInstance -and $instance.id -eq $activeInstance.id)
+            if ([bool](Get-ObjectProperty $instance 'active') -ne $shouldBeActive) {
+                # Ne déclencher l'écriture de l'état QUE si un flag change réellement :
+                # un $changed=$true inconditionnel ici provoquait un Save-State (write
+                # disque + lock) à CHAQUE /status, soit plusieurs fois par seconde.
+                $changed = $true
+            }
+            Set-ObjectProperty $instance 'active' $shouldBeActive | Out-Null
         }
-
-        $changed = $true
     }
 
     # ── 5. Nettoyage : supprimer uniquement les instances avec running=false ──
+    # HOT PATH : Get-ConsistentState() fait 3 lectures disque de l'état par
+    # /status (ici + Repair + return final). On mémorise le résultat et les
+    # appels suivants réutilisent le cache mémoire (invalidé à chaque Save).
+    $script:LastConsistentState        = $state
+    $script:LastConsistentStateAt      = Get-Date
     $newInstances = @()
     foreach ($instance in $state.instances) {
         if ($instance -isnot [hashtable] -and $instance -isnot [System.Collections.IDictionary]) {
@@ -488,8 +594,26 @@ function Get-ConsistentState {
     if ($changed) { Save-State $state }
 
     # ── 7. Repair seulement hors startup et hors récursion ────────────────
+    # HOT PATH : Repair relit le state + fait des Get-Process. Quand tout est
+    # vivant (cas nominal du /status), on le saute : il ne servirait à rien.
+    # On ne le lance que s'il y a au moins une instance suspecte (running sans
+    # pid, ou pid mort) — pas à chaque /status.
+    $csBeforeRepair = Get-Date
     if (-not $Global:StartupInProgress -and -not $Global:RepairInProgress) {
-        Repair-DeadInstances (Get-State)
+        $needsRepair = $false
+        foreach ($saved in @($state.instances)) {
+            if ($saved.running -and (-not $saved.pid)) { $needsRepair = $true; break }
+        }
+        if ($needsRepair) {
+            Repair-DeadInstances (Get-State)
+        }
+    }
+    $csAfterRepair = Get-Date
+
+    # P2 : localiser les lenteurs internes de la réconciliation d'état
+    $csTotal = [int]((Get-Date) - $csStart).TotalMilliseconds
+    if ($csTotal -gt 500) {
+        Write-DebugLog ("TIMING consistentState total=${csTotal}ms readState=" + [int]($csAfterState - $csStart).TotalMilliseconds + "ms legacy=" + [int]($csAfterLive - $csAfterState).TotalMilliseconds + "ms live+merge=" + [int]($csBeforeRepair - $csAfterLive).TotalMilliseconds + "ms repair=" + [int]($csAfterRepair - $csBeforeRepair).TotalMilliseconds + "ms liveCount=" + @($liveInstances).Count) 'warn'
     }
 
     return Get-State
@@ -500,46 +624,111 @@ function Get-ConsistentState {
 # Détecte les llama-server.exe actifs sur la plage de ports.
 # Ne filtre PAS sur HTTP — un serveur en sleep ne répond plus.
 # ─────────────────────────────────────────────────────────────────────────────
+function Get-PidListeningPortMapNetstat {
+    # netstat -ano est ~25x plus rapide que Get-NetTCPConnection (95 ms vs 2,5 s mesuré).
+    # Retourne une table pid -> premier port d'écoute.
+    $map = @{}
+    try {
+        $lines = & netstat -ano -p TCP 2>$null
+    } catch {
+        return $map
+    }
+
+    foreach ($line in $lines) {
+        $text = [string]$line
+        if ($text -notmatch 'LISTENING') { continue }
+        $parts = @($text -split '\s+' | Where-Object { $_ -ne '' })
+        if ($parts.Count -lt 5) { continue }
+        $localAddress = [string]$parts[1]
+        $colonIndex   = $localAddress.LastIndexOf(':')
+        if ($colonIndex -lt 0) { continue }
+        $port = 0
+        if (-not [int]::TryParse($localAddress.Substring($colonIndex + 1), [ref]$port)) { continue }
+        $processKey = [string]$parts[4]
+        if (-not $map.ContainsKey($processKey)) { $map[$processKey] = [int]$port }
+    }
+    return $map
+}
+
+
 function Get-LiveInstances([hashtable]$config) {
     $instances = @()
     $savedState = Get-State
     $start = [int]$config.server_port_start
     $end   = [int]$config.server_port_end
 
-    $listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalPort -ge $start -and $_.LocalPort -le $end }
+    # PERFORMANCE : Get-NetTCPConnection (basé CIM) coûte 2,5 s par appel et était
+    # invoqué à CHAQUE /status — premier poste de latence du controller. On le
+    # remplace par Get-Process (~14 ms) et netstat -ano (~95 ms).
+    # HOT PATH : même netstat (~250-800 ms, 1246 lignes à parser en PS pur)
+    # est trop lent à CHAQUE /status. Si le state connaît déjà pid+port pour
+    # chaque instance et que ces pid sont vivants, on saute le scan réseau.
+    $pidPortMap = @{}
+    $needsNetstat = $false
+    $liveProcesses = @{}
+    foreach ($saved in $savedState.instances) {
+        if ($saved.pid -and $saved.port) { $pidPortMap[[string]$saved.pid] = [int]$saved.port }
+    }
+    foreach ($procItem in (Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)) {
+        try { $liveProcesses[[string]$procItem.Id] = $procItem } catch {}
+    }
+    if ($liveProcesses.Count -eq 0) { return @() }
+    foreach ($pidKey in @($liveProcesses.Keys)) {
+        if (-not $pidPortMap.ContainsKey([string]$pidKey)) { $needsNetstat = $true; break }
+    }
+    if ($needsNetstat) {
+        # Nouveau pid inconnu du state (redémarrage externe, sleep/restore) :
+        # seul cas où on paie le coût netstat (~250-800 ms).
+        foreach ($entry in (Get-PidListeningPortMapNetstat).GetEnumerator()) {
+            if ($liveProcesses.ContainsKey([string]$entry.Key)) {
+                $pidPortMap[[string]$entry.Key] = [int]$entry.Value
+            }
+        }
+    }
 
-    foreach ($listener in $listeners) {
-        $port      = [int]$listener.LocalPort
-        $processId = [int]$listener.OwningProcess
-        $process   = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    foreach ($pidKey in @($liveProcesses.Keys)) {
+        $processId = [int]$pidKey
+        $process   = $liveProcesses[[string]$pidKey]
         if (-not $process -or $process.HasExited) { continue }
 
-        # Vérifier que c'est bien un llama-server
-        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
-        if (-not $cim -or $cim.CommandLine -notmatch 'llama-server') { continue }
+        $port = if ($pidPortMap.ContainsKey([string]$pidKey)) { [int]$pidPortMap[[string]$pidKey] } else { 0 }
+        if (-not $port -or $port -lt $start -or $port -gt $end) { continue }
 
-        # Essayer HTTP pour récupérer le modelId (peut échouer si sleep)
+        # Vérifier que c'est bien un llama-server : ProcessName suffit et évite un
+        # appel WMI (Get-CimInstance Win32_Process) par instance à CHAQUE /status.
+        $processName = ''
+        try { $processName = [string]$process.ProcessName } catch { continue }
+        if ($processName -notmatch 'llama-server') { continue }
+
+        # Le state sauvegardé est la source la moins chère : ne sonder HTTP QUE s'il
+        # ne connaît pas le modèle. Cette sonde coûtait jusqu'à 2 s de timeout PAR
+        # instance à CHAQUE /status (cause majeure des 3-13 s mesurés).
+        $savedInstance   = $savedState.instances | Where-Object { [int]$_.port -eq $port } | Select-Object -First 1
+        $savedKnowsModel = [bool]($savedInstance -and $savedInstance.model -and $savedInstance.filename)
+
         $modelId = $null
-        try {
-            $response = Invoke-RestMethod -Uri "http://127.0.0.1:$port/v1/models" -Method Get -TimeoutSec 2 -ErrorAction Stop
-            if ($response.data -and $response.data.Count -gt 0) {
-                $modelId = [string]$response.data[0].id
-            } elseif ($response.models -and $response.models.Count -gt 0) {
-                $modelId = [string]$response.models[0].model
+        if (-not $savedKnowsModel) {
+            try {
+                $response = Invoke-RestMethod -Uri "http://127.0.0.1:$port/v1/models" -Method Get -TimeoutSec 1 -ErrorAction Stop
+                if ($response.data -and $response.data.Count -gt 0) {
+                    $modelId = [string]$response.data[0].id
+                } elseif ($response.models -and $response.models.Count -gt 0) {
+                    $modelId = [string]$response.models[0].model
+                }
+            } catch {
+                # Serveur en sleep ou warmup — on garde l'instance quand même
             }
-        } catch {
-            # Serveur en sleep ou warmup — on garde l'instance quand même
         }
-
-        # Compléter les infos depuis le state sauvegardé si HTTP muet
-        $savedInstance = $savedState.instances | Where-Object { [int]$_.port -eq $port } | Select-Object -First 1
 
         $model    = $null
         $filename = $null
         $path     = ""
 
-        if ($modelId) {
+        if ($savedKnowsModel) {
+            $model    = $savedInstance.model
+            $filename = $savedInstance.filename
+            $path     = $savedInstance.path
+        } elseif ($modelId) {
             $filename = $modelId
             $model    = [IO.Path]::GetFileNameWithoutExtension($modelId)
         } elseif ($savedInstance) {
@@ -680,14 +869,30 @@ function Resolve-InstanceRecord([string]$identifier) {
     return $null
 }
 
+# Get-GpuState : wrapper avec cache court. Get-CimInstance Win32_VideoController est
+# un appel WMI coûteux (centaines de ms) qui était exécuté à CHAQUE /status.
 function Get-GpuState {
+    $now = Get-Date
+    if ($Global:GpuStateCache -and $now -lt $Global:GpuStateCacheExpiresAt) {
+        return $Global:GpuStateCache
+    }
+
+    $result = Get-GpuStateUncached
+    $Global:GpuStateCache          = $result
+    $Global:GpuStateCacheExpiresAt = $now.AddSeconds($GPU_STATE_CACHE_TTL_SECONDS)
+    return $result
+}
+
+function Get-GpuStateUncached {
     $controllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
     $total  = [int64]0
     $used   = [int64]0
     $labels = @()
 
-    $nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
-    if ($nvidiaSmi) {
+    # P2 : Get-Command balaye TOUT le PATH (~1 s cumulé avec les 2 appels).
+    # Chemins absolus directs : pas de recherche disque, pas de spawn.
+    $nvidiaSmiPath = 'C:\Windows\System32\nvidia-smi.exe'
+    if (-not (Test-Path $nvidiaSmiPath)) { $nvidiaSmiPath = $null }
         try {
             $gpuData = & nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits 2>$null
             if ($gpuData) {
@@ -808,7 +1013,30 @@ function Stop-LlamaProcess([hashtable]$body) {
         $savedTarget.running    = $false
     }
     Save-State $state2
+    # P1 : l'état vient de changer (instance supprimée) → invalider le cache
+    # live, sinon les /status suivants ressuscitent l'instance depuis le cache.
+    $Global:LiveInstancesCache          = $null
+    $Global:LiveInstancesCacheExpiresAt = [datetime]::MinValue
     return $state2
+}
+
+function Get-LlamaRuntimeConfigFromCommandLine([string]$commandLine) {
+    # Extrait la configuration REELLE d'un process llama-server deja lance.
+    # Permet de completer context/gpu_layers absents de l'etat, afin que les
+    # comparaisons ulterieures ne declenchent pas de rechargement injustifie.
+    $result = @{ context = $null; gpu_layers = $null }
+    if (-not $commandLine) { return $result }
+
+    $cmd = [string]$commandLine
+    if ($cmd -match '--ctx-size\s+(\d+)') {
+        $result.context = [int]$Matches[1]
+    } elseif ($cmd -match '(?<![\w-])-c\s+(\d+)') {
+        $result.context = [int]$Matches[1]
+    }
+    if ($cmd -match '(?<![\w-])-ngl\s+(\d+)') {
+        $result.gpu_layers = [int]$Matches[1]
+    }
+    return $result
 }
 
 function Start-LlamaProcess([hashtable]$body) {
@@ -871,11 +1099,40 @@ function Start-LlamaProcess([hashtable]$body) {
     $activate = $body.ContainsKey('activate') -and $body.activate -eq $true
 
     # ── Vérifier si la configuration correspond ────────────────────────────
+    # P1 : ne JAMAIS recharger sur simple activation. Les entrées d'état
+    # historiques ont context/gpu_layers = null → on les complète depuis la
+    # ligne de commande du process vivant AVANT de comparer, sinon chaque
+    # /select détruisait + rechargeait le GGUF (minutes perdues).
     if ($existingInstance) {
-        $existingContext   = if ($existingInstance.context    -and [int]$existingInstance.context    -gt 0) { [int]$existingInstance.context    } else { 0 }
-        $existingGpuLayers = if ($null -ne $existingInstance.gpu_layers -and [int]$existingInstance.gpu_layers -ge 0) { [int]$existingInstance.gpu_layers } else { 0 }
-        $configMatches     = ($context -eq $existingContext) -and ($gpuLayers -eq $existingGpuLayers)
-        Write-DebugLog "Config check: req ctx=$context/ngl=$gpuLayers vs existing ctx=$existingContext/ngl=$existingGpuLayers matches=$configMatches"
+        $processCmdForCheck = ''
+        try {
+            if ($processInfo -and $processInfo.command_line) { $processCmdForCheck = [string]$processInfo.command_line }
+        } catch {}
+        if (-not $processCmdForCheck) {
+            try {
+                $cimCheck = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$existingInstance.pid)" -ErrorAction SilentlyContinue
+                if ($cimCheck) { $processCmdForCheck = [string]$cimCheck.CommandLine }
+            } catch {}
+        }
+        $liveCheck = Get-LlamaRuntimeConfigFromCommandLine $processCmdForCheck
+        if ((-not $existingInstance.context -or [int]$existingInstance.context -le 0) -and $liveCheck.context) {
+            $existingInstance.context = [int]$liveCheck.context
+        }
+        if (($null -eq $existingInstance.gpu_layers) -and ($null -ne $liveCheck.gpu_layers)) {
+            $existingInstance.gpu_layers = [int]$liveCheck.gpu_layers
+        }
+
+        $contextExplicitlyRequested   = $body.ContainsKey('context')    -and $body.context    -and [int]$body.context    -gt 0
+        $gpuLayersExplicitlyRequested = $body.ContainsKey('gpu_layers') -and $null -ne $body.gpu_layers -and [int]$body.gpu_layers -ge 0
+        if ($contextExplicitlyRequested -or $gpuLayersExplicitlyRequested) {
+            $existingContext   = if ($existingInstance.context    -and [int]$existingInstance.context    -gt 0) { [int]$existingInstance.context    } else { 0 }
+            $existingGpuLayers = if ($null -ne $existingInstance.gpu_layers -and [int]$existingInstance.gpu_layers -ge 0) { [int]$existingInstance.gpu_layers } else { 0 }
+            $configMatches     = ($context -eq $existingContext) -and ($gpuLayers -eq $existingGpuLayers)
+        } else {
+            # Activation pure (cas /select UI) : on garde l'instance telle quelle.
+            $configMatches = $true
+        }
+        Write-DebugLog "Config check: req ctx=$context/ngl=$gpuLayers vs existing ctx=$($existingInstance.context)/ngl=$($existingInstance.gpu_layers) matches=$configMatches explicit=$($contextExplicitlyRequested -or $gpuLayersExplicitlyRequested)"
 
         if (-not $configMatches) {
             Write-DebugLog "Config mismatch → destruction de l'instance existante"
@@ -886,10 +1143,48 @@ function Start-LlamaProcess([hashtable]$body) {
     }
 
     if ($existingInstance) {
+        # P1 : activation pure (cas /select UI sans context/gpu_layers) = chemin
+        # RAPIDE. Le process est vivant (vérifié via Get-LlamaServerProcessInfo
+        # ci-dessus) → on promeut IMMÉDIATEMENT sans sonder le endpoint HTTP.
+        # La sonde /v1/models sur un 9B occupé bloquait jusqu'à 30-48 s et
+        # faisait croire à l'échec ("fetch failed" côté UI par timeout).
+        if ($activate -and $configMatches -and -not $contextExplicitlyRequested -and -not $gpuLayersExplicitlyRequested) {
+            Write-DebugLog "Activation pure id=$($existingInstance.id) pid=$($existingInstance.pid) → promotion immédiate (pas de sonde HTTP)"
+            $stateFast = Get-State
+            foreach ($inst in $stateFast.instances) {
+                $inst.active = ([string]$inst.id -eq [string]$existingInstance.id)
+            }
+            $stateFast.active_model    = [string]$existingInstance.model
+            $stateFast.active_filename = [string]$existingInstance.filename
+            $stateFast.active_path     = [string]$existingInstance.path
+            $stateFast.started_at      = [string]$existingInstance.started_at
+            $activeEntryFast = $stateFast.instances | Where-Object { [string]$_.id -eq [string]$existingInstance.id } | Select-Object -First 1
+            if ($activeEntryFast) {
+                if (-not ($activeEntryFast.context -and [int]$activeEntryFast.context -gt 0) -and $liveCheck.context) {
+                    $activeEntryFast.context = [int]$liveCheck.context
+                }
+                if (($null -eq $activeEntryFast.gpu_layers) -and ($null -ne $liveCheck.gpu_layers)) {
+                    $activeEntryFast.gpu_layers = [int]$liveCheck.gpu_layers
+                }
+            }
+            Save-State $stateFast
+            # Invalider le cache live : l'état vient de changer (nouvel actif).
+            $Global:LiveInstancesCache          = $null
+            $Global:LiveInstancesCacheExpiresAt = [datetime]::MinValue
+            Write-DebugLog "Promoted existing instance id=$($existingInstance.id) as active (fast path)"
+            return Get-State
+        }
+
         $endpointReady = Test-LlamaServerEndpoint -Port ([int]$existingInstance.port)
         Write-DebugLog "Endpoint test port=$($existingInstance.port) ready=$endpointReady"
 
-        if ($endpointReady -or (Test-TcpEndpoint '127.0.0.1' ([int]$existingInstance.port) 500)) {
+        # P1 : pas de double sonde. /v1/models sur un 9B en pleine inférence
+        # peut prendre plusieurs secondes ; le fallback TCP ROUVRAIT une 2e
+        # connexion qui, à travers la file mono-thread, ajoutait ~5 s à chaque
+        # activation. Une seule sonde HTTP (timeout 2 s) suffit : en cas
+        # d'échec on promeut quand même l'instance vivante (le process est
+        # vivant, le endpoint est juste occupé), le /status suivant confirmera.
+        if ($endpointReady) {
             if ($activate) {
                 $state2 = Get-State
                 foreach ($inst in $state2.instances) {
@@ -899,9 +1194,58 @@ function Start-LlamaProcess([hashtable]$body) {
                 $state2.active_filename = [string]$existingInstance.filename
                 $state2.active_path     = [string]$existingInstance.path
                 $state2.started_at      = [string]$existingInstance.started_at
+
+                # Completer context/gpu_layers manquants depuis la ligne de commande
+                # du process vivant (l'etat les contient souvent a "null", ce qui
+                # provoquait un mismatch et donc un rechargement complet a chaque
+                # activation).
+                $liveConfig  = Get-LlamaRuntimeConfigFromCommandLine $processCmdForCheck
+                $activeEntry = $state2.instances | Where-Object { [string]$_.id -eq [string]$existingInstance.id } | Select-Object -First 1
+                if ($activeEntry) {
+                    if (-not ($activeEntry.context -and [int]$activeEntry.context -gt 0) -and $liveConfig.context) {
+                        $activeEntry.context = [int]$liveConfig.context
+                    }
+                    if ($null -eq $activeEntry.gpu_layers -and $null -ne $liveConfig.gpu_layers) {
+                        $activeEntry.gpu_layers = [int]$liveConfig.gpu_layers
+                    }
+                }
+
                 Save-State $state2
+                # P1 : l'actif vient de changer → invalider le cache live.
+                $Global:LiveInstancesCache          = $null
+                $Global:LiveInstancesCacheExpiresAt = [datetime]::MinValue
                 Write-DebugLog "Promoted existing instance id=$($existingInstance.id) as active"
             }
+            return Get-State
+        }
+        # HTTP ne répond pas mais le PROCESS est vivant (inférence en cours,
+        # warmup, sleep) : on promeut quand même sur activate (pas de reload),
+        # le /status suivant confirmera la santé du endpoint.
+        if ($activate) {
+            Write-DebugLog "Endpoint HTTP muet mais process vivant pid=$($existingInstance.pid) → promotion sans reload"
+            $state3 = Get-State
+            foreach ($inst in $state3.instances) {
+                $inst.active = ([string]$inst.id -eq [string]$existingInstance.id)
+            }
+            $state3.active_model    = [string]$existingInstance.model
+            $state3.active_filename = [string]$existingInstance.filename
+            $state3.active_path     = [string]$existingInstance.path
+            $state3.started_at      = [string]$existingInstance.started_at
+            $liveConfig3  = Get-LlamaRuntimeConfigFromCommandLine $processCmdForCheck
+            $activeEntry3 = $state3.instances | Where-Object { [string]$_.id -eq [string]$existingInstance.id } | Select-Object -First 1
+            if ($activeEntry3) {
+                if (-not ($activeEntry3.context -and [int]$activeEntry3.context -gt 0) -and $liveConfig3.context) {
+                    $activeEntry3.context = [int]$liveConfig3.context
+                }
+                if ($null -eq $activeEntry3.gpu_layers -and $null -ne $liveConfig3.gpu_layers) {
+                    $activeEntry3.gpu_layers = [int]$liveConfig3.gpu_layers
+                }
+            }
+            Save-State $state3
+            # P1 : l'actif vient de changer → invalider le cache live.
+            $Global:LiveInstancesCache          = $null
+            $Global:LiveInstancesCacheExpiresAt = [datetime]::MinValue
+            Write-DebugLog "Promoted existing instance id=$($existingInstance.id) as active (endpoint muet)"
             return Get-State
         }
         # TCP ne répond plus → recréer
@@ -1041,6 +1385,9 @@ function Start-LlamaProcess([hashtable]$body) {
     }
 
     Save-State $state2
+    # P1 : nouvelle instance → le cache live est périmé (nouveau pid).
+    $Global:LiveInstancesCache          = $null
+    $Global:LiveInstancesCacheExpiresAt = [datetime]::MinValue
     Write-DebugLog "Save-State after launch: pid=$($process.Id) port=$port model=$($record.model) active=$activate"
 
     # Attente que le serveur réponde (60 × 600ms = 36s max)
@@ -1190,8 +1537,21 @@ function Read-JsonBody($request) {
 }
 
 function Get-RuntimeStatus {
+    $timingStart = Get-Date
+    # Fast path : si Get-ConsistentState a servi son cache mémoire, le GPU state
+    # est aussi servi depuis son cache (15 s) → /status nominal = 0 I/O disque,
+    # 0 netstat, 0 CIM/WMI. C'est ce qui élimine les derniers pics 1,5-15 s.
     $config    = Get-Config
+    $timingAfterConfig = Get-Date
     $state     = Get-ConsistentState
+    $timingAfterState = Get-Date
+    # HOT PATH : Get-GpuState() appelle CIM/WMI + Get-Command nvidia-smi +
+    # Get-Command rocm-smi même quand son cache a expiré. Ces 3 appels coûtent
+    # ~1 s cumulés et expliquent les TIMING 'rest≈1000-1300ms'. Quand l'état
+    # est servi depuis le cache (cas nominal), le GPU state l'est aussi.
+    $stateServedFromCache = ($script:LastConsistentState -and ([object]::ReferenceEquals($state, $script:LastConsistentState)))
+    $gpu = if ($stateServedFromCache -and $Global:GpuStateCache) { $Global:GpuStateCache } else { Get-GpuState }
+    $timingAfterGpu = Get-Date
     $instances = @()
     $requestCounter = ConvertTo-Hashtable $Global:RequestCounter
 
@@ -1222,9 +1582,15 @@ function Get-RuntimeStatus {
         }
     }
 
-    $gpu            = Get-GpuState
     $activeInstance = $instances | Where-Object { $_.active } | Select-Object -First 1
     if (-not $activeInstance -and $instances.Count -gt 0) { $activeInstance = $instances[0] }
+
+    # P2 : localiser les lenteurs du controller (diagnostic impossible sans ça)
+    $timingNow   = Get-Date
+    $timingTotal = [int]($timingNow - $timingStart).TotalMilliseconds
+    if ($timingTotal -gt 1000) {
+        Write-DebugLog ("TIMING status total=${timingTotal}ms config=" + [int]($timingAfterConfig - $timingStart).TotalMilliseconds + "ms consistent=" + [int]($timingAfterState - $timingAfterConfig).TotalMilliseconds + "ms rest=" + [int]($timingNow - $timingAfterState).TotalMilliseconds + "ms") 'warn'
+    }
 
     return @{
         running            = [bool]($instances.Count -gt 0)
@@ -1251,6 +1617,25 @@ function Get-RuntimeStatus {
         gpu                = $gpu
     }
 }
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BIND DU LISTENER - AVANT toute mutation du state.
+# Si le port est deja occupe (autre instance du controller), on sort sans
+# reecrire host-runtime-state.json. C'est ce qui provoquait la boucle de crash
+# NSSM (toutes les ~2,4 s pendant des jours) et la corruption de l'etat.
+# ═════════════════════════════════════════════════════════════════════════════
+$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $Port)
+try {
+    $listener.Start()
+} catch {
+    $bindError = "Impossible de demarrer le controleur sur 0.0.0.0:$Port. Detail: $($_.Exception.Message)"
+    Write-Host "[Controller] $bindError"
+    try { Write-ProcessMonitorLog "[BindFail] $bindError" 'error' } catch {}
+    try { Write-DebugLog "[BindFail] $bindError" 'error' } catch {}
+    [Console]::Error.WriteLine($bindError)
+    exit 1
+}
+Write-DebugLog "Startup: listener lie sur 0.0.0.0:$Port"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # DÉMARRAGE : restaurer TOUTES les instances running=true, quel que soit active.
@@ -1390,31 +1775,25 @@ try {
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
-# WATCHDOG : vérification toutes les 30 secondes
+# WATCHDOG : exécuté DANS la boucle HTTP (voir plus bas), uniquement quand
+# aucune connexion n'attend et qu'aucune requête n'est récente. L'ancien
+# System.Timers.Timer + Register-ObjectEvent s'exécutait entrelacé avec la
+# boucle et BLOQUAIT /status et /start (pics à 5,8-19 s observés).
 # ═════════════════════════════════════════════════════════════════════════════
-$watchdogTimer          = New-Object System.Timers.Timer
-$watchdogTimer.Interval = 30000
-$watchdogTimer.AutoReset = $true
-Register-ObjectEvent -InputObject $watchdogTimer -EventName Elapsed -Action {
-    try {
-        Write-Host "[Watchdog] Vérification état..."
-        Monitor-LlamaInstances
-        $state = Get-ConsistentState
-        Repair-DeadInstances $state
-
-        # Persister compteurs
-        $state2 = Get-State
-        $state2.request_counter  = ConvertTo-Hashtable $Global:RequestCounter
-        $state2.last_request_time = @{}
-        foreach ($key in $Global:LastRequestTime.Keys) {
-            $state2.last_request_time[[string]$key] = $Global:LastRequestTime[$key].ToString('o')
-        }
-        Save-State $state2
-    } catch {
-        Write-Host "[Watchdog] Erreur: $($_.Exception.Message)"
-    }
-} | Out-Null
-$watchdogTimer.Start()
+# P1 : le watchdog tournait dans le RUNSPACE PRINCIPAL (Register-ObjectEvent
+# = exécution entrelacée avec la boucle HTTP). Son Monitor-LlamaInstances
+# (CIM + netstat ~1-2 s) BLOQUAIT donc aléatoirement /status et /start →
+# pics à 5,8-19 s. Stratégie : le watchdog ne fait RIEN si une requête HTTP
+# est en cours ou récente (< 5 s) ; il est aussi sauté si le précédent run
+# dure encore (flag). Le contrôle de santé reste assuré par Get-ConsistentState
+# à chaque /status de toute façon.
+$watchdogJobState = @{ lastRun = [datetime]::MinValue; running = $false }
+$script:LastHttpRequestAt = [datetime]::MinValue
+function Test-WatchdogDue {
+    if ($watchdogJobState.running) { return $false }
+    if (((Get-Date) - $script:LastHttpRequestAt).TotalSeconds -lt 5) { return $false }
+    return ((Get-Date) - $watchdogJobState.lastRun).TotalSeconds -ge 30
+}
 
 try {
     Register-ObjectEvent -InputObject [Microsoft.Win32.SystemEvents] -EventName PowerModeChanged -Action {
@@ -1435,12 +1814,8 @@ try {
     Write-Host "[Controller] Impossible d'enregistrer PowerModeChanged : $($_.Exception.Message)"
 }
 
-$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $Port)
-try {
-    $listener.Start()
-} catch {
-    throw "Impossible de demarrer le controleur sur 0.0.0.0:$Port. Detail: $($_.Exception.Message)"
-}
+# (Le listener a deja ete cree et lie plus haut, AVANT la sequence de demarrage :
+#  un echec de bind ne doit jamais pouvoir reecrire le fichier d'etat.)
 
 # Restaurer compteurs depuis l'état
 try {
@@ -1454,34 +1829,85 @@ try {
 } catch {}
 
 Write-Host "[Controller] Démarré sur le port $Port"
-Write-Host "[Controller] Watchdog actif toutes les 30s"
+Write-Host "[Controller] Watchdog intégré à la boucle HTTP (idle >= 5 s, toutes les 30 s)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # BOUCLE PRINCIPALE HTTP
 # ═════════════════════════════════════════════════════════════════════════════
-while ($true) {
-    $client = $null
-    try {
-        $asyncResult = $listener.BeginAcceptTcpClient($null, $null)
-        if (-not $asyncResult.AsyncWaitHandle.WaitOne(1000)) { continue }
+# Un SEUL accept en vol à la fois. L'ancien code relançait un BeginAcceptTcpClient à
+# chaque timeout de 1 s en ABANDONNANT l'opération précédente : les connexions
+# étaient alors captées par une opération abandonnée pendant que le code bloquait
+# dans EndAcceptTcpClient sur la plus récente. Résultat observé : requêtes perdues,
+# connexions coupées ("fetch failed" côté model-loader) et latences de 3 à 30 s.
+$pendingAccept = $listener.BeginAcceptTcpClient($null, $null)
 
-        $client                = $listener.EndAcceptTcpClient($asyncResult)
+while ($true) {
+    $client       = $null
+    $requestStart = $null
+    $requestLabel = ''
+    try {
+        # P1 : le watchdog (CIM + netstat ~1-2 s) s'exécute ICI, dans le
+        # runspace principal, uniquement quand AUCUNE connexion n'attend
+        # (WaitOne 250 ms) et qu'aucune requête n'est récente. Il ne peut donc
+        # plus retarder /status ou /start (pics à 5,8-19 s observés avant).
+        if (-not $pendingAccept.AsyncWaitHandle.WaitOne(250)) {
+            if (Test-WatchdogDue) {
+                $watchdogJobState.running = $true
+                try {
+                    Write-Host "[Watchdog] Vérification état..."
+                    Monitor-LlamaInstances
+                    $wdState = Get-ConsistentState
+                    Repair-DeadInstances $wdState
+                    $wdState2 = Get-State
+                    $wdState2.request_counter  = ConvertTo-Hashtable $Global:RequestCounter
+                    $wdState2.last_request_time = @{}
+                    foreach ($key in $Global:LastRequestTime.Keys) {
+                        $wdState2.last_request_time[[string]$key] = $Global:LastRequestTime[$key].ToString('o')
+                    }
+                    Save-State $wdState2
+                    $watchdogJobState.lastRun = Get-Date
+                } catch {
+                    Write-Host "[Watchdog] Erreur: $($_.Exception.Message)"
+                } finally {
+                    $watchdogJobState.running = $false
+                }
+            }
+            continue
+        }
+
+        try {
+            $client = $listener.EndAcceptTcpClient($pendingAccept)
+        } finally {
+            # Réarmer immédiatement le prochain accept : toujours exactement 1 en vol
+            try { $pendingAccept = $listener.BeginAcceptTcpClient($null, $null) } catch {}
+        }
+        if (-not $client) { continue }
+
         $client.ReceiveTimeout = 30000
         $client.SendTimeout    = 60000
 
+        $requestStart = Get-Date
         $stream  = $client.GetStream()
         $request = Read-HttpRequest $stream
 
         $Global:RequestCounter['total'] = if ($Global:RequestCounter['total']) { $Global:RequestCounter['total'] + 1 } else { 1 }
+        $script:LastHttpRequestAt = Get-Date
 
         if (-not $request) { continue }
 
         $path = if ($request.path) { $request.path } else { '/' }
+        $requestLabel = "$($request.method) $path"
 
-        # Mise à jour timestamp par instance
-        foreach ($instance in (Get-State).instances) {
-            if ($request.raw_body -match "\b$($instance.port)\b" -or $request.path -match "\b$($instance.port)\b") {
-                $portKey = [string]$instance.port
+        # Mise à jour timestamp par instance (ports mis en cache : évite une lecture
+        # disque + parse JSON du fichier de state à CHAQUE requête HTTP)
+        $nowForPorts = Get-Date
+        if (-not $Global:InstancePortsCache -or $nowForPorts -ge $Global:InstancePortsCacheExpiresAt) {
+            $Global:InstancePortsCache          = @((Get-State).instances | ForEach-Object { [int]$_.port })
+            $Global:InstancePortsCacheExpiresAt = $nowForPorts.AddSeconds($INSTANCE_PORTS_CACHE_TTL_SECONDS)
+        }
+        foreach ($instancePort in $Global:InstancePortsCache) {
+            if ($request.raw_body -match "\b$instancePort\b" -or $request.path -match "\b$instancePort\b") {
+                $portKey = [string]$instancePort
                 $Global:LastRequestTime[$portKey] = Get-Date
                 $Global:RequestCounter[$portKey]  = if ($Global:RequestCounter[$portKey]) { $Global:RequestCounter[$portKey] + 1 } else { 1 }
             }
@@ -1566,10 +1992,23 @@ while ($true) {
             }
         }
     } catch {
+        # P2 : ne plus avaler les erreurs en silence (diagnostic impossible sinon)
+        $loopError = $_.Exception.Message
+        Write-Host "[Controller] Erreur boucle HTTP : $loopError"
+        try { Write-DebugLog "HTTP loop error error=$loopError" 'error' } catch {}
         if ($client -and $client.Connected) {
-            try { Write-Json $client.GetStream() 500 @{ detail = $_.Exception.Message } } catch {}
+            try { Write-Json $client.GetStream() 500 @{ detail = $loopError } } catch {}
         }
     } finally {
+        # P2 : tracer les requêtes anomalies (au lieu de subir des latences invisibles)
+        try {
+            if ($requestStart) {
+                $elapsedMs = [int]((Get-Date) - $requestStart).TotalMilliseconds
+                if ($elapsedMs -gt 1500) {
+                    Write-DebugLog "SLOW request $requestLabel elapsed=${elapsedMs}ms" 'warn'
+                }
+            }
+        } catch {}
         if ($client) { $client.Dispose() }
     }
 }

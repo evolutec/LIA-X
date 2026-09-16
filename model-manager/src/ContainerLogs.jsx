@@ -109,7 +109,7 @@ function ContainerLogs() {
     let mounted = true;
     if (!mounted) return;
     fetchStatus();
-    const interval = window.setInterval(fetchStatus, 7000);
+    const interval = window.setInterval(fetchStatus, 15000);
     return () => {
       mounted = false;
       window.clearInterval(interval);

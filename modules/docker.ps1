@@ -90,9 +90,6 @@ function Start-DockerContainer {
     $args += $LiaImageName
 
     docker @args | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Démarrage $ContainerName impossible."
-    }
 
     if ($HealthCheckUrl) {
         $maxTries = $Config.timeout.httpRetries

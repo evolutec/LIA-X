@@ -31,9 +31,13 @@ const CIRCUIT_BREAKER = {
   open: false,
   failures: 0,
   lastFailure: 0,
-  resetTimeout: 1000,
-  maxFailures: 15
+  resetTimeout: 5000,
+  maxFailures: 40
 };
+
+// Endpoints NON idempotents : un retry déclencherait un second choc complet
+// (rechargement du modèle GGUF, arrêt d'instance). On ne retente JAMAIS.
+const NON_IDEMPOTENT_ENDPOINTS = new Set(['/start', '/stop', '/restart']);
 
 // Cache global pour /status
 let STATUS_CACHE = null;
@@ -696,6 +700,22 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function describeControllerError(error) {
+  const message = String(error?.message || error);
+  const cause = error?.cause;
+  if (!cause) {
+    return message;
+  }
+
+  // undici n'expose le motif réseau réel (ECONNREFUSED / ECONNRESET / timeout)
+  // que dans error.cause : sans lui, "fetch failed" est indiagnosticable.
+  const causeCode = cause.code || cause.errno || '';
+  const causeMessage = String(cause.message || cause);
+  return causeCode
+    ? `${message} (cause: ${causeCode} - ${causeMessage})`
+    : `${message} (cause: ${causeMessage})`;
+}
+
 function registerControllerFailure(detail) {
   CIRCUIT_BREAKER.failures += 1;
   CIRCUIT_BREAKER.lastFailure = Date.now();
@@ -734,7 +754,7 @@ async function controllerRequest(endpoint, options = {}) {
   const { timeout: requestTimeout, maxRetries: requestMaxRetries, retryBaseDelayMs: requestRetryBaseDelayMs, ...fetchOptions } = options;
   const maxRetries = Number.isFinite(Number(requestMaxRetries))
     ? Number(requestMaxRetries)
-    : (endpoint === '/status' ? 1 : 2);
+    : (NON_IDEMPOTENT_ENDPOINTS.has(endpoint) ? 0 : (endpoint === '/status' ? 1 : 2));
   const retryBaseDelayMs = Number.isFinite(Number(requestRetryBaseDelayMs))
     ? Number(requestRetryBaseDelayMs)
     : 300;
@@ -812,10 +832,11 @@ async function controllerRequest(endpoint, options = {}) {
         continue;
       }
 
+      const detailedError = `Controller request failed: ${describeControllerError(error)}`;
       if (!(error instanceof Error && /^Controller response \d+:/u.test(error.message))) {
-        registerControllerFailure(`Controller request failed: ${error?.message || error}`);
+        registerControllerFailure(detailedError);
       }
-      throw new Error(`Controller request failed: ${error?.message || error}`);
+      throw new Error(detailedError);
     } finally {
       clearTimeout(timeout);
     }
@@ -1998,9 +2019,31 @@ app.get('/metrics/host', async (req, res) => {
 });
 
 app.get('/health', async (req, res) => {
+  // P1 : /health est le healthcheck Docker (toutes les 15 s, timeout 10 s).
+  // Il NE DOIT PAS appeler getRuntimeStatus() (controller, ~0,5-3 s, file
+  // derrière les longues requêtes /start) : c'est ce qui rendait le conteneur
+  // "unhealthy" en permanence. On sert le cache mémoire, frais ou périmé.
   try {
-    const runtimeStatus = await getRuntimeStatus();
-    res.json({ ok: true, controller_ok: true, runtime: runtimeStatus });
+    const now = Date.now();
+    if (STATUS_CACHE) {
+      const ageMs = Math.max(0, now - (STATUS_CACHE_TTL - STATUS_CACHE_MAX_AGE));
+      return res.json({ ok: true, controller_ok: true, runtime: STATUS_CACHE, cache_age_ms: ageMs });
+    }
+    if (STATUS_INFLIGHT) {
+      const runtime = await Promise.race([
+        STATUS_INFLIGHT,
+        new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
+      ]);
+      if (runtime) {
+        return res.json({ ok: true, controller_ok: true, runtime });
+      }
+      return res.json({ ok: true, controller_ok: false, detail: 'controller busy (status in flight)', runtime: null });
+    }
+    const runtime = await Promise.race([
+      getRuntimeStatus(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('health timeout 8s')), 8000)),
+    ]);
+    res.json({ ok: true, controller_ok: true, runtime });
   } catch (error) {
     res.json({
       ok: true,
@@ -2270,8 +2313,9 @@ app.post('/api/models/load', async (req, res) => {
       method: 'POST',
       body: JSON.stringify(payload),
       timeout: CONTROLLER_START_TIMEOUT_MS,
-      maxRetries: 3,
-      retryBaseDelayMs: 500,
+      // PAS de retry : /start est non idempotent, un retry relancerait un
+      // chargement complet de GGUF par-dessus le premier (minutes perdues).
+      maxRetries: 0,
     });
     invalidateStatusCache();
     res.json({
@@ -2298,11 +2342,21 @@ app.post('/api/models/select', async (req, res) => {
     if (normalizedContext !== null) {
       payload.context = normalizedContext;
     }
+    // gpu_layers était auparavant DROPPÉ ici : le controller retombait alors sur
+    // default_gpu_layers, provoquant un mismatch et donc un rechargement complet.
+    const normalizedGpuLayers = normalizeRequestedGpuLayers(req.body?.gpu_layers);
+    if (normalizedGpuLayers !== null) {
+      payload.gpu_layers = normalizedGpuLayers;
+    }
     console.log('[model-manager] /api/models/select', { model: modelName, payload });
     await controllerRequest('/start', {
       method: 'POST',
       body: JSON.stringify(payload),
       timeout: CONTROLLER_START_TIMEOUT_MS,
+      // P1 : /select est une activation pure quand context/gpu_layers ne sont
+      // pas fournis. Un retry relancerait un chargement complet de GGUF
+      // par-dessus le premier (minutes perdues + fetch failed) → jamais.
+      maxRetries: 0,
     });
     invalidateStatusCache();
     res.json({
@@ -2323,7 +2377,15 @@ app.post('/api/models/unload', async (req, res) => {
     }
 
     console.log('[model-manager] /api/models/unload', { model: modelName });
-    await controllerRequest('/stop', { method: 'POST', body: JSON.stringify({ model: modelName }) });
+    await controllerRequest('/stop', {
+      method: 'POST',
+      body: JSON.stringify({ model: modelName }),
+      // /stop peut être en file derrière un /start long (chargement GGUF)
+      // sur le controller mono-thread → timeout 15s par défaut risqué.
+      // On donne 30s mais sans retry (non idempotent).
+      timeout: 30000,
+      maxRetries: 0,
+    });
     invalidateStatusCache();
     res.json({ model: modelName, status: 'unloaded' });
   } catch (error) {

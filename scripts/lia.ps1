@@ -53,7 +53,7 @@ function Start-ModelLoaderContainer {
     )
 
     Start-DockerContainer `
-        -ContainerName 'model-loader' `
+        -ContainerName 'lia-model-loader' `
         -ImageName $Config.docker.images.modelLoader `
         -LiaImageName $Config.docker.liaImages.modelLoader `
         -InternalPort 3005 `
@@ -98,7 +98,7 @@ function Start-AnythingLLMContainer {
     )
 
     Start-DockerContainer `
-        -ContainerName 'anythingllm' `
+        -ContainerName 'lia-anythingllm' `
         -ImageName $Config.docker.images.anythingllm `
         -LiaImageName $Config.docker.liaImages.anythingllm `
         -InternalPort 3001 `
@@ -116,7 +116,7 @@ function Start-OpenWebUiContainer {
     )
 
     Start-DockerContainer `
-        -ContainerName 'open-webui' `
+        -ContainerName 'lia-openwebui' `
         -ImageName $Config.docker.images.openWebUi `
         -LiaImageName $Config.docker.liaImages.openWebUi `
         -InternalPort 8080 `
@@ -143,7 +143,7 @@ function Start-LibreChatContainer {
     )
 
     Start-DockerContainer `
-        -ContainerName 'librechat' `
+        -ContainerName 'lia-librechat' `
         -ImageName $Config.docker.images.libreChat `
         -LiaImageName $Config.docker.liaImages.libreChat `
         -InternalPort $Config.ports.libreChatInternal `
