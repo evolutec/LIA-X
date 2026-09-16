@@ -72,6 +72,19 @@ docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-
             <p className="doc-lead">LIA-X expose plusieurs services sur le réseau local.</p>
 
             <div className="doc-section">
+              <h3 className="doc-subheading">🔗 Point de terminaison à retenir</h3>
+              <p className="doc-note">
+                Pour <strong>tous vos outils de chat</strong> (Open WebUI, AnythingLLM, LibreChat, extensions VS Code, scripts),
+                une seule adresse suffit :
+              </p>
+              <pre className="doc-code"><code>http://localhost:3005/v1</code></pre>
+              <p className="doc-note">
+                compatible API OpenAI · clé API quelconque · modèle <code>lia-local</code> = modèle principal.
+                Voir l'onglet <strong>API → Connexion rapide</strong> pour des exemples prêts à l'emploi.
+              </p>
+            </div>
+
+            <div className="doc-section">
               <h3 className="doc-subheading">Tableau des services</h3>
               <table className="doc-table">
                 <thead>
@@ -141,8 +154,52 @@ docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-
             <p className="doc-lead">LIA expose deux couches principales d'API.</p>
 
             <div className="doc-section">
+              <h3 className="doc-subheading">🔗 Connexion rapide (clients OpenAI)</h3>
+              <p className="doc-note">
+                Pour connecter n'importe quel outil compatible OpenAI (Open WebUI, AnythingLLM, LibreChat, VS Code, scripts...),
+                utilisez cette adresse :
+              </p>
+              <pre className="doc-code"><code>http://localhost:3005/v1</code></pre>
+              <p className="doc-note">
+                Clé API : <strong>aucune requise</strong> (mettre une valeur quelconque si le client l'exige, ex. <code>lia</code>).
+                Le modèle à sélectionner est <code>lia-local</code> (alias du modèle principal) ou le nom exact d'un modèle chargé.
+              </p>
+
+              <div className="doc-code-block">
+                <p className="doc-label">Exemple cURL :</p>
+                <pre className="doc-code"><code>{`curl http://localhost:3005/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "lia-local",
+    "messages": [{ "role": "user", "content": "Bonjour !" }]
+  }'`}</code></pre>
+              </div>
+
+              <div className="doc-code-block">
+                <p className="doc-label">Exemple Python (openai) :</p>
+                <pre className="doc-code"><code>{`from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:3005/v1",
+    api_key="lia"   # valeur quelconque, non vérifiée
+)
+
+resp = client.chat.completions.create(
+    model="lia-local",
+    messages=[{"role": "user", "content": "Bonjour !"}]
+)
+print(resp.choices[0].message.content)`}</code></pre>
+              </div>
+
+              <p className="doc-note">
+                💡 Le modèle principal se change à tout moment depuis la carte « Console locale » de l'accueil :
+                le proxy <code>lia-local</code> bascule instantanément, sans redémarrer vos clients.
+              </p>
+            </div>
+
+            <div className="doc-section">
               <h3 className="doc-subheading">Contrôleur hôte (port 13579)</h3>
-              <p className="doc-note">Gestion des instances <code>llama-server</code> et du cycle de vie des modèles.</p>
+              <p className="doc-note">Gestion des instances <code>llama-server</code> et du cycle de vie des modèles. Usage interne — passez par le Model Loader pour un usage normal.</p>
 
               <table className="doc-table">
                 <thead>

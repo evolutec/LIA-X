@@ -892,7 +892,7 @@ function Get-GpuStateUncached {
     # P2 : Get-Command balaye TOUT le PATH (~1 s cumulé avec les 2 appels).
     # Chemins absolus directs : pas de recherche disque, pas de spawn.
     $nvidiaSmiPath = 'C:\Windows\System32\nvidia-smi.exe'
-    if (-not (Test-Path $nvidiaSmiPath)) { $nvidiaSmiPath = $null }
+    if (Test-Path $nvidiaSmiPath) {
         try {
             $gpuData = & nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits 2>$null
             if ($gpuData) {

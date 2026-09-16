@@ -16,6 +16,10 @@ function App() {
   const [version, setVersion] = useState(null);
   const [statusMessage, setStatusMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  // Adresse de l'API OpenAI-compatible : calculée depuis l'URL de l'UI elle-même,
+  // donc toujours correcte quel que soit le port/hôte utilisé.
+  const apiBaseUrl = `${window.location.origin}/v1`;
+  const [apiCopied, setApiCopied] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
   const [controllerHealth, setControllerHealth] = useState({ ok: true, controller_ok: true, detail: '', runtime: null });
   const [controllerLoading, setControllerLoading] = useState(false);
@@ -926,6 +930,14 @@ async function handleDownloadUrl() {
             <article className="hero-route hero-route-primary"><div className="hero-route-kicker">Principal</div><h3>{activeModel || 'Aucun modèle principal'}</h3><p>{activeModel ? `Proxy lia-local diffuse le modèle principal ${activeModel}.` : 'Sélectionne un modèle chargé pour le définir comme principal.'}</p></article>
             <article className="hero-route"><div className="hero-route-kicker">Disponibles</div><h3>{availableFiles.length}</h3><p>{availableFiles.length > 0 ? 'Fichiers GGUF détectés sur disque.' : 'Aucun fichier GGUF disponible.'}</p></article>
             <article className="hero-route"><div className="hero-route-kicker">Chargés</div><h3>{loadedModels.length}</h3><p>{loadedModels.length > 0 ? 'Les modèles en mémoire sont exposés via /api/models.' : 'Aucun modèle chargé.'}</p></article>
+            <article className="hero-route hero-route-endpoint">
+              <div className="hero-route-kicker">🔌 Endpoint API (OpenAI-compatible)</div>
+              <h3><code>{apiBaseUrl}</code></h3>
+              <p>Connectez vos outils (Open WebUI, AnythingLLM, LibreChat, VS Code…) à cette adresse, avec le modèle <strong>lia-local</strong>. Aucune clé API requise.</p>
+              <button type="button" className="btn btn-reload btn-sm" onClick={() => { navigator.clipboard?.writeText(apiBaseUrl); setApiCopied(true); setTimeout(() => setApiCopied(false), 2000); }}>
+                {apiCopied ? '✓ Copié !' : '📋 Copier l\'adresse'}
+              </button>
+            </article>
           </div>
         </section>
 
