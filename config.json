@@ -7,7 +7,7 @@
     "openWebUi": 3008,
     "libreChat": 3007,
     "libreChatInternal": 3080,
-    "gpuMetrics": 13620
+    "gpuMetrics": 13621
   },
   "docker": {
     "network": "lia-network",

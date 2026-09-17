@@ -1,7 +1,14 @@
 $ErrorActionPreference = 'Stop'
 
-# Default port for the GPU metrics service
-$Port = 13620
+$Port = 13621
+$nextIsPort = $false
+foreach ($arg in $args) {
+    if ($nextIsPort) {
+        $Port = [int]$arg
+        break
+    }
+    if ($arg -eq '-Port') { $nextIsPort = $true }
+}
 
 # ============================================================
 # Collecte GPU - Windows Performance Counters (fiable)
@@ -13,6 +20,21 @@ $toolsDir = Join-Path $repoRoot 'tools'
 # ============================================================
 # FALLBACK : Compteurs Windows améliorés
 # ============================================================
+
+$fallbackPorts = @($Port, 13621, 13622, 13623, 13624, 13625)
+$resolvedPort = $null
+foreach ($candidate in $fallbackPorts) {
+    $taken = netstat -ano | Select-String ":${candidate}\s"
+    if (-not $taken) { $resolvedPort = $candidate; break }
+    if ($taken -match "\s+(\d+)\s*$") {
+        $owner = [int]$Matches[1]
+        if ($owner -eq 4) {
+            continue
+        }
+    }
+}
+if (-not $resolvedPort) { $resolvedPort = $fallbackPorts | Select-Object -First 1 }
+$Port = $resolvedPort
 
 function Get-GpuMetricsFromCounters {
     $gpuInfoList = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
@@ -206,9 +228,27 @@ $prefix = "http://${listenHost}:${port}/"
 try {
     $portCheck = netstat -ano | Select-String ":${port}\s"
     if ($portCheck) {
-        Write-Error "Le port ${port} est déjà utilisé. Veuillez spécifier un port différent avec -Port."
-        Write-Error "Processus utilisant le port : $($portCheck | Out-String)"
-        exit 1
+        $ownerText = ($portCheck | Out-String).Trim()
+        $stillSystem = $false
+        if ($ownerText -match '\s+(\d+)\s*$') {
+            $ownerPid = [int]$Matches[1]
+            if ($ownerPid -eq 4) { $stillSystem = $true }
+        }
+        if ($stillSystem) {
+            Write-Warning "Port ${port} occupé par System (PID 4) après résolution de fallback. Nouvelle tentative sur un autre port disponible..."
+            $resolved = $null
+            foreach ($candidate in @(13621,13622,13623,13624,13625)) {
+                $taken = netstat -ano | Select-String ":${candidate}\s"
+                if (-not $taken) { $resolved = $candidate; break }
+            }
+            if (-not $resolved) { $resolved = 13621 }
+            $port = $resolved
+            $prefix = "http://${listenHost}:${port}/"
+        } else {
+            Write-Error "Le port ${port} est déjà utilisé. Veuillez spécifier un port différent avec -Port."
+            Write-Error "Processus utilisant le port : $ownerText"
+            exit 1
+        }
     }
 } catch {
     Write-Warning "Impossible de vérifier l'utilisation du port : $($_.Exception.Message)"

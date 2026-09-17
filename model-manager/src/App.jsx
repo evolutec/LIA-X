@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ContainerLogs from "./ContainerLogs";
 import Performance from "./Performance";
 import Loader from "./Loader";
@@ -34,6 +34,11 @@ function App() {
   const [hardwareProfile, setHardwareProfile] = useState(null);
   const [recommendedRuntime, setRecommendedRuntime] = useState(null);
   const [showRecommendedRuntimeModal, setShowRecommendedRuntimeModal] = useState(false);
+  const [embeddingModel, setEmbeddingModel] = useState("");
+  const [embeddingModelLoading, setEmbeddingModelLoading] = useState(false);
+  // P-UX : feedback de progression pendant un chargement (parsing → spawn → warmup → prêt).
+  const [loadProgress, setLoadProgress] = useState(null);
+  const loadProgressTimerRef = useRef(null);
 
   useEffect(() => {
     refreshAllModelState();
@@ -94,6 +99,57 @@ function App() {
       throw new Error(message);
     }
     return payload;
+  }
+
+  async function waitForModelFile(expectedName, timeoutMs = 600000) {
+    const start = Date.now();
+    const expected = String(expectedName || '').trim().toLowerCase();
+    if (!expected) return null;
+
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const data = await apiFetch('/api/models/available');
+        const files = Array.isArray(data?.files) ? data.files : [];
+        const match = files.find((item) => String(item?.name || '').toLowerCase() === expected);
+        if (match) {
+          return match;
+        }
+      } catch {
+        // UI temporairement indisponible : on retente
+      }
+      await delay(2000);
+    }
+
+    return null;
+  }
+
+  async function pollDownloadProgress(expectedName, onProgress) {
+    if (!expectedName) return;
+    const key = String(expectedName).trim().toLowerCase();
+    if (!key) return;
+
+    let stopped = false;
+    const stop = () => { stopped = true; };
+
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const data = await apiFetch(`/api/models/download-progress?model=${encodeURIComponent(key)}`);
+        if (data && data.active && !stopped) {
+          onProgress(data);
+          if (!data.done) {
+            setTimeout(tick, 1000);
+          }
+        }
+      } catch {
+        if (!stopped) {
+          setTimeout(tick, 2000);
+        }
+      }
+    };
+
+    setTimeout(tick, 500);
+    return stop;
   }
 
   async function fetchControllerHealth() {
@@ -264,6 +320,7 @@ function App() {
         contextLength: normalizeContextValue(file.context_length),
         runtimeContextLength: null,
         gpuLayers: Number.isFinite(rawGpuLayers) ? rawGpuLayers : null,
+        embedding_capable: file.embedding_capable ?? false,
       });
     });
     // Pour chaque modèle chargé, fusionne les infos si déjà dans le dossier, sinon ajoute une ligne "orpheline"
@@ -282,6 +339,7 @@ function App() {
           contextLength: base.contextLength ?? itemContext ?? null,
           runtimeContextLength: itemContext ?? base.runtimeContextLength ?? null,
           gpuLayers: base.gpuLayers ?? null,
+          embedding_capable: item.embedding_capable ?? base.embedding_capable ?? false,
         });
       } else {
         fileMap.set(name, {
@@ -296,6 +354,7 @@ function App() {
           contextLength: itemContext ?? null,
           runtimeContextLength: itemContext ?? null,
           gpuLayers: null,
+          embedding_capable: item.embedding_capable ?? false,
         });
       }
     });
@@ -329,6 +388,7 @@ function App() {
         refreshAvailableFiles(silent),
         refreshLoadedModels(silent),
         refreshActiveModel(silent),
+        refreshEmbeddingModel(silent),
         refreshHardwareProfile(silent),
       ]);
       if (!silent) updateStatus('Synchronisation terminée.');
@@ -377,6 +437,16 @@ function App() {
     }
   }
 
+  async function refreshEmbeddingModel(silent = false) {
+    try {
+      const data = await apiFetch('/api/embedding-model');
+      setEmbeddingModel(data.embedding_model || '');
+    } catch (err) {
+      setEmbeddingModel('');
+      if (!silent) updateStatus(`Impossible de lire le modèle d'embedding : ${err.message}`);
+    }
+  }
+
   async function refreshModelsState(silent = false) {
     await Promise.all([refreshLoadedModels(silent), refreshActiveModel(silent)]);
   }
@@ -385,10 +455,46 @@ function App() {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  // ── Progression de chargement : polling de /api/models/load-progress ──────
+  // Pendant un load/select, le controller est occupé (chargement GGUF de
+  // plusieurs Go) : on interroge le server qui lit le state disque + sonde
+  // le port llama-server pour donner une étape temps réel à l'utilisateur.
+  const LOAD_STAGES = ['parsing', 'spawning', 'warmup', 'ready'];
+  function stopLoadProgressPolling() {
+    if (loadProgressTimerRef.current) {
+      clearInterval(loadProgressTimerRef.current);
+      loadProgressTimerRef.current = null;
+    }
+  }
+  function startLoadProgressPolling(modelName) {
+    stopLoadProgressPolling();
+    if (!modelName) return;
+    const model = String(modelName);
+    setLoadProgress({ model, stage: 'parsing', error: null });
+    const poll = async () => {
+      try {
+        const data = await apiFetch(`/api/models/load-progress?model=${encodeURIComponent(model)}`);
+        if (!data || data.model !== model) return;
+        setLoadProgress((prev) => (prev && prev.model === model ? { ...prev, ...data } : prev));
+        if (data.stage === 'ready' || data.error) {
+          stopLoadProgressPolling();
+          delay(2500).then(() => setLoadProgress((prev) => (prev?.model === model ? null : prev)));
+        }
+      } catch { /* controller occupé : on retentera au prochain tick */ }
+    };
+    poll();
+    loadProgressTimerRef.current = setInterval(poll, 1500);
+    // Sécurité : arrêt du polling après 10 min max.
+    setTimeout(() => { if (loadProgressTimerRef.current) stopLoadProgressPolling(); }, 600000);
+  }
+
   async function performAction(modelName, actionType, callback) {
     if (loading || pendingAction) return;
     setLoading(true);
     setPendingAction({ model: modelName, type: actionType });
+    if (actionType === 'chargement' || actionType === 'activation') {
+      startLoadProgressPolling(modelName);
+    }
     updateStatus(`${modelName} : ${actionType}...`);
     try {
       const result = await callback();
@@ -419,6 +525,7 @@ function App() {
       }
       return null;
     } finally {
+      stopLoadProgressPolling();
       setPendingAction(null);
       setLoading(false);
     }
@@ -523,6 +630,39 @@ function App() {
   async function handleDeleteFile(filename) {
     if (!filename || !window.confirm(`Supprimer définitivement ${filename} ?`)) return;
     return performAction(filename, 'suppression', async () => apiFetch(`/api/models/files/${encodeURIComponent(filename)}`, { method: 'DELETE' }));
+  }
+
+  async function handleSetEmbeddingModel(modelName) {
+    if (!modelName) return;
+    setEmbeddingModelLoading(true);
+    try {
+      await apiFetch('/api/embedding-model', {
+        method: 'POST',
+        body: JSON.stringify({ model: modelName }),
+      });
+      setEmbeddingModel(modelName);
+      updateStatus(`Modèle d'embedding défini : ${modelName}`);
+    } catch (err) {
+      updateStatus(`Impossible de définir le modèle d'embedding : ${err.message}`);
+    } finally {
+      setEmbeddingModelLoading(false);
+    }
+  }
+
+  async function handleUnsetEmbeddingModel() {
+    setEmbeddingModelLoading(true);
+    try {
+      await apiFetch('/api/embedding-model', {
+        method: 'POST',
+        body: JSON.stringify({ model: '' }),
+      });
+      setEmbeddingModel('');
+      updateStatus('Modèle d\'embedding désélectionné.');
+    } catch (err) {
+      updateStatus(`Impossible de désélectionner le modèle d'embedding : ${err.message}`);
+    } finally {
+      setEmbeddingModelLoading(false);
+    }
   }
 
   async function handleOpenModelDetails(modelName) {
@@ -726,29 +866,28 @@ async function handleDownloadUrl() {
     const body = ollama ? { ollama_name: ollama, name: hfModelName || undefined } : { url, name: hfModelName || undefined };
     log('download payload', body);
 
-    const xhr = new XMLHttpRequest();
+    const expectedName = String(body.name || hfModelName || '').trim() || null;
     const apiUrl = `${apiBase}/api/models/download`;
-    
+
     setLoading(true);
     setDownloadProgress(0);
     updateStatus('Téléchargement en cours...');
 
+    const xhr = new XMLHttpRequest();
     xhr.open('POST', apiUrl, true);
     xhr.setRequestHeader('Content-Type', 'application/json');
 
-    xhr.upload.addEventListener('progress', (event) => {
-      if (event.lengthComputable) {
-        const percent = Math.round((event.loaded / event.total) * 100);
-        setDownloadProgress(percent);
-        updateStatus(`Téléchargement: ${percent}%`);
-      }
-    });
+    let downloadDone = false;
+    let downloadError = null;
+    let stopPolling = null;
 
     xhr.addEventListener('load', () => {
+      downloadDone = true;
+      if (stopPolling) stopPolling();
       if (xhr.status >= 200 && xhr.status < 300) {
         const data = JSON.parse(xhr.responseText || '{}');
-        setDownloadProgress(100);
         updateStatus(`Modèle téléchargé : ${data.filename}`);
+        setDownloadProgress(100);
         delay(1500).then(() => {
           setDownloadProgress(0);
           setLoading(false);
@@ -759,6 +898,7 @@ async function handleDownloadUrl() {
         setHfModelName('');
       } else {
         const errMsg = xhr.statusText || `Erreur HTTP ${xhr.status}`;
+        downloadError = errMsg;
         updateStatus(`Échec téléchargement: ${errMsg}`);
         setDownloadProgress(0);
         setLoading(false);
@@ -766,12 +906,30 @@ async function handleDownloadUrl() {
     });
 
     xhr.addEventListener('error', () => {
+      downloadDone = true;
+      if (stopPolling) stopPolling();
+      downloadError = 'Erreur réseau téléchargement';
       updateStatus('Erreur réseau téléchargement');
       setDownloadProgress(0);
       setLoading(false);
     });
 
     xhr.send(JSON.stringify(body));
+
+    if (expectedName) {
+      stopPolling = await pollDownloadProgress(expectedName, (data) => {
+        if (downloadDone || downloadError) return;
+        const percent = data.total_bytes ? data.percent : 0;
+        setDownloadProgress(percent);
+        if (data.total_bytes) {
+          updateStatus(`Téléchargement en cours... ${formatBytes(data.received_bytes)} / ${formatBytes(data.total_bytes)} (${data.percent}%)`);
+        } else if (data.received_bytes) {
+          updateStatus(`Téléchargement en cours... ${formatBytes(data.received_bytes)}`);
+        } else {
+          updateStatus('Téléchargement en cours...');
+        }
+      });
+    }
   }
 
   async function handleDownloadAndLoadUrl() {
@@ -784,6 +942,7 @@ async function handleDownloadUrl() {
     const body = ollama ? { ollama_name: ollama, name: hfModelName || undefined } : { url, name: hfModelName || undefined };
     log('download+load payload', body);
 
+    const expectedName = String(body.name || hfModelName || '').trim() || null;
     const xhr = new XMLHttpRequest();
     const apiUrl = `${apiBase}/api/models/download`;
     
@@ -794,18 +953,17 @@ async function handleDownloadUrl() {
     xhr.open('POST', apiUrl, true);
     xhr.setRequestHeader('Content-Type', 'application/json');
 
-    xhr.upload.addEventListener('progress', (event) => {
-      if (event.lengthComputable) {
-        const percent = Math.round((event.loaded / event.total) * 100);
-        setDownloadProgress(percent);
-        updateStatus(`Import: ${percent}%`);
-      }
-    });
+    let downloadDone = false;
+    let downloadError = null;
+    let stopPolling = null;
 
     xhr.addEventListener('load', () => {
+      downloadDone = true;
+      if (stopPolling) stopPolling();
       if (xhr.status >= 200 && xhr.status < 300) {
         const data = JSON.parse(xhr.responseText || '{}');
-        setDownloadProgress(95);
+        setDownloadProgress(60);
+        updateStatus(`Téléchargement terminé, chargement...`);
         apiFetch('/api/models/load', {
           method: 'POST',
           body: {
@@ -827,6 +985,7 @@ async function handleDownloadUrl() {
         });
       } else {
         const errMsg = xhr.statusText || `Erreur HTTP ${xhr.status}`;
+        downloadError = errMsg;
         updateStatus(`Échec import: ${errMsg}`);
         setDownloadProgress(0);
         setLoading(false);
@@ -834,12 +993,30 @@ async function handleDownloadUrl() {
     });
 
     xhr.addEventListener('error', () => {
+      downloadDone = true;
+      if (stopPolling) stopPolling();
+      downloadError = 'Erreur réseau import';
       updateStatus('Erreur réseau import');
       setDownloadProgress(0);
       setLoading(false);
     });
 
     xhr.send(JSON.stringify(body));
+
+    if (expectedName) {
+      stopPolling = await pollDownloadProgress(expectedName, (data) => {
+        if (downloadDone || downloadError) return;
+        const percent = data.total_bytes ? data.percent : 0;
+        setDownloadProgress(percent);
+        if (data.total_bytes) {
+          updateStatus(`Téléchargement en cours... ${formatBytes(data.received_bytes)} / ${formatBytes(data.total_bytes)} (${data.percent}%)`);
+        } else if (data.received_bytes) {
+          updateStatus(`Téléchargement en cours... ${formatBytes(data.received_bytes)}`);
+        } else {
+          updateStatus('Téléchargement en cours...');
+        }
+      });
+    }
   }
 
   const modelRows = useMemo(() => {
@@ -978,7 +1155,7 @@ async function handleDownloadUrl() {
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('vramSize')}>VRAM {sortColumn === 'vramSize' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('modifiedAt')}>Modifié {sortColumn === 'modifiedAt' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
             <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('expiresAt')}>Expire {sortColumn === 'expiresAt' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
-             <th>Infos</th><th>Chargé</th><th>Principal</th><th>Supprimer</th>
+             <th>Infos</th><th>Chargé</th><th>Principal</th><th>Embedding</th><th>Supprimer</th>
            </tr></thead><tbody>
             {modelRows.map((row) => (
               <tr key={row.name} className={[row.loaded ? 'row-loaded' : '', row.active ? 'row-active' : '', pendingAction?.model === row.name ? 'row-pending' : ''].filter(Boolean).join(' ')}>
@@ -1040,12 +1217,20 @@ async function handleDownloadUrl() {
                     </span>
                     <span className="toggle-led" aria-hidden="true" />
                   </button>
-                 </td>
-                 <td>
-                   <button className="btn btn-icon btn-delete" onClick={() => handleDeleteFile(row.filename)} disabled={loading || Boolean(pendingAction)} title={`Supprimer ${row.name}`}>
-                     🗑️
-                   </button>
-                 </td>
+                  </td>
+                  <td>
+                    <button className={`btn btn-table btn-toggle ${embeddingModel === row.name ? 'btn-toggle-on' : 'btn-toggle-off'}`} onClick={() => embeddingModel === row.name ? handleUnsetEmbeddingModel() : handleSetEmbeddingModel(row.name)} disabled={loading || Boolean(pendingAction) || embeddingModelLoading} aria-pressed={embeddingModel === row.name} aria-label={embeddingModel === row.name ? `${row.name} modele d'embedding` : `Definir ${row.name} comme modele d'embedding`}>
+                      <span className="toggle-switch" aria-hidden="true">
+                        <span className="toggle-knob" />
+                      </span>
+                      <span className="toggle-led" aria-hidden="true" />
+                    </button>
+                  </td>
+                  <td>
+                    <button className="btn btn-icon btn-delete" onClick={() => handleDeleteFile(row.filename)} disabled={loading || Boolean(pendingAction)} title={`Supprimer ${row.name}`}>
+                      🗑️
+                    </button>
+                  </td>
                </tr>
             ))}
           </tbody></table></div>}
@@ -1096,6 +1281,29 @@ async function handleDownloadUrl() {
 
       <main className="app-content">
         {statusMessage && <div className={`notification ${/échec|Erreur|error/i.test(statusMessage) ? 'error' : 'info'}`}>{statusMessage}</div>}
+        {loadProgress && (
+          <div className={`load-progress ${loadProgress.error ? 'error' : ''}`}>
+            <div className="load-progress-head">
+              <strong>⏳ {loadProgress.model}</strong>
+              <span>{loadProgress.error ? `Erreur : ${loadProgress.error}` : (loadProgress.message || `Étape : ${loadProgress.stage || 'démarrage'}`)}</span>
+            </div>
+            <div className="load-progress-stages">
+              {(() => {
+                const order = ['parsing', 'spawning', 'warmup', 'ready'];
+                const currentIndex = order.indexOf(loadProgress.stage);
+                return order.map((stage, index) => {
+                  const done = currentIndex >= index && !loadProgress.error;
+                  const current = loadProgress.stage === stage && !loadProgress.error;
+                  return (
+                    <div key={stage} className={`load-progress-stage ${done ? 'done' : ''} ${current ? 'current' : ''}`}>
+                      {stage}
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        )}
         {renderPageContent()}
         {renderModelDetailsModal()}
       </main>

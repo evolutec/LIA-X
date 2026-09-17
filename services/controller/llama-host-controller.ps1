@@ -9,6 +9,9 @@ $Global:RequestCounter = @{}
 $Global:LastRequestTime = @{}
 $Global:RepairInProgress = $false
 $Global:StartupInProgress = $true
+# Positionné par Get-ConsistentState quand une instance running n'a plus de
+# processus : le watchdog (hors chemin de requête) effectuera la relance.
+$Global:PendingRepair = $false
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Caches mémoire : évitent une lecture disque / un appel WMI à CHAQUE requête HTTP.
@@ -23,6 +26,9 @@ $Global:InstancePortsCache          = $null
 $Global:InstancePortsCacheExpiresAt = [datetime]::MinValue
 $Global:LiveInstancesCache          = $null
 $Global:LiveInstancesCacheExpiresAt = [datetime]::MinValue
+# Version du format de host-runtime-state.json. Exposée par GET /status et
+# utilisée par Convert-LegacyState (migration automatique des états legacy).
+$script:SchemaVersionForStatus      = 2
 $CONFIG_CACHE_TTL_SECONDS           = 10
 $GPU_STATE_CACHE_TTL_SECONDS        = 15
 $INSTANCE_PORTS_CACHE_TTL_SECONDS   = 5
@@ -61,6 +67,36 @@ function Initialize-LogsDirectories {
 
 function Get-DebugLogPath {
     return Join-Path (Get-ControllerLogDir) 'controller-debug.log'
+}
+
+function Truncate-DebugLogIfNeeded {
+    # Rotation au démarrage : le log a déjà atteint 51 Mo (crash-loop historique).
+    # On garde les 2000 dernières lignes au-delà de 5 Mo, et on archive l'ancien
+    # contenu dans controller-debug.prev.log (écrasé à chaque rotation).
+    try {
+        $path = Get-DebugLogPath
+        if (-not (Test-Path $path)) { return }
+        $item = Get-Item $path
+        if ($item.Length -lt 5MB) { return }
+        $prev = Join-Path (Get-ControllerLogDir) 'controller-debug.prev.log'
+        $tail = Get-Content $path -Tail 2000 -ErrorAction SilentlyContinue
+        if (Test-Path $prev) { Remove-Item $prev -Force -ErrorAction SilentlyContinue }
+        Move-Item $path $prev -Force
+        $tail | Set-Content $path -Encoding UTF8
+        Write-Host "[Controller] Rotation du debug log (était $([math]::Round($item.Length/1MB,1)) Mo, gardé 2000 lignes)."
+    } catch {
+        Write-Host "[Controller] Rotation debug log impossible : $($_.Exception.Message)"
+    }
+}
+
+function Get-ElapsedMs($start, $end = (Get-Date)) {
+    if (-not $start -or -not $end) { return 0 }
+    try {
+        $diff = ($end - $start).TotalMilliseconds
+        if ($diff -gt [int]::MaxValue) { return [int]::MaxValue }
+        if ($diff -lt 0) { return 0 }
+        return [int]$diff
+    } catch { return 0 }
 }
 
 function Write-DebugLog([string]$message, [string]$level = 'info') {
@@ -222,6 +258,7 @@ if (-not $StatePath) {
 }
 
 Initialize-LogsDirectories
+Truncate-DebugLogIfNeeded
 Register-LlamaServerDeathWatcher
 
 function ConvertTo-Hashtable($value) {
@@ -387,6 +424,7 @@ function Save-State([hashtable]$state) {
     $script:LastConsistentStateAt = [datetime]::MinValue
     try {
         $serializableState = ConvertTo-Hashtable $state
+        $serializableState.schema_version = 2
         if ($serializableState.instances -is [System.Collections.IDictionary]) {
             $serializableState.instances = @($serializableState.instances)
         }
@@ -410,6 +448,15 @@ function Save-State([hashtable]$state) {
 }
 
 function Convert-LegacyState([hashtable]$state) {
+    # P-bas (structure) : versionner le format d'état. Toute structure sans
+    # schema_version est considérée v1 et migre ici ; le Save-State suivant
+    # écrit la version courante. Les migrations futures s'ajoutent comme des
+    # étapes successives (v2 → v3, etc.) plutôt qu'en raccourcis ad-hoc.
+    $SCHEMA_VERSION = $script:SchemaVersionForStatus
+    $isLegacy = $false
+    if (-not $state.schema_version -or [int]$state.schema_version -lt $SCHEMA_VERSION) {
+        $isLegacy = $true
+    }
     if (-not $state.instances) {
         if ($state.pid) {
             return @{
@@ -432,7 +479,19 @@ function Convert-LegacyState([hashtable]$state) {
                 )
             }
         }
-        return @{ instances = @() }
+        return @{ instances = @(); schema_version = $SCHEMA_VERSION }
+    }
+    # Normalisations v2 : compléter les champs attendus absents des états v1.
+    if ($isLegacy) {
+        foreach ($inst in @($state.instances)) {
+            if ($inst -is [System.Collections.IDictionary]) {
+                if (-not $inst.ContainsKey('context'))    { $inst.context    = $null }
+                if (-not $inst.ContainsKey('gpu_layers')) { $inst.gpu_layers = $null }
+                if (-not $inst.ContainsKey('active'))     { $inst.active     = $false }
+            }
+        }
+        $state.schema_version = $SCHEMA_VERSION
+        Write-DebugLog "State migré vers schema_version=$SCHEMA_VERSION"
     }
     return $state
 }
@@ -593,27 +652,26 @@ function Get-ConsistentState {
 
     if ($changed) { Save-State $state }
 
-    # ── 7. Repair seulement hors startup et hors récursion ────────────────
-    # HOT PATH : Repair relit le state + fait des Get-Process. Quand tout est
-    # vivant (cas nominal du /status), on le saute : il ne servirait à rien.
-    # On ne le lance que s'il y a au moins une instance suspecte (running sans
-    # pid, ou pid mort) — pas à chaque /status.
-    $csBeforeRepair = Get-Date
+    # ── 7. Réparation : JAMAIS dans le chemin de lecture ──────────────────
+    # Un Repair-DeadInstances ici bloquait /status jusqu'à 30-40 s (attente de
+    # démarrage d'un llama-server) : la boucle HTTP mono-thread ne pouvait plus
+    # répondre, ce qui produisait des « fetch failed » côté model-loader après
+    # chaque redémarrage du controller. On se contente de SIGNALER le besoin ;
+    # le watchdog (exécuté quand la boucle est inactive) fera la réparation.
     if (-not $Global:StartupInProgress -and -not $Global:RepairInProgress) {
-        $needsRepair = $false
         foreach ($saved in @($state.instances)) {
-            if ($saved.running -and (-not $saved.pid)) { $needsRepair = $true; break }
-        }
-        if ($needsRepair) {
-            Repair-DeadInstances (Get-State)
+            if ($saved.running -and (-not $saved.pid)) { $Global:PendingRepair = $true; break }
         }
     }
     $csAfterRepair = Get-Date
 
     # P2 : localiser les lenteurs internes de la réconciliation d'état
-    $csTotal = [int]((Get-Date) - $csStart).TotalMilliseconds
+    $csTotal = Get-ElapsedMs $csStart
     if ($csTotal -gt 500) {
-        Write-DebugLog ("TIMING consistentState total=${csTotal}ms readState=" + [int]($csAfterState - $csStart).TotalMilliseconds + "ms legacy=" + [int]($csAfterLive - $csAfterState).TotalMilliseconds + "ms live+merge=" + [int]($csBeforeRepair - $csAfterLive).TotalMilliseconds + "ms repair=" + [int]($csAfterRepair - $csBeforeRepair).TotalMilliseconds + "ms liveCount=" + @($liveInstances).Count) 'warn'
+        $readStateMs = Get-ElapsedMs $csStart $csAfterState
+        $legacyMs = Get-ElapsedMs $csAfterState $csAfterLive
+        $mergeMs = Get-ElapsedMs $csAfterLive $csAfterRepair
+        Write-DebugLog ("TIMING consistentState total=${csTotal}ms readState=${readStateMs}ms legacy=${legacyMs}ms live+merge=${mergeMs}ms liveCount=" + @($liveInstances).Count) 'warn'
     }
 
     return Get-State
@@ -799,7 +857,9 @@ function Repair-DeadInstances([hashtable]$state) {
                 if ($instance.estimated_vram_bytes) {
                     $body.estimated_vram_bytes = [int64]$instance.estimated_vram_bytes
                 }
-                Start-LlamaProcess $body | Out-Null
+                # -NoWait : la réparation est déclenchée par le watchdog ; elle ne
+                # doit pas bloquer la boucle HTTP pendant le warmup du modèle.
+                Start-LlamaProcess $body -NoWait | Out-Null
             } catch {
                 Write-Host "[Controller] Échec redémarrage $($instance.model) : $($_.Exception.Message)"
                 $instance.last_error = $_.Exception.Message
@@ -1039,7 +1099,7 @@ function Get-LlamaRuntimeConfigFromCommandLine([string]$commandLine) {
     return $result
 }
 
-function Start-LlamaProcess([hashtable]$body) {
+function Start-LlamaProcess([hashtable]$body, [switch]$NoWait) {
     $config = Get-Config
     if (-not $config.binary_path -or -not (Test-Path $config.binary_path)) {
         throw "Binaire llama-server introuvable : $($config.binary_path)"
@@ -1269,15 +1329,16 @@ function Start-LlamaProcess([hashtable]$body) {
         '--host', '0.0.0.0',
         '--port', ([string]$port),
         '-m', ('"{0}"' -f $record.file.FullName),
-        '--ctx-size', ([string]$context),
-        '-c', ([string]$context),
-        '--cache-ram', '512'
+        '--ctx-size', ([string]$context)
     )
     if ($gpuLayers -gt 0 -and $config.backend -ne 'cpu') {
         $arguments += @('-ngl', ([string]$gpuLayers))
     }
     if ($sleepIdleSecs -ge 0) {
         $arguments += @('--sleep-idle-seconds', ([string]$sleepIdleSecs))
+    }
+    if ($body.ContainsKey('embedding') -and [bool]$body.embedding) {
+        $arguments += @('--embedding')
     }
 
     $pi                      = New-Object System.Diagnostics.ProcessStartInfo
@@ -1390,9 +1451,29 @@ function Start-LlamaProcess([hashtable]$body) {
     $Global:LiveInstancesCacheExpiresAt = [datetime]::MinValue
     Write-DebugLog "Save-State after launch: pid=$($process.Id) port=$port model=$($record.model) active=$activate"
 
-    # Attente que le serveur réponde (60 × 600ms = 36s max)
+    # Attente que le serveur réponde.
+    # Le délai est ADAPTATIF : un GGUF de 5-14 Go met 30-90 s à charger dans la
+    # VRAM d'un Arc 140V (mesuré : Qwopus 5,6 Go ≈ 45 s). L'ancien plafond fixe
+    # de 36 s faisait échouer la restauration après chaque redémarrage du
+    # controller, qui relançait alors un second llama-server sur le même port.
+    if ($NoWait) {
+        # Mode réparation (watchdog) : on ne bloque pas la boucle HTTP. La
+        # disponibilité réelle sera constatée au cycle suivant.
+        Write-ProcessMonitorLog "[ProcessLaunched] pid=$($process.Id) port=$port model=$($record.model) (mode NoWait, warmup en arrière-plan)"
+        return Get-State
+    }
+
+    $sizeGb        = if ($record.file -and $record.file.Length) { [double]$record.file.Length / 1GB } else { 0 }
+    $maxWaitSec    = [int][Math]::Min(300, [Math]::Max(90, 45 + ($sizeGb * 15)))
+    $attempts      = [int][Math]::Ceiling(($maxWaitSec * 1000) / 600)
+    Write-ProcessMonitorLog "[ProcessWarmup] pid=$($process.Id) port=$port model=$($record.model) sizeGb=$([Math]::Round($sizeGb,2)) maxWaitSec=$maxWaitSec"
     $serverReady = $false
-    for ($i = 0; $i -lt 60; $i++) {
+    for ($i = 0; $i -lt $attempts; $i++) {
+        if ($process.HasExited) {
+            $stderrTail = Get-LastLinesFromFile $stderrLog 30
+            if ($stderrTail) { Write-ProcessMonitorLog "[ProcessStartFail] stderr:`n$stderrTail" }
+            throw "Le processus llama-server s'est arrêté pendant le chargement. Code: $($process.ExitCode)"
+        }
         try {
             $response = Invoke-RestMethod -Uri "http://127.0.0.1:$port/v1/models" -Method Get -TimeoutSec 2 -ErrorAction Stop
             if ($response.data -or $response.models) { $serverReady = $true; break }
@@ -1586,13 +1667,19 @@ function Get-RuntimeStatus {
     if (-not $activeInstance -and $instances.Count -gt 0) { $activeInstance = $instances[0] }
 
     # P2 : localiser les lenteurs du controller (diagnostic impossible sans ça)
-    $timingNow   = Get-Date
-    $timingTotal = [int]($timingNow - $timingStart).TotalMilliseconds
+    $timingTotal = Get-ElapsedMs $timingStart
     if ($timingTotal -gt 1000) {
-        Write-DebugLog ("TIMING status total=${timingTotal}ms config=" + [int]($timingAfterConfig - $timingStart).TotalMilliseconds + "ms consistent=" + [int]($timingAfterState - $timingAfterConfig).TotalMilliseconds + "ms rest=" + [int]($timingNow - $timingAfterState).TotalMilliseconds + "ms") 'warn'
+        $cfgMs = Get-ElapsedMs $timingStart $timingAfterConfig
+        $stateMs = Get-ElapsedMs $timingAfterConfig $timingAfterState
+        $restMs = Get-ElapsedMs $timingAfterState
+        Write-DebugLog ("TIMING status total=${timingTotal}ms config=${cfgMs}ms consistent=${stateMs}ms rest=${restMs}ms") 'warn'
     }
 
     return @{
+        # P-BASSE : le format d'état est versionné (migration auto dans
+        # Convert-LegacyState). On l'expose dans /status pour que les clients
+        # (model-loader, tests de fumée) puissent vérifier la compatibilité.
+        schema_version     = $script:SchemaVersionForStatus
         running            = [bool]($instances.Count -gt 0)
         pid                = if ($activeInstance) { $activeInstance.pid } else { $null }
         active_model       = if ($activeInstance) { [string]$activeInstance.model } else { '' }
@@ -1699,7 +1786,11 @@ try {
             }
             if ($instance.estimated_vram_bytes) { $body.estimated_vram_bytes = [int64]$instance.estimated_vram_bytes }
 
-            Start-LlamaProcess $body | Out-Null
+            # -NoWait : la restauration ne doit PAS bloquer le démarrage du
+            # controller. Avant, /status restait injoignable 40-90 s après un
+            # redémarrage (le temps de charger les GGUF) → « fetch failed » côté
+            # model-loader. Le warmup est constaté par les cycles suivants.
+            Start-LlamaProcess $body -NoWait | Out-Null
             Write-Host "[Controller] ✅ Instance restaurée : $($instance.model) port=$($instance.port)"
         } catch {
             Write-Host "[Controller] ❌ Echec restauration $($instance.model) port=$($instance.port) : $($_.Exception.Message)"
@@ -1737,7 +1828,7 @@ try {
             }
             if ($activeInstance.estimated_vram_bytes) { $body.estimated_vram_bytes = [int64]$activeInstance.estimated_vram_bytes }
 
-            Start-LlamaProcess $body | Out-Null
+            Start-LlamaProcess $body -NoWait | Out-Null
 
             # Restaurer le flag active=true et les champs active_* du state
             $state2     = Get-State
@@ -1792,6 +1883,7 @@ $script:LastHttpRequestAt = [datetime]::MinValue
 function Test-WatchdogDue {
     if ($watchdogJobState.running) { return $false }
     if (((Get-Date) - $script:LastHttpRequestAt).TotalSeconds -lt 5) { return $false }
+    if ($Global:PendingRepair) { return $true }
     return ((Get-Date) - $watchdogJobState.lastRun).TotalSeconds -ge 30
 }
 
@@ -1858,6 +1950,7 @@ while ($true) {
                     Monitor-LlamaInstances
                     $wdState = Get-ConsistentState
                     Repair-DeadInstances $wdState
+                    $Global:PendingRepair = $false
                     $wdState2 = Get-State
                     $wdState2.request_counter  = ConvertTo-Hashtable $Global:RequestCounter
                     $wdState2.last_request_time = @{}
@@ -1973,17 +2066,15 @@ while ($true) {
             'POST /restart' {
                 $body = Read-JsonBody $request
 
-                Write-Host "[controller] POST /start model=$($body.model) context=$($body.context)"
+                Write-Host "[controller] POST /restart model=$($body.model) context=$($body.context)"
                 
-                # Toujours activer le modèle par défaut quand on lance depuis /start
+                # Toujours activer le modèle par défaut quand on relance
                 if (-not $body.ContainsKey('activate')) {
                     $body.activate = $true
                 }
                 
-                $result = Start-LlamaProcess $body
-                $state = Get-ConsistentState
-
-                Write-JsonResponse $listener $state
+                Start-LlamaProcess $body | Out-Null
+                Write-Json $stream 200 (Get-RuntimeStatus)
                 continue
             }
             default {
@@ -2003,7 +2094,7 @@ while ($true) {
         # P2 : tracer les requêtes anomalies (au lieu de subir des latences invisibles)
         try {
             if ($requestStart) {
-                $elapsedMs = [int]((Get-Date) - $requestStart).TotalMilliseconds
+                $elapsedMs = Get-ElapsedMs $requestStart
                 if ($elapsedMs -gt 1500) {
                     Write-DebugLog "SLOW request $requestLabel elapsed=${elapsedMs}ms" 'warn'
                 }

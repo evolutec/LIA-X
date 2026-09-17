@@ -122,8 +122,8 @@ docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-
                   </tr>
                   <tr>
                     <td className="doc-table-cell"><strong>GPU Metrics</strong></td>
-                    <td className="doc-table-cell">http://127.0.0.1:13620</td>
-                    <td className="doc-table-cell">Collecte et expose les métriques GPU (utilisation, mémoire)</td>
+                     <td className="doc-table-cell">http://127.0.0.1:13621</td>
+                     <td className="doc-table-cell">Collecte et expose les métriques GPU (utilisation, mémoire)</td>
                   </tr>
                   <tr>
                     <td className="doc-table-cell"><code>llama-server</code></td>
@@ -140,7 +140,7 @@ docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-
               <ul className="doc-list">
                 <li>Utilisation GPU (Utilization Percentage)</li>
                 <li>Utilisation mémoire dédiée (Dedicated Usage)</li>
-                <li>API exposée sur le port 13620</li>
+                <li>API exposée sur le port 13621</li>
                 <li>Fallback vers les compteurs Windows si <code>hw-smi.exe</code> n'est pas disponible</li>
               </ul>
             </div>

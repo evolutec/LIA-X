@@ -35,10 +35,28 @@ function Get-HardwareProfile {
         $adapterRam = 0
         if ($controller.AdapterRAM -ne $null) { $adapterRam = [int64]$controller.AdapterRAM }
 
+        $isIntegrated = $false
+        if ($name -match 'NVIDIA') {
+            $isIntegrated = $false
+        } elseif ($name -match 'Radeon\s+(RX|Pro|HD\s+[6-9]|WX)') {
+            $isIntegrated = $false
+        } elseif ($name -match 'Radeon\s+Graphics') {
+            $isIntegrated = $true
+        } elseif ($name -match 'Intel') {
+            if ($name -match 'Arc\s+A\d+') {
+                $isIntegrated = $false
+            } else {
+                $isIntegrated = $true
+            }
+        } elseif ($name -match 'AMD') {
+            $isIntegrated = $true
+        }
+
         $gpuDevices += @{
             name = $name
             driver_version = $driverVersion
             adapter_ram_bytes = $adapterRam
+            is_integrated = $isIntegrated
         }
     }
 
@@ -131,8 +149,44 @@ function Get-RecommendedRuntimeConfig([hashtable]$hardware) {
     $totalRam = 0
     if ($hardware -and $hardware.memory -and $hardware.memory.total_bytes) { $totalRam = [int64]$hardware.memory.total_bytes }
 
+    # Recherche du GPU le plus puissant, en privilégiant les GPU discrets sur les iGPU
     $gpuRam = 0
-    if ($hardware -and $hardware.gpu -and $hardware.gpu.devices -and $hardware.gpu.devices.Count -gt 0) { $gpuRam = [int64]$hardware.gpu.devices[0].adapter_ram_bytes }
+    $bestIsIntegrated = $true
+    if ($hardware -and $hardware.gpu -and $hardware.gpu.devices -and $hardware.gpu.devices.Count -gt 0) {
+        foreach ($dev in $hardware.gpu.devices) {
+            $currentRam = 0
+            if ($dev.adapter_ram_bytes) { $currentRam = [int64]$dev.adapter_ram_bytes }
+
+            # Détection depuis le nom (ex: "Intel(R) Arc(TM) 140V GPU (16GB)")
+            if ($dev.name -match '(\d+)\s*GB') {
+                $namedGb = [int64]$Matches[1] * $GB
+                if ($namedGb -gt $currentRam) { $currentRam = $namedGb }
+            }
+
+            $devIsIntegrated = $false
+            if ($dev.PSObject.Properties['is_integrated']) {
+                $devIsIntegrated = [bool]$dev.is_integrated
+            }
+
+            # Privilégier les GPU discrets ; si aucun discret trouvé, on prend le meilleur iGPU
+            if (-not $devIsIntegrated -and $currentRam -gt $gpuRam) {
+                $gpuRam = $currentRam
+                $bestIsIntegrated = $false
+            } elseif ($bestIsIntegrated -and $devIsIntegrated -and $currentRam -gt $gpuRam) {
+                $gpuRam = $currentRam
+            }
+        }
+    }
+
+    # Correction pour mémoire unifiée / APU (Intel Arc Xe2, AMD Radeon 700M/800M)
+    # où Win32_VideoController est bridé à un uint32 de 2 Go ou 4 Go
+    if ($vendor -in @('intel', 'amd')) {
+        if ($totalRam -ge 32 * $GB -and $gpuRam -lt 16 * $GB) {
+            $gpuRam = [int64](16 * $GB) # Allouer virtuellement jusqu'à 16 Go de VRAM unifiée
+        } elseif ($totalRam -ge 16 * $GB -and $gpuRam -lt 8 * $GB) {
+            $gpuRam = [int64](8 * $GB)
+        }
+    }
 
     $recommended = @{
         backend = 'cpu'
@@ -152,10 +206,12 @@ function Get-RecommendedRuntimeConfig([hashtable]$hardware) {
         $recommended.gpu_layers = 999
 
         if ($gpuRam -ge 24 * $GB) {
+            $recommended.context = 16384
+        } elseif ($gpuRam -ge 12 * $GB) {
             $recommended.context = 8192
-        } elseif ($gpuRam -ge 14 * $GB) {
-            $recommended.context = 6144
         } elseif ($gpuRam -ge 8 * $GB) {
+            $recommended.context = 8192
+        } elseif ($gpuRam -ge 6 * $GB) {
             $recommended.context = 4096
         } else {
             $recommended.context = 2048

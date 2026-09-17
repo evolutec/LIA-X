@@ -72,7 +72,7 @@ const fetchPerformance = async (isInitial = false) => {
     isFetchingRef.current = true;
     if (isInitial) setLoading(true);
     try {
-      const response = await fetch(`http://127.0.0.1:13620/metrics/host`);
+      const response = await fetch(`http://127.0.0.1:13621/metrics/host`);
       
       let payload;
       try {

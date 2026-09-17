@@ -87,6 +87,33 @@ function Get-LlamaServerBinaryFromDirectory([string]$directoryPath) {
     return $null
 }
 
+function Get-LlamaAssetTag($asset, [string]$releaseTag) {
+    if ($asset -and $asset.name -match '^llama-(?<tag>[^-]+)-bin-win-') {
+        return $matches.tag
+    }
+
+    return $releaseTag
+}
+
+function Get-CompatibleLlamaRelease($releases, $candidate) {
+    foreach ($release in @($releases)) {
+        if (-not $release -or -not $release.assets) {
+            continue
+        }
+
+        $asset = $release.assets | Where-Object { $_.name -match $candidate.assetPattern } | Select-Object -First 1
+        if ($asset) {
+            return @{
+                release = $release
+                asset = $asset
+                tag = Get-LlamaAssetTag $asset $release.tag_name
+            }
+        }
+    }
+
+    return $null
+}
+
 function Confirm-LlamaCppUpdate([string]$backend, [string]$localTag, [string]$latestTag) {
     $localLabel = 'inconnue'
     if ($localTag) { $localLabel = $localTag }
@@ -117,6 +144,33 @@ function Confirm-LlamaCppUpdate([string]$backend, [string]$localTag, [string]$la
     } while ($true)
 }
 
+function Stop-LlamaRuntimeForUpdate {
+    try {
+        $svc = Get-Service -Name 'LIA Controller' -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') {
+            INFO "Arrêt temporaire du service LIA Controller pour mise à jour llama.cpp"
+            Stop-Service -Name 'LIA Controller' -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        }
+    } catch {}
+
+    Stop-ExistingController
+    Stop-LlamaServerProcess
+}
+
+function Move-LockedLlamaReleaseDirectory([System.IO.DirectoryInfo]$dir) {
+    $pendingName = "{0}.delete-pending-{1}" -f $dir.Name, (Get-Date -Format 'yyyyMMddHHmmss')
+    $pendingPath = Join-Path $dir.Parent.FullName $pendingName
+    try {
+        Move-Item -LiteralPath $dir.FullName -Destination $pendingPath -Force -ErrorAction Stop
+        WARN "Dossier verrouillé renommé pour suppression ultérieure : $pendingName"
+        return $true
+    } catch {
+        WARN "Impossible de renommer le dossier verrouillé $($dir.FullName) : $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Cleanup-OldLlamaReleaseDirectories([string]$releaseRoot, [string]$backend, [string]$keepDir, [string]$archivePattern = '.*\.zip$') {
     if (-not (Test-Path $releaseRoot)) {
         return
@@ -128,14 +182,15 @@ function Cleanup-OldLlamaReleaseDirectories([string]$releaseRoot, [string]$backe
     }
 
     $oldDirs = Get-ChildItem -Path $releaseRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match "^.+-$([regex]::Escape($backend))$" -and $_.FullName -ne $keepDir }
+        Where-Object { $_.Name -match "^.+-$([regex]::Escape($backend))(\.delete-pending-.+)?$" -and $_.FullName -ne $keepDir }
 
     foreach ($dir in $oldDirs) {
         try {
             INFO "Suppression de l'ancien dossier llama-releases : $($dir.Name)"
-            Remove-Item -Path $dir.FullName -Recurse -Force -ErrorAction Stop
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
         } catch {
             WARN "Impossible de supprimer $($dir.FullName) : $($_.Exception.Message)"
+            [void](Move-LockedLlamaReleaseDirectory $dir)
         }
     }
 
@@ -160,15 +215,19 @@ function Try-DownloadLlamaCppRelease($plan) {
     $releaseRoot = Join-Path $Config.rootDir $Config.paths.runtimeDir 'llama-releases'
     Ensure-Directory $releaseRoot
 
-    # Vérifier la dernière version sur GitHub dès que possible.
-    $latestRelease = $null
+    # Vérifier les releases GitHub dès que possible. La release "latest" peut
+    # exister sans asset Windows pour tous les backends, donc on garde plusieurs
+    # releases et on choisit la plus récente réellement compatible.
+    $remoteReleases = @()
     try {
-        $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest' -Headers @{ 'User-Agent' = 'LIA-setup' }
+        $remoteReleases = @(Invoke-RestMethod -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20' -Headers @{ 'User-Agent' = 'LIA-setup' })
     } catch {
         WARN "Impossible de récupérer la dernière release llama.cpp. Le binaire local sera utilisé si disponible."
     }
 
     foreach ($candidate in $candidates) {
+        $compatibleRemote = Get-CompatibleLlamaRelease $remoteReleases $candidate
+
         $localDirs = Get-ChildItem -Path $releaseRoot -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match "^.+-$([regex]::Escape($candidate.backend))$" } |
             Sort-Object Name -Descending
@@ -180,16 +239,17 @@ function Try-DownloadLlamaCppRelease($plan) {
             }
 
             $localTag = Get-LlamaReleaseDirectoryTag $dir $candidate.backend
-            if ($latestRelease -and $latestRelease.tag_name -and ($localTag -ne $latestRelease.tag_name)) {
-                if (Confirm-LlamaCppUpdate $candidate.backend $localTag $latestRelease.tag_name) {
-                    $asset = $latestRelease.assets | Where-Object { $_.name -match $candidate.assetPattern } | Select-Object -First 1
+            if ($compatibleRemote -and $compatibleRemote.tag -and ($localTag -ne $compatibleRemote.tag)) {
+                if (Confirm-LlamaCppUpdate $candidate.backend $localTag $compatibleRemote.tag) {
+                    $asset = $compatibleRemote.asset
                     if ($asset) {
-                        $releaseDir = Join-Path $releaseRoot ("{0}-{1}" -f $latestRelease.tag_name, $candidate.backend)
+                        $releaseDir = Join-Path $releaseRoot ("{0}-{1}" -f $compatibleRemote.tag, $candidate.backend)
                         $archivePath = Join-Path $releaseRoot $asset.name
 
                         INFO "Téléchargement de la nouvelle release llama.cpp : $($asset.name)"
                         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archivePath -Headers @{ 'User-Agent' = 'LIA-setup' }
 
+                        Stop-LlamaRuntimeForUpdate
                         if (Test-Path $releaseDir) {
                             Remove-Item $releaseDir -Recurse -Force -ErrorAction Stop
                         }
@@ -204,8 +264,6 @@ function Try-DownloadLlamaCppRelease($plan) {
                         }
 
                         WARN "Le binaire téléchargé ne contient pas llama-server.exe : $($asset.name)"
-                    } else {
-                        WARN "Aucun asset correspondant trouvé pour le backend $($candidate.backend) sur la release $($latestRelease.tag_name)."
                     }
 
                     INFO "Réutilisation du binaire local existant : $($dir.Name)"
@@ -214,29 +272,35 @@ function Try-DownloadLlamaCppRelease($plan) {
                 }
             }
 
+            if (-not $compatibleRemote -and $remoteReleases.Count -gt 0) {
+                INFO "Aucune release distante récente ne publie d'asset compatible $($candidate.backend)."
+            }
+
             INFO "Binaire llama.cpp existant réutilisé : $($dir.Name)"
             Cleanup-OldLlamaReleaseDirectories $releaseRoot $candidate.backend $dir.FullName $candidate.assetPattern
             return @{ backend = $candidate.backend; label = $candidate.label; binaryPath = $localBinary; source = 'release'; buildDir = $dir.FullName }
         }
     }
 
-    if (-not $latestRelease) {
+    if (-not $remoteReleases -or $remoteReleases.Count -eq 0) {
         WARN "Aucune release distante disponible et aucun binaire local compatible n'a été trouvé."
         return $null
     }
 
     foreach ($candidate in $candidates) {
-        $asset = $latestRelease.assets | Where-Object { $_.name -match $candidate.assetPattern } | Select-Object -First 1
-        if (-not $asset) {
+        $compatibleRemote = Get-CompatibleLlamaRelease $remoteReleases $candidate
+        if (-not $compatibleRemote) {
             continue
         }
 
-        $releaseDir = Join-Path $releaseRoot ("{0}-{1}" -f $latestRelease.tag_name, $candidate.backend)
+        $asset = $compatibleRemote.asset
+        $releaseDir = Join-Path $releaseRoot ("{0}-{1}" -f $compatibleRemote.tag, $candidate.backend)
         $archivePath = Join-Path $releaseRoot $asset.name
 
         INFO "Téléchargement du binaire officiel llama.cpp : $($asset.name)"
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archivePath -Headers @{ 'User-Agent' = 'LIA-setup' }
 
+        Stop-LlamaRuntimeForUpdate
         if (Test-Path $releaseDir) {
             Remove-Item $releaseDir -Recurse -Force -ErrorAction Stop
         }

@@ -5,7 +5,7 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
-const { Readable } = require('stream');
+const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
@@ -26,7 +26,259 @@ const httpsAgent = new Agent.HttpsAgent({
   freeSocketTimeout: 30000,
 });
 
+// P-UX (SSE) : agent dédié au proxy d'inférence.
+// ATTENTION : `fetch` (undici) N'ACCEPTE PAS un agent http/agentkeepalive dans
+// `dispatcher` → « fetch failed / agent.dispatch is not a function » instantané.
+// Le proxy d'inférence utilise donc http.request natif (voir proxyToRuntime)
+// avec cet agent keep-alive, qui autorise les générations longues (timeout 0).
+const PROXY_STREAM_AGENT = new Agent({
+  keepAlive: true,
+  maxSockets: 16,
+  maxFreeSockets: 8,
+  timeout: 0,
+  freeSocketTimeout: 60000,
+});
+
 // Circuit Breaker état global
+// P-UX (feedback de progression) : tracking en mémoire des jobs de chargement.
+// /api/models/load et /api/models/select y enregistrent un job ; l'UI interroge
+// GET /api/models/load-progress?model=... toutes les 1,5 s pendant l'action.
+// IMPORTANT : la progression est calculée en lisant host-runtime-state.json
+// DIRECTEMENT sur disque (le controller est mono-thread et son /status est
+// bloqué pendant un /start → impossible de le sonder). Quand l'entrée du
+// modèle apparaît avec un pid, le spawn a eu lieu ; quand le port llama
+// répond en HTTP, les poids sont chargés.
+const LOAD_JOBS = new Map(); // model -> { stage, started_at, error, detail }
+
+const LOAD_STAGE_LABELS = {
+  parsing: 'Analyse du GGUF (métadonnées, vocabulaire, contexte natif)...',
+  spawning: 'Démarrage du serveur llama (allocation VRAM, layers GPU)...',
+  warmup: 'Chargement des poids en mémoire (peut prendre 30-60 s sur un gros modèle)...',
+  ready: 'Modèle prêt.',
+  failed: 'Échec du chargement.',
+};
+
+const DOWNLOAD_JOBS = new Map(); // model -> { total_bytes, received_bytes, percent, error, done, updated_at }
+
+function startDownloadJob(modelName, totalBytes) {
+  if (!modelName) return;
+  DOWNLOAD_JOBS.set(String(modelName), {
+    model: String(modelName),
+    total_bytes: totalBytes || null,
+    received_bytes: 0,
+    percent: 0,
+    error: null,
+    done: false,
+    updated_at: new Date().toISOString(),
+  });
+}
+
+function advanceDownloadJob(modelName, receivedBytes) {
+  const job = DOWNLOAD_JOBS.get(String(modelName));
+  if (!job) return;
+  job.received_bytes = receivedBytes;
+  job.percent = job.total_bytes > 0 ? Math.round((received_bytes / job.total_bytes) * 100) : 0;
+  job.updated_at = new Date().toISOString();
+}
+
+function finishDownloadJob(modelName, error) {
+  const key = String(modelName || '');
+  const job = DOWNLOAD_JOBS.get(key);
+  if (!job) return;
+  job.done = true;
+  if (error) {
+    job.error = String(error);
+    setTimeout(() => DOWNLOAD_JOBS.delete(key), 30000);
+  } else {
+    job.percent = 100;
+    setTimeout(() => DOWNLOAD_JOBS.delete(key), 10000);
+  }
+}
+
+async function readDownloadProgress(modelName) {
+  const requestedKey = String(modelName || '').trim();
+  let job = requestedKey ? DOWNLOAD_JOBS.get(requestedKey) : null;
+  let key = requestedKey;
+
+  if (!job && DOWNLOAD_JOBS.size > 0) {
+    let newestKey = null;
+    let newestTime = -1;
+    for (const [candidateKey, candidate] of DOWNLOAD_JOBS.entries()) {
+      const updatedAt = Date.parse(candidate?.updated_at) || 0;
+      const matches = requestedKey
+        && (candidateKey.toLowerCase().includes(requestedKey.toLowerCase())
+          || requestedKey.toLowerCase().includes(candidateKey.toLowerCase()));
+      if (matches) { newestKey = candidateKey; newestTime = updatedAt; break; }
+      if (updatedAt >= newestTime) { newestTime = updatedAt; newestKey = candidateKey; }
+    }
+    if (newestKey) {
+      job = DOWNLOAD_JOBS.get(newestKey);
+      key = String(job?.model || newestKey);
+    }
+  }
+
+  if (!job) {
+    return { active: false, model: null, percent: 0, total_bytes: null, received_bytes: 0, error: null };
+  }
+
+  return {
+    active: true,
+    model: job.model,
+    percent: job.percent,
+    total_bytes: job.total_bytes,
+    received_bytes: job.received_bytes,
+    error: job.error || null,
+    done: job.done,
+  };
+}
+
+function createProgressTracker(modelName) {
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      const job = DOWNLOAD_JOBS.get(String(modelName));
+      if (job) {
+        advanceDownloadJob(modelName, job.received_bytes + chunk.length);
+      }
+      callback(null, chunk);
+    },
+  });
+}
+
+async function checkDiskSpace(dirPath, requiredBytes) {
+  if (!requiredBytes || requiredBytes <= 0) return true;
+  try {
+    const dfOutput = await execFileAsync('df', ['-B1', dirPath], { encoding: 'utf8' });
+    const lines = dfOutput.stdout.trim().split('\n');
+    if (lines.length >= 2) {
+      const parts = lines[1].split(/\s+/);
+      const availableBytes = parseInt(parts[3], 10);
+      if (!Number.isFinite(availableBytes)) return true;
+      return availableBytes >= requiredBytes * 1.1;
+    }
+  } catch {
+    // Si on ne peut pas vérifier, on laisse passer et le système d'exploitation gérera l'erreur.
+  }
+  return true;
+}
+
+function startLoadJob(modelName) {
+  if (!modelName) return;
+  LOAD_JOBS.set(String(modelName), {
+    model: String(modelName),
+    stage: 'parsing',
+    started_at: new Date().toISOString(),
+    error: null,
+  });
+}
+
+function advanceLoadJob(modelName, stage, detail = null) {
+  const job = LOAD_JOBS.get(String(modelName));
+  if (job && LOAD_STAGE_LABELS[stage]) {
+    job.stage = stage;
+    if (detail) job.detail = detail;
+  }
+}
+
+function finishLoadJob(modelName, error = null) {
+  const key = String(modelName || '');
+  const job = LOAD_JOBS.get(key);
+  if (!job) return;
+  if (error) {
+    job.stage = 'failed';
+    job.error = String(error);
+    // Laisse l'erreur visible 15 s pour que le polling UI la voie.
+    setTimeout(() => LOAD_JOBS.delete(key), 15000);
+  } else {
+    // On garde le job en "ready" 5 s pour que le polling UI voie le succès.
+    job.stage = 'ready';
+    setTimeout(() => LOAD_JOBS.delete(key), 5000);
+  }
+}
+
+async function readLoadProgress(modelName) {
+  const requestedKey = String(modelName || '').trim();
+  let job = requestedKey ? LOAD_JOBS.get(requestedKey) : null;
+  let key = requestedKey;
+
+  // L'UI peut interroger sans nom de modèle (ou avec un nom approchant) :
+  // on retombe sur le job le plus récent pour ne jamais afficher « rien ne se
+  // passe » pendant un chargement de plusieurs dizaines de secondes.
+  if (!job && LOAD_JOBS.size > 0) {
+    let newestKey = null;
+    let newestTime = -1;
+    for (const [candidateKey, candidate] of LOAD_JOBS.entries()) {
+      const startedAt = Date.parse(candidate?.started_at) || 0;
+      const matches = requestedKey
+        && (candidateKey.toLowerCase().includes(requestedKey.toLowerCase())
+          || requestedKey.toLowerCase().includes(candidateKey.toLowerCase()));
+      if (matches) { newestKey = candidateKey; newestTime = startedAt; break; }
+      if (startedAt >= newestTime) { newestTime = startedAt; newestKey = candidateKey; }
+    }
+    if (newestKey) {
+      job = LOAD_JOBS.get(newestKey);
+      key = String(job?.model || newestKey);
+    }
+  }
+
+  if (!job) {
+    return { active: false, stage: null, elapsed_seconds: 0, message: null };
+  }
+
+  const startedAt = Date.parse(job.started_at);
+  const elapsed = Number.isFinite(startedAt) ? Math.round((Date.now() - startedAt) / 1000) : 0;
+  let stage = job.stage;
+  let server_port = null;
+  let server_pid = null;
+
+  // Étape "spawning" : dès que le state disque contient le modèle avec un
+  // pid, le processus llama-server a été lancé → poids en cours de chargement.
+  if (stage === 'parsing' || stage === 'spawning') {
+    try {
+      const raw = await fs.promises.readFile(RUNTIME_STATE_PATH, 'utf8');
+      const parsed = parseJsonFileContent(raw);
+      const instances = Array.isArray(parsed) ? (parsed[0]?.instances || []) : (parsed.instances || []);
+      const needle = key.toLowerCase();
+      const found = instances.find((i) => {
+        const f = String(i.filename || '').toLowerCase();
+        const m = String(i.model || '').toLowerCase();
+        return f === `${needle}.gguf` || f === needle || m === needle;
+      });
+      if (found && found.pid && found.port) {
+        server_pid = found.pid;
+        server_port = found.port;
+        if (stage === 'parsing') stage = 'warmup';
+        else stage = 'warmup';
+      } else if (stage === 'parsing' && elapsed > 3) {
+        // Parsing GGUF > 3 s : on bascule visuellement vers le spawn.
+        stage = 'spawning';
+      }
+    } catch { /* state non lisible : garder l'étape estimée */ }
+  }
+
+  // Étape "ready" : le port llama-server répond en HTTP → modèle utilisable.
+  if (stage === 'warmup' && server_port) {
+    try {
+      const probeController = new AbortController();
+      const probeTimeout = setTimeout(() => probeController.abort(), 1500);
+      const probe = await fetch(`http://host.docker.internal:${server_port}/v1/models`, {
+        signal: probeController.signal,
+      });
+      clearTimeout(probeTimeout);
+      if (probe.ok) { stage = 'ready'; }
+    } catch { /* pas prêt encore */ }
+  }
+
+  return {
+    active: true,
+    model: key,
+    stage,
+    elapsed_seconds: elapsed,
+    message: LOAD_STAGE_LABELS[stage] || stage,
+    server_port,
+    server_pid,
+    error: job.error || null,
+  };
+}
 const CIRCUIT_BREAKER = {
   open: false,
   failures: 0,
@@ -139,6 +391,7 @@ const LLAMA_SERVER_BASE_URL = (process.env.LLAMA_SERVER_BASE_URL || 'http://host
 const MODEL_STORAGE_DIR = process.env.MODEL_STORAGE_DIR || path.join(__dirname, 'models');
 const RUNTIME_STATE_PATH = process.env.RUNTIME_STATE_PATH || '/runtime/host-runtime-state.json';
 const RUNTIME_HARDWARE_PROFILE_PATH = process.env.RUNTIME_HARDWARE_PROFILE_PATH || path.join(path.dirname(RUNTIME_STATE_PATH), 'hardware-profile.json');
+const EMBEDDING_MODEL_STATE_PATH = process.env.EMBEDDING_MODEL_STATE_PATH || path.join(path.dirname(RUNTIME_STATE_PATH), 'embedding-model.json');
 const PORT = Number(process.env.MODEL_MANAGER_PORT || 3005);
 const PROXY_MODEL_ID = process.env.PROXY_MODEL_ID || 'lia-local';
 const ROOCODE_SOURCE_HEADER_NAME = String(process.env.ROOCODE_SOURCE_HEADER_NAME || 'x-roocode-source').trim().toLowerCase();
@@ -196,8 +449,15 @@ const GGML_TENSOR_TYPE_NAMES = {
   29: 'IQ1_M',
   30: 'BF16',
   34: 'TQ1_0',
-  35: 'TQ2_0',
+   35: 'TQ2_0',
 };
+
+const EMBEDDING_MODEL_CANDIDATES = [
+  'nomic-embed-text',
+  'Qwen3-Embedding-4B',
+  'all-minilm',
+  'embed',
+];
 
 const LLAMA_FILE_TYPE_NAMES = {
   0: 'F32',
@@ -910,10 +1170,21 @@ async function getRuntimeStatus() {
   return STATUS_INFLIGHT;
 }
 
+// Les fichiers runtime sont écrits par PowerShell (Set-Content) et peuvent
+// contenir un BOM UTF-8 (U+FEFF) : JSON.parse échoue alors sur le premier
+// caractère et le profil devient silencieusement null.
+function parseJsonFileContent(raw) {
+  const text = String(raw || '').replace(/^\uFEFF/, '').trim();
+  if (!text) {
+    return null;
+  }
+  return JSON.parse(text);
+}
+
 async function readRuntimeStateFallback() {
   try {
     const raw = await fs.promises.readFile(RUNTIME_STATE_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
+    const parsed = parseJsonFileContent(raw);
     if (Array.isArray(parsed)) {
       return parsed.length > 0 ? parsed[0] : null;
     }
@@ -927,7 +1198,7 @@ async function readRuntimeStateFallback() {
 async function readHardwareProfile() {
   try {
     const raw = await fs.promises.readFile(RUNTIME_HARDWARE_PROFILE_PATH, 'utf8');
-    return JSON.parse(raw);
+    return parseJsonFileContent(raw);
   } catch {
     return null;
   }
@@ -935,12 +1206,86 @@ async function readHardwareProfile() {
 
 function getRecommendedRuntimeDefaults(hardwareProfile) {
   // ✅ PLUS AUCUN BRIDAGE AUTOMATIQUE
-  // ✅ La fonction ne retourne PLUS AUCUNE VALEUR PAR DEFAUT
-  // ✅ La fonction est complètement neutralisée
+  // ✅ La fonction ne retourne PLUS AUCUNE VALEUR PAR DEFAUT DANS LE PAYLOAD /start
+  // (la valeur explicite de l'UI reste toujours prioritaire, cf. buildModelStartRequest).
   return {
     backend: 'cpu',
     context: 131072,
     gpu_layers: 999,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P-UX : recommandation VRAM (SUGGESTION, jamais imposée).
+// Sert à pré-remplir le curseur de contexte et l'info-bulle « recommandé » de
+// l'UI d'après le profil matériel (ex: Intel Arc 140V, 16 Go partagés) et la
+// taille du GGUF. L'utilisateur reste libre de tout modifier.
+// ─────────────────────────────────────────────────────────────────────────────
+function getVramBudgetBytes(hardwareProfile) {
+  const gpu = hardwareProfile?.gpu || {};
+  const memory = hardwareProfile?.memory || {};
+
+  // 1. VRAM dédiée déclarée par les adaptateurs (GPU discret).
+  let dedicated = 0;
+  if (Array.isArray(gpu.devices)) {
+    for (const device of gpu.devices) {
+      const bytes = Number(device?.adapter_ram_bytes ?? device?.vram_bytes ?? 0);
+      if (Number.isFinite(bytes) && bytes > 0) { dedicated += bytes; }
+    }
+  }
+  for (const candidate of [gpu.total_bytes, gpu.vram_total_bytes, gpu.memory_total_bytes]) {
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value > 0) { dedicated = Math.max(dedicated, value); }
+  }
+
+  // 2. GPU intégré (Intel Arc 140V, iGPU AMD…) : la mémoire est PARTAGÉE avec
+  //    la RAM système. Le pilote ne déclare qu'une petite réserve dédiée
+  //    (ex: 2 Go) alors que 16 Go sont réellement adressables. On se base donc
+  //    sur la RAM système, avec une marge conservatrice (50 %, plafonnée à 16 Go).
+  const vendor = String(gpu.vendor || hardwareProfile?.vendor || '').toLowerCase();
+  const isIntegrated = ['intel', 'amd', 'apple'].some((name) => vendor.includes(name));
+  const systemRam = Number(memory.total_bytes) || 0;
+  if (isIntegrated && systemRam > 0) {
+    const shared = Math.min(Math.floor(systemRam * 0.5), 16 * 1024 ** 3);
+    return Math.max(dedicated, shared);
+  }
+
+  return dedicated;
+}
+
+function computeRecommendedRuntime(hardwareProfile, modelSizeBytes = 0) {
+  const vram = getVramBudgetBytes(hardwareProfile);
+  // Marge de sécurité : le GPU est partagé avec le système (iGPU) ou le
+  // contexte/KV cache consomme de la mémoire.
+  const usable = vram > 0 ? Math.floor(vram * 0.75) : 0;
+  const size = Number(modelSizeBytes) || 0;
+
+  // Offload complet si les poids tiennent dans le budget utilisable.
+  let gpuLayers = 999;
+  if (usable > 0 && size > usable) {
+    // Proportion des couches qu'on peut placer en VRAM (approximation linéaire).
+    gpuLayers = Math.max(0, Math.floor(999 * (usable / size)));
+  }
+
+  // Contexte conseillé : proportionnel à la VRAM restante après les poids.
+  let context = 32768;
+  if (usable > 0) {
+    const freeForKv = Math.max(0, usable - size);
+    if (freeForKv < 1.5 * 1024 ** 3) {
+      context = 8192;
+    } else if (freeForKv < 3 * 1024 ** 3) {
+      context = 16384;
+    }
+  }
+
+  return {
+    backend: String(hardwareProfile?.gpu?.vendor || hardwareProfile?.backend || 'auto'),
+    context,
+    gpu_layers: gpuLayers,
+    vram_budget_bytes: usable,
+    model_size_bytes: size,
+    source: vram > 0 ? 'hardware-profile' : 'default',
+    note: 'Suggestion informative : jamais imposée, modifiable dans l\'UI.',
   };
 }
 
@@ -1630,12 +1975,15 @@ async function getRuntimeSnapshot() {
   }
 }
 
-async function ensureRuntimeReady(preferredModel) {
+async function ensureRuntimeReady(preferredModel, options = {}) {
   const runtimeStatus = await getRuntimeStatus();
   const activeModel = runtimeStatus?.active_model || runtimeStatus?.active_filename;
 
   if (preferredModel && preferredModel !== PROXY_MODEL_ID && preferredModel !== activeModel) {
     const startRequest = await buildModelStartRequest(preferredModel);
+    if (options.embedding) {
+      startRequest.payload.embedding = true;
+    }
     await controllerRequest('/start', {
       method: 'POST',
       body: JSON.stringify(startRequest.payload),
@@ -1654,6 +2002,9 @@ async function ensureRuntimeReady(preferredModel) {
   }
 
   const startRequest = await buildModelStartRequest(modelToStart);
+  if (options.embedding) {
+    startRequest.payload.embedding = true;
+  }
   await controllerRequest('/start', {
     method: 'POST',
     body: JSON.stringify(startRequest.payload),
@@ -1685,6 +2036,56 @@ async function listLocalModels() {
     }));
 
   return files.sort((left, right) => left.name.localeCompare(right.name, 'fr', { sensitivity: 'base' }));
+}
+
+async function resolveEmbeddingModel() {
+  const localModels = await listLocalModels();
+  const lowerNames = localModels.map((item) => item.name.toLowerCase());
+
+  for (const candidate of EMBEDDING_MODEL_CANDIDATES) {
+    const index = lowerNames.findIndex((name) => name === candidate.toLowerCase() || name.startsWith(candidate.toLowerCase()));
+    if (index >= 0) {
+      return localModels[index].name;
+    }
+  }
+
+  return null;
+}
+
+async function readEmbeddingModelPreference() {
+  try {
+    if (!fs.existsSync(EMBEDDING_MODEL_STATE_PATH)) {
+      return null;
+    }
+    const raw = await fs.promises.readFile(EMBEDDING_MODEL_STATE_PATH, 'utf8');
+    const parsed = JSON.parse(raw || '{}');
+    return typeof parsed.model === 'string' && parsed.model.trim() !== '' ? parsed.model.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeEmbeddingModelPreference(modelName) {
+  const dir = path.dirname(EMBEDDING_MODEL_STATE_PATH);
+  if (!fs.existsSync(dir)) {
+    await fs.promises.mkdir(dir, { recursive: true });
+  }
+  await fs.promises.writeFile(EMBEDDING_MODEL_STATE_PATH, JSON.stringify({ model: modelName, updated_at: new Date().toISOString() }, null, 2), 'utf8');
+}
+
+async function resolveEmbeddingModelInstance(modelName) {
+  const snapshot = await getRuntimeSnapshot();
+  const runtime = snapshot.runtime;
+  const instances = Array.isArray(runtime?.instances) ? runtime.instances : [];
+  const name = String(modelName || '').trim();
+  if (!name) {
+    return null;
+  }
+  const match = instances.find((instance) => {
+    const modelId = String(instance.model || instance.filename || '').trim();
+    return modelId.toLowerCase() === name.toLowerCase();
+  });
+  return match || null;
 }
 
 async function resolveModel(identifier) {
@@ -1775,10 +2176,23 @@ async function downloadToModelsDir(url, name) {
     throw new Error(`Le fichier existe déjà : ${targetFilename}`);
   }
 
-  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(targetPath));
+  const contentLength = response.headers.get('content-length');
+  const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
+  if (totalBytes && !(await checkDiskSpace(MODEL_STORAGE_DIR, totalBytes))) {
+    throw new Error('Espace disque insuffisant pour le téléchargement.');
+  }
+
+  const modelKey = toModelId(targetFilename);
+  startDownloadJob(modelKey, totalBytes);
+  const tracker = createProgressTracker(modelKey);
+  try {
+    await pipeline(Readable.fromWeb(response.body), tracker, fs.createWriteStream(targetPath));
+  } finally {
+    finishDownloadJob(modelKey, null);
+  }
   return {
     filename: targetFilename,
-    model: toModelId(targetFilename),
+    model: modelKey,
     path: targetPath,
   };
 }
@@ -1825,10 +2239,23 @@ async function importFromOllamaLibrary(reference, localName) {
     throw new Error(`Le fichier existe déjà : ${targetFilename}`);
   }
 
-  await pipeline(Readable.fromWeb(blobResponse.body), fs.createWriteStream(targetPath));
+  const contentLength = blobResponse.headers.get('content-length');
+  const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
+  if (totalBytes && !(await checkDiskSpace(MODEL_STORAGE_DIR, totalBytes))) {
+    throw new Error('Espace disque insuffisant pour le téléchargement.');
+  }
+
+  const modelKey = toModelId(targetFilename);
+  startDownloadJob(modelKey, totalBytes);
+  const tracker = createProgressTracker(modelKey);
+  try {
+    await pipeline(Readable.fromWeb(blobResponse.body), tracker, fs.createWriteStream(targetPath));
+  } finally {
+    finishDownloadJob(modelKey, null);
+  }
   return {
     filename: targetFilename,
-    model: toModelId(targetFilename),
+    model: modelKey,
     path: targetPath,
   };
 }
@@ -1849,8 +2276,61 @@ function proxyModelPayload(runtimeStatus) {
       running: model.running,
       size_vram: model.size_vram,
       expires_at: model.expires_at,
+      embedding_capable: EMBEDDING_MODEL_CANDIDATES.some((candidate) => {
+        const name = String(model.model || model.filename || '').toLowerCase();
+        return name === candidate.toLowerCase() || name.startsWith(candidate.toLowerCase());
+      }),
     }))
     .filter((entry, index, array) => array.findIndex((item) => item.id === entry.id) === index);
+}
+
+async function buildFullModelList(runtimeStatus) {
+  const loaded = proxyModelPayload(runtimeStatus);
+  const loadedIds = new Set(loaded.map((item) => item.id));
+  const localModels = await listLocalModels();
+
+  const extras = localModels.map((item) => ({
+    id: item.name,
+    object: 'model',
+    owned_by: 'lia',
+    permission: [],
+    active_model: resolveActiveModel(runtimeStatus),
+    backend: runtimeStatus?.backend,
+    filename: item.filename,
+    running: loadedIds.has(item.name),
+    size_vram: null,
+    expires_at: null,
+    embedding_capable: EMBEDDING_MODEL_CANDIDATES.some((candidate) => {
+      const name = String(item.name || item.filename || '').toLowerCase();
+      return name === candidate.toLowerCase() || name.startsWith(candidate.toLowerCase());
+    }),
+  }));
+
+  const hasLiaLocal = loadedIds.has(PROXY_MODEL_ID);
+  const list = [...loaded];
+
+  if (!hasLiaLocal) {
+    list.unshift({
+      id: PROXY_MODEL_ID,
+      object: 'model',
+      owned_by: 'lia',
+      permission: [],
+      active_model: resolveActiveModel(runtimeStatus),
+      backend: runtimeStatus?.backend,
+      filename: runtimeStatus?.active_filename || null,
+      running: Boolean(runtimeStatus?.running),
+      size_vram: null,
+      expires_at: runtimeStatus?.started_at || null,
+    });
+  }
+
+  for (const model of extras) {
+    if (!list.some((entry) => entry.id === model.id)) {
+      list.push(model);
+    }
+  }
+
+  return list;
 }
 
 function translateToDockerHost(url) {
@@ -1885,7 +2365,11 @@ function getRuntimeBaseUrl(runtimeStatus, requestedModel) {
     }
   }
 
-  const activeInstance = instances.find((instance) => Boolean(instance.active) || Boolean(instance.running));
+  // BUG : find(active || running) prenait la PREMIERE instance running (ex:
+  // Qwen3-Embedding sur 12434) au lieu de l'instance ACTIVE → le proxy
+  // routait le chat vers le mauvais modèle. Priorité : active > running.
+  const activeInstance = instances.find((instance) => Boolean(instance.active))
+    || instances.find((instance) => Boolean(instance.running));
   if (activeInstance?.server_base_url) {
     return translateToDockerHost(String(activeInstance.server_base_url).replace(/\/v1\/?$/, '').replace(/\/$/, ''));
   }
@@ -1925,24 +2409,66 @@ function requestContainsRoocodeHeader(req) {
   return hasKnownSourceHeader || hasCustomSourceHeader;
 }
 
+// P-UX (SSE) : proxy d'inférence en http.request natif.
+// Pourquoi pas fetch() :
+//  - undici refuse un agent http/agentkeepalive en `dispatcher` (fetch failed)
+//  - undici coupe les corps après 5 min (bodyTimeout) : incompatible avec les
+//    générations longues et le streaming SSE.
+// http.request + agentkeepalive permet un pipe direct upstream → client, avec
+// un timeout socket désactivé.
+function proxyToRuntime(targetBaseUrl, endpoint, method, payload) {
+  return new Promise((resolve, reject) => {
+    let target;
+    try {
+      target = new URL(`${targetBaseUrl}${endpoint}`);
+    } catch (error) {
+      reject(new Error(`URL runtime invalide: ${targetBaseUrl}${endpoint}`));
+      return;
+    }
+
+    const transport = target.protocol === 'https:' ? require('https') : http;
+    const bodyText = JSON.stringify(payload ?? {});
+    const proxyReq = transport.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: `${target.pathname}${target.search}`,
+      method,
+      agent: PROXY_STREAM_AGENT,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(bodyText),
+        Accept: 'application/json, text/event-stream',
+      },
+    });
+
+    // Aucun timeout : une génération locale peut durer plusieurs minutes.
+    proxyReq.setTimeout(0);
+    proxyReq.on('response', (upstream) => resolve(upstream));
+    proxyReq.on('error', (error) => reject(error));
+    proxyReq.end(bodyText);
+  });
+}
+
 async function proxyOpenAiRequest(req, res, endpoint) {
   try {
     const preferredModel = typeof req.body?.model === 'string' && req.body.model !== PROXY_MODEL_ID
       ? req.body.model
       : undefined;
-    const runtimeStatus = await ensureRuntimeReady(preferredModel);
+    const isEmbeddingEndpoint = endpoint === '/v1/embeddings';
+    const embeddingModelName = isEmbeddingEndpoint
+      ? (preferredModel || (await readEmbeddingModelPreference()) || (await resolveEmbeddingModel()))
+      : undefined;
+    const isEmbeddingCapable = Boolean(embeddingModelName && EMBEDDING_MODEL_CANDIDATES.some((candidate) => {
+      const name = String(embeddingModelName || '').toLowerCase();
+      return name === candidate.toLowerCase() || name.startsWith(candidate.toLowerCase());
+    }));
+    const runtimeStatus = await ensureRuntimeReady(preferredModel || embeddingModelName, {
+      embedding: isEmbeddingEndpoint && isEmbeddingCapable,
+    });
     if (!runtimeStatus?.running || !runtimeStatus?.active_model) {
       return err(res, 503, 'Aucun modèle actif côté llama.cpp');
     }
-
-    // ✅ RÉCUPÉRER LA VRAIE TAILLE DE CONTEXTE DE L'INSTANCE ACTIVE
-    const instances = Array.isArray(runtimeStatus.instances)
-      ? runtimeStatus.instances
-      : runtimeStatus.instances
-        ? [runtimeStatus.instances]
-        : [];
-    const activeInstance = instances.find((instance) => Boolean(instance.active) || Boolean(instance.running));
-    const realContextSize = activeInstance?.context || runtimeStatus.default_context || 131072;
 
     const isRoocodeRequest = requestContainsRoocodeHeader(req);
     const payload = isRoocodeRequest ? (req.body || {}) : { ...(req.body || {}) };
@@ -1951,11 +2477,6 @@ async function proxyOpenAiRequest(req, res, endpoint) {
       : undefined;
 
     if (!isRoocodeRequest) {
-      // ✅ INJECTER AUTOMATIQUEMENT max_tokens AVEC LA VRAIE LIMITE
-      // llama.cpp DEFAULT TOUJOURS À 8192 MÊME SI --ctx-size EST PLUS GRAND !
-      if (!payload.max_tokens && !payload.max_completion_tokens) {
-        payload.max_tokens = Math.floor(realContextSize * 0.95);
-      }
       const upstreamModel = runtimeStatus.active_filename || runtimeStatus.active_model;
       if (!payload.model || payload.model === PROXY_MODEL_ID) {
         payload.model = upstreamModel;
@@ -1963,29 +2484,37 @@ async function proxyOpenAiRequest(req, res, endpoint) {
     }
 
     const runtimeUrl = getRuntimeBaseUrl(runtimeStatus, requestedModel);
-    console.log('[model-manager] proxy request', { endpoint, requestedModel, isRoocodeRequest, runtimeUrl });
-    const response = await fetch(`${runtimeUrl}${endpoint}`, {
-      method: req.method,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
+    const isStreaming = payload.stream === true;
+    console.log('[model-manager] proxy request', { endpoint, requestedModel, isRoocodeRequest, runtimeUrl, isStreaming });
 
-    res.status(response.status);
-    response.headers.forEach((value, key) => {
+    const upstream = await proxyToRuntime(runtimeUrl, endpoint, req.method, payload);
+
+    res.status(upstream.statusCode || 502);
+    Object.entries(upstream.headers).forEach(([key, value]) => {
       const lower = key.toLowerCase();
-      if (!['content-length', 'transfer-encoding', 'connection'].includes(lower)) {
+      // On laisse Node/Express gérer le framing ; on recopie le reste (ex:
+      // content-type: text/event-stream indispensable au SSE).
+      if (['content-length', 'transfer-encoding', 'connection', 'keep-alive'].includes(lower)) {
+        return;
+      }
+      if (value === undefined) { return; }
+      try {
         res.setHeader(key, value);
+      } catch {
+        // En-tête non copiable (ex: valeur invalide) : on l'ignore.
       }
     });
 
-    if (!response.body) {
-      res.end(await response.text());
-      return;
+    // SSE : flusher les headers immédiatement pour que les chunks arrivent au
+    // client au fil de l'eau (Open WebUI, LibreChat, etc.).
+    if (isStreaming && String(upstream.headers['content-type'] || '').includes('text/event-stream')) {
+      res.flushHeaders();
     }
 
-    await pipeline(Readable.fromWeb(response.body), res);
+    upstream.on('error', () => {
+      if (!res.writableEnded) { res.end(); }
+    });
+    upstream.pipe(res);
   } catch (error) {
     if (!res.headersSent) {
       err(res, 502, error.message);
@@ -2117,9 +2646,12 @@ app.get('/api/version', async (req, res) => {
 app.get('/api/hardware-profile', async (req, res) => {
   try {
     const profile = await readHardwareProfile();
+    // P-UX : suggestion de réglages (contexte / couches GPU) d'après le matériel.
+    // Purement informatif : buildModelStartRequest ne s'en sert que si l'UI
+    // n'a fourni aucune valeur explicite.
     res.json({
       profile,
-      recommended_runtime: null
+      recommended_runtime: computeRecommendedRuntime(profile)
     });
   } catch (error) {
     err(res, 502, error.message);
@@ -2142,6 +2674,7 @@ app.get('/api/models/available', async (req, res) => {
     const loadedModels = buildLoadedModelList(runtime);
     const loadedModelNames = new Set(loadedModels.map((item) => item.model));
     const models = await listLocalModels();
+    const hardwareProfile = await readHardwareProfile();
     const files = await Promise.all(models.map(async (item) => {
       let contextLength = null;
       let gpuLayers = null;
@@ -2157,6 +2690,13 @@ app.get('/api/models/available', async (req, res) => {
         pushLogEntry('server', '/api/models/available', 'warn', `GGUF metadata unavailable for ${item.name}: ${error?.message || error}`);
       }
 
+      // P-UX : recommandation par modèle (suggestion affichée dans l'UI, jamais
+      // imposée). Le contexte conseillé est borné par le contexte natif du GGUF.
+      const recommendation = computeRecommendedRuntime(hardwareProfile, item.size);
+      if (contextLength) {
+        recommendation.context = Math.min(recommendation.context, contextLength);
+      }
+
       return {
         name: item.name,
         path: item.path,
@@ -2165,6 +2705,8 @@ app.get('/api/models/available', async (req, res) => {
         loaded: loadedModelNames.has(item.name),
         context_length: contextLength,
         gpu_layers: gpuLayers,
+        recommended_context: recommendation.context,
+        recommended_gpu_layers: recommendation.gpu_layers,
       };
     }));
     res.json({ files, source: snapshot.source });
@@ -2237,6 +2779,80 @@ app.get('/api/models/active', async (req, res) => {
   }
 });
 
+app.get('/api/embedding-model', async (req, res) => {
+  try {
+    const model = await readEmbeddingModelPreference();
+    const instance = model ? await resolveEmbeddingModelInstance(model) : null;
+    res.json({
+      embedding_model: model,
+      loaded: !!instance,
+      port: instance?.port || null,
+      server_base_url: instance?.server_base_url || null,
+    });
+  } catch (error) {
+    err(res, 502, error.message);
+  }
+});
+
+app.post('/api/embedding-model', async (req, res) => {
+  try {
+    const modelName = String(req.body?.model || '').trim();
+
+    if (!modelName) {
+      const current = await readEmbeddingModelPreference();
+      if (current) {
+        const instance = await resolveEmbeddingModelInstance(current);
+        if (instance) {
+          try {
+            await controllerRequest('/stop', {
+              method: 'POST',
+              body: JSON.stringify({ model: current }),
+              timeout: 30000,
+              maxRetries: 0,
+            });
+          } catch (stopError) {
+            console.error('[model-manager] /api/embedding-model stop error', stopError);
+          }
+        }
+      }
+      try {
+        await fs.promises.rm(EMBEDDING_MODEL_STATE_PATH, { force: true });
+      } catch {
+        // no-op
+      }
+      return res.json({ ok: true, embedding_model: null });
+    }
+
+    const localModels = await listLocalModels();
+    const exists = localModels.some((item) => item.name.toLowerCase() === modelName.toLowerCase());
+    if (!exists) {
+      return err(res, 404, `Modele introuvable: ${modelName}`);
+    }
+
+    await writeEmbeddingModelPreference(modelName);
+
+    const instance = await resolveEmbeddingModelInstance(modelName);
+    if (!instance) {
+      try {
+        const startRequest = await buildModelStartRequest(modelName);
+        startRequest.payload.embedding = true;
+        await controllerRequest('/start', {
+          method: 'POST',
+          body: JSON.stringify(startRequest.payload),
+          timeout: CONTROLLER_START_TIMEOUT_MS,
+          maxRetries: 0,
+        });
+      } catch (startError) {
+        console.error('[model-manager] /api/embedding-model start error', startError);
+      }
+    }
+
+    res.json({ ok: true, embedding_model: modelName });
+  } catch (error) {
+    err(res, 502, error.message);
+  }
+});
+
 app.get('/api/models/status', async (req, res) => {
   try {
     const [snapshot, models] = await Promise.all([getRuntimeSnapshot(), listLocalModels()]);
@@ -2304,19 +2920,46 @@ app.post('/api/models/download', async (req, res) => {
   }
 });
 
+app.get('/api/models/load-progress', async (req, res) => {
+  try {
+    const progress = await readLoadProgress(req.query.model);
+    res.json(progress);
+  } catch (error) {
+    err(res, 502, error.message);
+  }
+});
+
+app.get('/api/models/download-progress', async (req, res) => {
+  try {
+    const progress = await readDownloadProgress(req.query.model);
+    res.json(progress);
+  } catch (error) {
+    err(res, 502, error.message);
+  }
+});
+
 app.post('/api/models/load', async (req, res) => {
   try {
     const startRequest = await buildModelStartRequest(req.body?.model, req.body?.context, req.body?.gpu_layers);
+    const modelName = String(req.body?.model || startRequest.model.name);
     const payload = { ...startRequest.payload, activate: false };
+    startLoadJob(modelName);
+    advanceLoadJob(modelName, 'spawning');
     console.log('[model-manager] /api/models/load', { model: startRequest.model.name, payload });
-    await controllerRequest('/start', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-      timeout: CONTROLLER_START_TIMEOUT_MS,
-      // PAS de retry : /start est non idempotent, un retry relancerait un
-      // chargement complet de GGUF par-dessus le premier (minutes perdues).
-      maxRetries: 0,
-    });
+    try {
+      await controllerRequest('/start', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        timeout: CONTROLLER_START_TIMEOUT_MS,
+        // PAS de retry : /start est non idempotent, un retry relancerait un
+        // chargement complet de GGUF par-dessus le premier (minutes perdues).
+        maxRetries: 0,
+      });
+      finishLoadJob(modelName, null);
+    } catch (loadError) {
+      finishLoadJob(modelName, loadError.message);
+      throw loadError;
+    }
     invalidateStatusCache();
     res.json({
       model: startRequest.model.name,
@@ -2349,15 +2992,25 @@ app.post('/api/models/select', async (req, res) => {
       payload.gpu_layers = normalizedGpuLayers;
     }
     console.log('[model-manager] /api/models/select', { model: modelName, payload });
-    await controllerRequest('/start', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-      timeout: CONTROLLER_START_TIMEOUT_MS,
-      // P1 : /select est une activation pure quand context/gpu_layers ne sont
-      // pas fournis. Un retry relancerait un chargement complet de GGUF
-      // par-dessus le premier (minutes perdues + fetch failed) → jamais.
-      maxRetries: 0,
-    });
+    // P-UX : on tracke aussi le job pour le cas où /select déclenche un vrai
+    // chargement (modèle pas encore en mémoire). Si l'instance existe déjà,
+    // la promotion est instantanée et le job disparaît aussitôt (ready).
+    startLoadJob(modelName);
+    try {
+      await controllerRequest('/start', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        timeout: CONTROLLER_START_TIMEOUT_MS,
+        // P1 : /select est une activation pure quand context/gpu_layers ne sont
+        // pas fournis. Un retry relancerait un chargement complet de GGUF
+        // par-dessus le premier (minutes perdues + fetch failed) → jamais.
+        maxRetries: 0,
+      });
+      finishLoadJob(modelName, null);
+    } catch (selectError) {
+      finishLoadJob(modelName, selectError.message);
+      throw selectError;
+    }
     invalidateStatusCache();
     res.json({
       active_model: modelName,
@@ -2497,7 +3150,8 @@ app.get('/v1/models', async (req, res) => {
   try {
     const snapshot = await getRuntimeSnapshot();
     const runtime = snapshot.runtime;
-    res.json({ object: 'list', data: proxyModelPayload(runtime) });
+    const models = await buildFullModelList(runtime);
+    res.json({ object: 'list', data: models });
   } catch (error) {
     err(res, 502, error.message);
   }
@@ -2512,6 +3166,24 @@ app.post('/v1/completions', async (req, res) => {
 });
 
 app.post('/v1/embeddings', async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body.model || String(body.model).trim() === '') {
+      const preferred = await readEmbeddingModelPreference();
+      if (preferred) {
+        body.model = preferred;
+        req.body = body;
+      } else {
+        const embeddingModel = await resolveEmbeddingModel();
+        if (embeddingModel) {
+          body.model = embeddingModel;
+          req.body = body;
+        }
+      }
+    }
+  } catch {
+    // best-effort : on laisse le payload tel quel si la résolution échoue
+  }
   await proxyOpenAiRequest(req, res, '/v1/embeddings');
 });
 
@@ -2519,7 +3191,8 @@ app.get('/models', async (req, res) => {
   try {
     const snapshot = await getRuntimeSnapshot();
     const runtime = snapshot.runtime;
-    res.json({ object: 'list', data: proxyModelPayload(runtime) });
+    const models = await buildFullModelList(runtime);
+    res.json({ object: 'list', data: models });
   } catch (error) {
     err(res, 502, error.message);
   }
@@ -2534,6 +3207,24 @@ app.post('/completions', async (req, res) => {
 });
 
 app.post('/embeddings', async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body.model || String(body.model).trim() === '') {
+      const preferred = await readEmbeddingModelPreference();
+      if (preferred) {
+        body.model = preferred;
+        req.body = body;
+      } else {
+        const embeddingModel = await resolveEmbeddingModel();
+        if (embeddingModel) {
+          body.model = embeddingModel;
+          req.body = body;
+        }
+      }
+    }
+  } catch {
+    // best-effort : on laisse le payload tel quel si la résolution échoue
+  }
   await proxyOpenAiRequest(req, res, '/v1/embeddings');
 });
 

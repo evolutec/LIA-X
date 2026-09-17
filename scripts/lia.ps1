@@ -40,12 +40,12 @@ function Start-ModelLoaderContainer {
     $additionalArgs = @(
         '-e', "LLAMA_HOST_CONTROL_URL=http://host.docker.internal:$($Config.ports.controller)",
         '-e', "LLAMA_SERVER_BASE_URL=http://host.docker.internal:$($Config.ports.llama)",
+        '-e', "METRICS_HOST_URL=http://host.docker.internal:$($Config.ports.gpuMetrics)",
         '-e', 'MODEL_STORAGE_DIR=/models',
         '-e', 'RUNTIME_STATE_PATH=/runtime/host-runtime-state.json',
         '-e', 'PROXY_MODEL_ID=lia-local',
         '--mount', $modelMountArg,
         '--mount', $runtimeMountArg,
-        '--restart', 'unless-stopped',
         '--health-cmd', 'curl -fsS http://127.0.0.1:3005/health > /dev/null || exit 1',
         '--health-interval', '15s',
         '--health-timeout', '10s',
@@ -53,7 +53,7 @@ function Start-ModelLoaderContainer {
     )
 
     Start-DockerContainer `
-        -ContainerName 'lia-model-loader' `
+        -ContainerName 'model-loader' `
         -ImageName $Config.docker.images.modelLoader `
         -LiaImageName $Config.docker.liaImages.modelLoader `
         -InternalPort 3005 `
@@ -93,12 +93,20 @@ function Start-ModelLoaderContainer {
 
 function Start-AnythingLLMContainer {
     $additionalArgs = @(
-        '-v', 'anythingllm-storage:/app/server/storage',
-        '--restart', 'unless-stopped'
+        '-e', 'STORAGE_DIR=/app/server/storage',
+        '-e', 'LLM_PROVIDER=generic-openai',
+        '-e', "GENERIC_OPEN_AI_BASE_PATH=http://host.docker.internal:$($Config.ports.loader)/v1",
+        '-e', 'GENERIC_OPEN_AI_MODEL_PREF=lia-local',
+        '-e', 'GENERIC_OPEN_AI_API_KEY=not-used',
+        '-e', 'GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=8192',
+        '-e', 'EMBEDDING_ENGINE=native',
+        '-e', 'NO_PROXY=model-loader,localhost,127.0.0.1,host.docker.internal',
+        '-e', 'no_proxy=model-loader,localhost,127.0.0.1,host.docker.internal',
+        '-v', 'anythingllm-storage:/app/server/storage'
     )
 
     Start-DockerContainer `
-        -ContainerName 'lia-anythingllm' `
+        -ContainerName 'anythingllm' `
         -ImageName $Config.docker.images.anythingllm `
         -LiaImageName $Config.docker.liaImages.anythingllm `
         -InternalPort 3001 `
@@ -106,17 +114,30 @@ function Start-AnythingLLMContainer {
         -NetworkName $Config.docker.network `
         -Config $Config `
         -AdditionalArgs $additionalArgs `
-        -HealthCheckUrl "http://127.0.0.1:$($Config.ports.anything)"
+        -HealthCheckUrl "http://127.0.0.1:$($Config.ports.anything)" `
+        -UseBaseImage
 }
 
 function Start-OpenWebUiContainer {
     $additionalArgs = @(
+        '-e', 'WEBUI_AUTH=False',
+        '-e', 'WEBUI_SECRET_KEY=lia-local-secret',
+        '-e', 'ENABLE_OLLAMA_API=false',
+        '-e', 'ENABLE_OPENAI_API=true',
+        '-e', "OPENAI_API_BASE_URL=http://host.docker.internal:$($Config.ports.loader)/v1",
+        '-e', "OPENAI_API_BASE_URLS=http://host.docker.internal:$($Config.ports.loader)/v1",
+        '-e', 'OPENAI_API_KEYS=not-used',
+        '-e', 'OPENAI_API_KEY=not-used',
         '-v', 'open-webui-data:/app/backend/data',
-        '--restart', 'unless-stopped'
+        '--health-cmd', 'curl -fsS http://127.0.0.1:8080/ > /dev/null || exit 1',
+        '--health-interval', '30s',
+        '--health-timeout', '5s',
+        '--health-start-period', '60s',
+        '--health-retries', '3'
     )
 
     Start-DockerContainer `
-        -ContainerName 'lia-openwebui' `
+        -ContainerName 'openwebui' `
         -ImageName $Config.docker.images.openWebUi `
         -LiaImageName $Config.docker.liaImages.openWebUi `
         -InternalPort 8080 `
@@ -124,7 +145,8 @@ function Start-OpenWebUiContainer {
         -NetworkName $Config.docker.network `
         -Config $Config `
         -AdditionalArgs $additionalArgs `
-        -HealthCheckUrl "http://127.0.0.1:$($Config.ports.openWebUi)"
+        -HealthCheckUrl "http://127.0.0.1:$($Config.ports.openWebUi)" `
+        -UseBaseImage
 }
 
 function Start-LibreChatContainer {
@@ -138,12 +160,31 @@ function Start-LibreChatContainer {
         mongo:6 | Out-Null
 
     $additionalArgs = @(
-        '-v', 'librechat-data:/app/api/data',
-        '--restart', 'unless-stopped'
+        '-e', 'CONFIG_PATH=/app/librechat.yaml',
+        '-e', 'MONGO_URI=mongodb://librechat-mongo:27017/LibreChat',
+        '-e', 'JWT_SECRET=7b9d6f2a3c8e5b1d4f7a9c3e8b2d5f1a7c9e3b6d2f8a5c1e4b7d9f3a8c2e5b1d',
+        '-e', 'JWT_REFRESH_SECRET=5a8c2e6b9d3f5a7c1e4b8d2f6a9c3e7b5d1a4f8c2e6b9d3f5a7c1e4b8d2f6a9c',
+        '-e', 'ALLOW_EMAIL_LOGIN=true',
+        '-e', 'ALLOW_REGISTRATION=true',
+        '-e', 'ALLOW_SOCIAL_LOGIN=false',
+        '-e', 'OPENAI_API_KEY=not-used',
+        '-e', "OPENAI_BASE_URL=http://host.docker.internal:$($Config.ports.loader)/v1",
+        '-e', "OPENAI_API_BASE_URL=http://host.docker.internal:$($Config.ports.loader)/v1",
+        '-e', "OPENAI_API_BASE_URLS=http://host.docker.internal:$($Config.ports.loader)/v1",
+        '-e', "OPENAI_REVERSE_PROXY=http://host.docker.internal:$($Config.ports.loader)/v1",
+        '-e', 'OPENAI_MODELS_FETCH=true',
+        '-e', 'OPENAI_MODELS=lia-local',
+        '-e', 'AUTO_FETCH_MODELS=true',
+        '-e', 'CUSTOM_MODELS=[{"user":"system","name":"lia-local","displayName":"LIA Local LLM","modelName":"lia-local","icon":"llama"}]',
+        '-e', 'ENABLE_OPENAI=true',
+        '-e', 'OPENAI_PROXY_ENABLED=true',
+        '-e', 'DEBUG_OPENAI=true',
+        '-e', 'DISABLE_TELEMETRY=true',
+        '-v', 'librechat-data:/app/api/data'
     )
 
     Start-DockerContainer `
-        -ContainerName 'lia-librechat' `
+        -ContainerName 'librechat' `
         -ImageName $Config.docker.images.libreChat `
         -LiaImageName $Config.docker.liaImages.libreChat `
         -InternalPort $Config.ports.libreChatInternal `
@@ -154,7 +195,27 @@ function Start-LibreChatContainer {
         -HealthCheckUrl "http://127.0.0.1:$($Config.ports.libreChat)"
 }
 
-# Logique principale refactorisée
+# Logique principale
+Step "1/6" "Vérification de Docker"
+$dockerInfoOk = $false
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+        $null = docker info 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $dockerInfoOk = $true
+            break
+        }
+    } catch {
+        # daemon non prêt
+    }
+    if ($attempt -lt 3) {
+        Write-Host "  Docker daemon non prêt, nouvel essai dans 5s... ($attempt/3)" -ForegroundColor DarkGray
+        Start-Sleep -Seconds 5
+    }
+}
+if (-not $dockerInfoOk) {
+    throw "Docker n'est pas accessible. Veuillez vous assurer que Docker Desktop est démarré et fonctionnel."
+}
 OK "Docker opérationnel"
 
 # Normalisation de la configuration runtime existante
@@ -222,6 +283,26 @@ if ($interfaceChoice -in @("3", "4")) {
 }
 
 Open-Tabs $tabs
+
+# ── Vérification finale : tests de fumée ─────────────────────────────────────
+# P-BASSE : un installateur idempotent doit aussi VÉRIFIER que la stack est
+# réellement fonctionnelle (controller joignable, proxy OpenAI, inférence).
+# Une erreur de syntaxe du controller (ParserError) serait ainsi détectée
+# immédiatement au lieu de se manifester par un « fetch failed » dans l'UI.
+$smokeScript = Join-Path (Split-Path -Parent $PSScriptRoot) 'tests\smoke.ps1'
+if (Test-Path $smokeScript) {
+    Step "7/7" "Vérification de la stack (tests de fumée)"
+    Write-Host "  Attente de la disponibilité des services (20 s)..." -ForegroundColor DarkGray
+    Start-Sleep -Seconds 20
+    & $smokeScript
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Certains tests de fumée ont échoué. Détail : pwsh -File `"$smokeScript`""
+    } else {
+        OK "Tous les tests de fumée passent"
+    }
+} else {
+    Write-Host "  [SKIP] tests\smoke.ps1 introuvable" -ForegroundColor DarkGray
+}
 
 $sep = "=" * 64
 Write-Host "`n  $sep" -ForegroundColor Cyan

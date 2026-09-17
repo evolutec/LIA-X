@@ -33,9 +33,9 @@ Write-Host ""
 Write-Host "[2/3] Reconstruction du frontend..." -ForegroundColor Yellow
 
 try {
-    Write-Host "  - Nettoyage du dossier build..." -ForegroundColor Gray
-    if (Test-Path "$(Join-Path $ModelManagerPath build)") {
-        Remove-Item -Path "$(Join-Path $ModelManagerPath build)" -Recurse -Force
+    Write-Host "  - Nettoyage du dossier dist..." -ForegroundColor Gray
+    if (Test-Path "$(Join-Path $ModelManagerPath dist)") {
+        Remove-Item -Path "$(Join-Path $ModelManagerPath dist)" -Recurse -Force
     }
 
     Write-Host "  - Lancement de npm run build..." -ForegroundColor Gray
@@ -80,4 +80,4 @@ try {
 
 Write-Host ""
 Write-Host "=== SCRIPT TERMINÉ ===" -ForegroundColor Cyan
-Write-Host "Vérifiez le dossier model-manager/build pour les fichiers générés."
+Write-Host "Vérifiez le dossier model-manager/dist pour les fichiers générés."

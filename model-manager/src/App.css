@@ -1333,6 +1333,72 @@ input[type="text"]:focus {
   z-index: 1;
 }
 
+/* ── Barre de progression de chargement d'un modèle (parsing → spawn → warmup → ready) ── */
+.load-progress {
+  margin: 12px 0;
+  padding: 14px 16px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.load-progress.error {
+  border-color: rgba(239, 68, 68, 0.55);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.load-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 0.9rem;
+}
+
+.load-progress-head span {
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.82rem;
+}
+
+.load-progress-stages {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.load-progress-stage {
+  flex: 1 1 auto;
+  min-width: 90px;
+  text-align: center;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted, #94a3b8);
+  background: transparent;
+  transition: all 0.25s ease;
+}
+
+.load-progress-stage.done {
+  color: #2dd4bf;
+  border-color: rgba(45, 212, 191, 0.5);
+  background: rgba(45, 212, 191, 0.1);
+}
+
+.load-progress-stage.current {
+  color: #fff;
+  background: var(--accent, #6366f1);
+  border-color: var(--accent, #6366f1);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18);
+}
+
+.load-progress.error .load-progress-stage {
+  color: rgba(239, 68, 68, 0.9);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
 .card-header-row {
   display: flex;
   align-items: center;

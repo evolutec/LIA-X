@@ -51,7 +51,8 @@ function Start-DockerContainer {
         [hashtable]$Config,
         [string[]]$AdditionalArgs = @(),
         [string]$VolumeMapping = "",
-        [string]$HealthCheckUrl = ""
+        [string]$HealthCheckUrl = "",
+        [switch]$UseBaseImage
     )
 
     Remove-Container $ContainerName
@@ -66,11 +67,39 @@ function Start-DockerContainer {
         Remove-Container $ContainerName
     }
 
-    # Build de l'image LIA personnalisée
-    INFO "Construction de l'image Docker $LiaImageName"
-    docker build -t $LiaImageName -f "$($Config.rootDir)\Dockerfiles\Dockerfile.$ContainerName" $Config.rootDir
-    if ($LASTEXITCODE -ne 0) {
-        throw "Build du conteneur $ContainerName impossible."
+    # Détection flexible du Dockerfile
+    $dockerfileCandidates = @(
+        (Join-Path $Config.rootDir "Dockerfiles\Dockerfile.$ContainerName"),
+        (Join-Path $Config.rootDir "Dockerfiles\Dockerfile.lia-$ContainerName"),
+        (Join-Path $Config.rootDir "Dockerfiles\Dockerfile.$($ContainerName -replace '^lia-', '')")
+    )
+    $dockerfilePath = $dockerfileCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $dockerfilePath) {
+        throw "Dockerfile introuvable pour $ContainerName (candidats : $($dockerfileCandidates -join ', '))"
+    }
+
+    $runImageName = $LiaImageName
+    if ($UseBaseImage) {
+        $runImageName = $ImageName
+        INFO "Utilisation de l'image Docker existante $runImageName"
+        docker image inspect $runImageName *> $null
+        if ($LASTEXITCODE -ne 0) {
+            INFO "Image absente localement, téléchargement : $runImageName"
+            docker pull $runImageName
+            if ($LASTEXITCODE -ne 0) {
+                throw "Téléchargement de l'image $runImageName impossible."
+            }
+        }
+    } else {
+        # Build de l'image LIA personnalisée. Docker réutilise déjà le cache
+        # local; --cache-from sur une image locale produit des erreurs de
+        # manifest avec BuildKit quand l'image n'existe pas en registry.
+        INFO "Construction de l'image Docker $LiaImageName"
+        $buildArgs = @('build', '-t', $LiaImageName, '-f', $dockerfilePath, $Config.rootDir)
+        docker @buildArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Build du conteneur $ContainerName impossible."
+        }
     }
 
     $args = @(
@@ -87,7 +116,7 @@ function Start-DockerContainer {
 
     $args += @('--restart', 'unless-stopped')
     $args += $AdditionalArgs
-    $args += $LiaImageName
+    $args += $runImageName
 
     docker @args | Out-Null
 

@@ -158,7 +158,7 @@ Fichier: [`services/gpu-metrics/service.ps1`](services/gpu-metrics/service.ps1:1
 - **Fonctionnalités** :
   - Mesure de l'utilisation GPU (Utilization Percentage)
   - Mesure de la mémoire dédiée (Dedicated Usage)
-  - Exposition d'API sur le port 13620
+  - Exposition d'API sur le port 13621
   - Fallback vers les compteurs Windows si `hw-smi.exe` n'est pas disponible
   - Exposition des logs GPU dans les logs du Model Loader
 
@@ -198,7 +198,7 @@ Fichier: [`runtime/host-runtime-config.json`](runtime/host-runtime-config.json:1
 | LibreChat | http://localhost:3007 | Frontend OpenAI-compatible |
 | Contrôleur hôte | http://127.0.0.1:13579 | Contrôle des processus `llama-server` |
 | `llama-server` | http://127.0.0.1:12434-12444 | Instance par modèle sur ports dynamiques |
-| GPU Metrics | http://127.0.0.1:13620 | Collecte et expose les métriques GPU (utilisation, mémoire) |
+| GPU Metrics | http://127.0.0.1:13621 | Collecte et expose les métriques GPU (utilisation, mémoire) |
 
 ## Flux de données
 

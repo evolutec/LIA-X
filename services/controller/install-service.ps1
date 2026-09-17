@@ -18,6 +18,6 @@ $helpersPath = Join-Path $PSScriptRoot '..\shared\service-helpers.ps1'
 # processus, sinon NSSM (AppThrottle) relance un controller entre deux kills
 # et le port 13579 ne se libère jamais (cause du crash-loop historique).
 $controllerScript = Join-Path $PSScriptRoot 'llama-host-controller.ps1'
-Install-Or-Update-LiaService -ServiceName 'LIA Controller' -DisplayName 'LIA Controller' -Description 'Service de controle hote LIA' -ScriptPath $controllerScript -ExpectedPort 13579 -RootDir $RootDir
+Install-Or-Update-LiaService -ServiceName 'LIA Controller' -DisplayName 'LIA Controller' -Description 'Service de controle hote LIA' -ScriptPath $controllerScript -ExpectedPort 13579 -RootDir $RootDir -ProcessPattern 'llama-host-controller\.ps1'
 
 Write-Host "Installation du service LIA Controller terminée."

@@ -2,6 +2,8 @@
 # Fonctions de gestion des services Windows
 
 function Start-HostMetricsService([hashtable]$Config) {
+    Ensure-WingetPackage -id 'NSSM.NSSM' -name 'NSSM (Non-Sucking Service Manager)' -checkCommand 'nssm.exe'
+
     $metricsScript = Join-Path $Config.rootDir $Config.paths.gpuMetricsServiceHelper
     if (-not (Test-Path $metricsScript)) {
         WARN "Service de metriques hôte introuvable : $metricsScript"
@@ -12,6 +14,8 @@ function Start-HostMetricsService([hashtable]$Config) {
 }
 
 function Ensure-ControllerServiceInstalled([hashtable]$Config) {
+    Ensure-WingetPackage -id 'NSSM.NSSM' -name 'NSSM (Non-Sucking Service Manager)' -checkCommand 'nssm.exe'
+
     if (Test-IsAdministrator) {
         & $Config.paths.controllerServiceHelper -RootDir $Config.rootDir
         return
@@ -39,7 +43,26 @@ function Ensure-ControllerServiceInstalled([hashtable]$Config) {
 
 function Ensure-ControllerRunning([hashtable]$Config) {
     $controllerOk = $false
-    if (Wait-HttpOk -url "http://127.0.0.1:$($Config.ports.controller)/health" -maxTries 1 -delay 1) {
+
+    $controllerPortOwner = $null
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $Config.ports.controller -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($conn) { $controllerPortOwner = [int]$conn.OwningProcess }
+    } catch {}
+
+    if (-not (Wait-HttpOk -url "http://127.0.0.1:$($Config.ports.controller)/health" -maxTries 1 -delay 1) -and $controllerPortOwner) {
+        $ownerProc = Get-CimInstance Win32_Process -Filter "ProcessId=$controllerPortOwner" -ErrorAction SilentlyContinue
+        if ($ownerProc -and $ownerProc.CommandLine -and $ownerProc.CommandLine -match 'llama-host-controller\.ps1') {
+            INFO "Contrôleur hôte déjà en écoute, attente de sa disponibilité HTTP"
+            $maxTries = $Config.timeout.serviceStart
+            $delay = $Config.timeout.serviceDelay
+            if (Wait-HttpOk -url "http://127.0.0.1:$($Config.ports.controller)/health" -maxTries $maxTries -delay $delay) {
+                $controllerOk = $true
+            }
+        }
+    }
+
+    if (-not $controllerOk -and (Wait-HttpOk -url "http://127.0.0.1:$($Config.ports.controller)/health" -maxTries 1 -delay 1)) {
         try {
             $currentStatus = Invoke-RestMethod -Uri "http://127.0.0.1:$($Config.ports.controller)/status" -Method Get -TimeoutSec 5 -ErrorAction Stop
             $modelsMatch = [string]$currentStatus.models_dir -ieq $Config.modelsDir
@@ -57,11 +80,31 @@ function Ensure-ControllerRunning([hashtable]$Config) {
                 Stop-ExistingController
             }
         } catch {
-            Stop-LlamaServerProcess
-            Stop-ExistingController
+            $owner = $null
+            try {
+                $conn = Get-NetTCPConnection -LocalPort $Config.ports.controller -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($conn) { $owner = [int]$conn.OwningProcess }
+            } catch {}
+
+            if ($owner) {
+                $ownerProc = Get-CimInstance Win32_Process -Filter "ProcessId=$owner" -ErrorAction SilentlyContinue
+                if ($ownerProc -and $ownerProc.CommandLine -and $ownerProc.CommandLine -match 'llama-host-controller\.ps1') {
+                    INFO "Contrôleur hôte occupé pendant son démarrage, attente au lieu de relancer"
+                    if (Wait-HttpOk -url "http://127.0.0.1:$($Config.ports.controller)/health" -maxTries $Config.timeout.serviceStart -delay $Config.timeout.serviceDelay) {
+                        $controllerOk = $true
+                    }
+                }
+            }
+
+            if (-not $controllerOk) {
+                Stop-LlamaServerProcess
+                Stop-ExistingController
+            }
         }
     } else {
-        Stop-LlamaServerProcess
+        if (-not $controllerOk) {
+            Stop-LlamaServerProcess
+        }
     }
 
     if (-not $controllerOk) {
@@ -215,15 +258,13 @@ function Start-DefaultRuntime([hashtable]$Config) {
         return
     }
 
-    INFO "Chargement initial : $defaultModel"
+    INFO "Chargement initial demandé : $defaultModel"
     $payload = @{ model = $defaultModel } | ConvertTo-Json
-    Invoke-RestMethod -Uri "http://127.0.0.1:$($Config.ports.controller)/start" -Method Post -Body $payload -ContentType 'application/json' | Out-Null
-
-    $maxTries = $Config.timeout.httpRetries
-    $delay = $Config.timeout.httpDelay
-    if (-not (Wait-HttpOk -url "http://127.0.0.1:$($Config.ports.llama)/v1/models" -maxTries $maxTries -delay $delay)) {
-        WARN "llama-server ne répond pas encore. Le Model Loader permettra de relancer un modèle."
-    } else {
-        OK "llama-server répond sur http://127.0.0.1:$($Config.ports.llama)/v1"
+    try {
+        Invoke-RestMethod -Uri "http://127.0.0.1:$($Config.ports.controller)/start" -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 10 | Out-Null
+    } catch {
+        WARN "Demande de chargement initial acceptée par le controller, mais la réponse HTTP a échoué : $($_.Exception.Message)"
     }
+
+    INFO "Le controller va charger le modèle en arrière-plan. Ne pas interrompre."
 }

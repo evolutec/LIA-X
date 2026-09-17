@@ -31,6 +31,14 @@ Stop-LegacyGpuMetricsProcesses
 
 # LIA GPU Metrics: service de métriques système et GPU
 $gpuMetricsScript = Join-Path $PSScriptRoot 'service.ps1'
-Install-Or-Update-LiaService -ServiceName 'LIA GPU Metrics' -DisplayName 'LIA GPU Metrics' -Description 'Service de metriques GPU et systeme LIA' -ScriptPath $gpuMetricsScript -ExpectedPort 13620 -RootDir $RootDir
+$configPath = Join-Path $RootDir 'config.json'
+$gpuMetricsPort = 13621
+if (Test-Path $configPath) {
+    try {
+        $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
+        if ($cfg.ports -and $cfg.ports.gpuMetrics) { $gpuMetricsPort = [int]$cfg.ports.gpuMetrics }
+    } catch {}
+}
+Install-Or-Update-LiaService -ServiceName 'LIA GPU Metrics' -DisplayName 'LIA GPU Metrics' -Description 'Service de metriques GPU et systeme LIA' -ScriptPath $gpuMetricsScript -ExpectedPort $gpuMetricsPort -RootDir $RootDir -ProcessPattern 'gpu-metrics\\service\.ps1|gpu-metrics/service\.ps1'
 
 Write-Host "Installation du service LIA GPU Metrics terminée."
