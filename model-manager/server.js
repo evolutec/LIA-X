@@ -391,7 +391,7 @@ const LLAMA_SERVER_BASE_URL = (process.env.LLAMA_SERVER_BASE_URL || 'http://host
 const MODEL_STORAGE_DIR = process.env.MODEL_STORAGE_DIR || path.join(__dirname, 'models');
 const RUNTIME_STATE_PATH = process.env.RUNTIME_STATE_PATH || '/runtime/host-runtime-state.json';
 const RUNTIME_HARDWARE_PROFILE_PATH = process.env.RUNTIME_HARDWARE_PROFILE_PATH || path.join(path.dirname(RUNTIME_STATE_PATH), 'hardware-profile.json');
-const EMBEDDING_MODEL_STATE_PATH = process.env.EMBEDDING_MODEL_STATE_PATH || path.join(path.dirname(RUNTIME_STATE_PATH), 'embedding-model.json');
+const EMBEDDING_MODEL_STATE_PATH = process.env.EMBEDDING_MODEL_STATE_PATH || path.join(MODEL_STORAGE_DIR, '.lia', 'embedding-model.json');
 const PORT = Number(process.env.MODEL_MANAGER_PORT || 3005);
 const PROXY_MODEL_ID = process.env.PROXY_MODEL_ID || 'lia-local';
 const ROOCODE_SOURCE_HEADER_NAME = String(process.env.ROOCODE_SOURCE_HEADER_NAME || 'x-roocode-source').trim().toLowerCase();
@@ -2832,8 +2832,16 @@ app.post('/api/embedding-model', async (req, res) => {
     await writeEmbeddingModelPreference(modelName);
 
     const instance = await resolveEmbeddingModelInstance(modelName);
-    if (!instance) {
+    if (!instance || instance.embedding !== true) {
       try {
+        if (instance && instance.embedding !== true) {
+          await controllerRequest('/stop', {
+            method: 'POST',
+            body: JSON.stringify({ model: modelName }),
+            timeout: 30000,
+            maxRetries: 0,
+          });
+        }
         const startRequest = await buildModelStartRequest(modelName);
         startRequest.payload.embedding = true;
         await controllerRequest('/start', {

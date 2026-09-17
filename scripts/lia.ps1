@@ -43,6 +43,7 @@ function Start-ModelLoaderContainer {
         '-e', "METRICS_HOST_URL=http://host.docker.internal:$($Config.ports.gpuMetrics)",
         '-e', 'MODEL_STORAGE_DIR=/models',
         '-e', 'RUNTIME_STATE_PATH=/runtime/host-runtime-state.json',
+        '-e', 'EMBEDDING_MODEL_STATE_PATH=/models/.lia/embedding-model.json',
         '-e', 'PROXY_MODEL_ID=lia-local',
         '--mount', $modelMountArg,
         '--mount', $runtimeMountArg,

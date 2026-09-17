@@ -22,6 +22,7 @@ RUN cp /app/model-manager/server.js /app/model-manager/server.cjs
 ENV NODE_ENV=production
 ENV MODEL_MANAGER_PORT=3005
 ENV MODEL_STORAGE_DIR=/models
+ENV EMBEDDING_MODEL_STATE_PATH=/models/.lia/embedding-model.json
 ENV PROXY_MODEL_ID=lia-local
 ENV CONTROLLER_PORT=13579
 ENV LLAMA_PORT=12434
