@@ -289,7 +289,7 @@ const CIRCUIT_BREAKER = {
 
 // Endpoints NON idempotents : un retry déclencherait un second choc complet
 // (rechargement du modèle GGUF, arrêt d'instance). On ne retente JAMAIS.
-const NON_IDEMPOTENT_ENDPOINTS = new Set(['/start', '/stop', '/restart']);
+const NON_IDEMPOTENT_ENDPOINTS = new Set(['/start', '/stop', '/restart', '/open-folder']);
 
 // Cache global pour /status
 let STATUS_CACHE = null;
@@ -389,6 +389,9 @@ const CONTROLLER_URL = (process.env.LLAMA_HOST_CONTROL_URL || 'http://host.docke
 const CONTROLLER_HOST_LAUNCHER_URL = (process.env.CONTROLLER_HOST_LAUNCHER_URL || 'http://host.docker.internal:13580').replace(/\/$/, '');
 const LLAMA_SERVER_BASE_URL = (process.env.LLAMA_SERVER_BASE_URL || 'http://host.docker.internal:12434').replace(/\/$/, '');
 const MODEL_STORAGE_DIR = process.env.MODEL_STORAGE_DIR || path.join(__dirname, 'models');
+// Chemin des modèles côté hôte Windows (informé par l'installateur / lia.ps1).
+// Affiché dans la section Modèles de l'UI pour ouvrir le dossier de stockage.
+const MODEL_HOST_DIR = process.env.HOST_MODELS_DIR || '';
 const RUNTIME_STATE_PATH = process.env.RUNTIME_STATE_PATH || '/runtime/host-runtime-state.json';
 const RUNTIME_HARDWARE_PROFILE_PATH = process.env.RUNTIME_HARDWARE_PROFILE_PATH || path.join(path.dirname(RUNTIME_STATE_PATH), 'hardware-profile.json');
 const EMBEDDING_MODEL_STATE_PATH = process.env.EMBEDDING_MODEL_STATE_PATH || path.join(MODEL_STORAGE_DIR, '.lia', 'embedding-model.json');
@@ -1195,6 +1198,53 @@ async function readRuntimeStateFallback() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Dossier des modèles CÔTÉ HÔTE (Windows)
+// Priorité : variable d'env de l'installeur (HOST_MODELS_DIR) → config runtime
+// écrite par lia.ps1 (models_dir) → état runtime. Permet d'afficher/ouvrir le
+// vrai dossier de stockage même si le conteneur a été démarré manuellement.
+// ─────────────────────────────────────────────────────────────────────────────
+const RUNTIME_CONFIG_PATH = process.env.RUNTIME_CONFIG_PATH
+  || path.join(path.dirname(RUNTIME_STATE_PATH), 'host-runtime-config.json');
+let HOST_MODELS_DIR_CACHE = { value: null, expiresAt: 0 };
+
+function normalizeHostDir(value) {
+  const candidate = String(value || '').trim();
+  if (!candidate) {
+    return '';
+  }
+  // Un chemin relatif n'est pas exploitable côté hôte : on l'ignore.
+  return /^[a-zA-Z]:[\\/]/.test(candidate) || candidate.startsWith('\\\\') ? candidate : '';
+}
+
+async function resolveHostModelsDir() {
+  const fromEnv = normalizeHostDir(MODEL_HOST_DIR);
+  if (fromEnv) {
+    return fromEnv;
+  }
+
+  if (HOST_MODELS_DIR_CACHE.value && Date.now() < HOST_MODELS_DIR_CACHE.expiresAt) {
+    return HOST_MODELS_DIR_CACHE.value;
+  }
+
+  let resolved = '';
+  try {
+    const raw = await fs.promises.readFile(RUNTIME_CONFIG_PATH, 'utf8');
+    const config = parseJsonFileContent(raw);
+    resolved = normalizeHostDir(config?.models_dir);
+  } catch {
+    resolved = '';
+  }
+
+  if (!resolved) {
+    const state = await readRuntimeStateFallback();
+    resolved = normalizeHostDir(state?.models_dir);
+  }
+
+  HOST_MODELS_DIR_CACHE = { value: resolved, expiresAt: Date.now() + 30000 };
+  return resolved;
+}
+
 async function readHardwareProfile() {
   try {
     const raw = await fs.promises.readFile(RUNTIME_HARDWARE_PROFILE_PATH, 'utf8');
@@ -1422,24 +1472,40 @@ function hasUsefulRuntimeState(runtime) {
 }
 
 function resolveActiveModel(runtime) {
-  if (runtime?.active_model) {
-    return runtime.active_model;
-  }
-
   const instances = Array.isArray(runtime?.instances)
     ? runtime.instances
     : runtime?.instances
       ? [runtime.instances]
       : [];
 
-  const activeFlaggedInstance = instances.find((instance) => Boolean(instance.active));
+  const liveInstances = instances.filter((instance) => isLiveInstance(instance));
+  // Les instances d'autres projets (proxy non LIA) ne doivent jamais être
+  // présentées comme « le modèle principal » du model-loader LIA-X.
+  const liveProjectInstances = liveInstances.filter((instance) => isProjectInstance(instance));
+
+  const declared = String(runtime?.active_model || '');
+  if (declared) {
+    // Le state hôte peut conserver un active_model orphelin (GGUF supprimé ou
+    // processus mort) : on ne le valide que si une instance VIVANTE du projet
+    // le porte, ou si /status confirme un PID actif sans liste d'instances
+    // (state mono-instance historique). Sinon l'UI annonçait un modèle
+    // principal inexistant alors que le dossier de modèles était vide.
+    if (liveProjectInstances.some((instance) => instance.model === declared)) {
+      return declared;
+    }
+    if (liveInstances.length === 0 && runtime?.running && runtime?.pid) {
+      return declared;
+    }
+    return '';
+  }
+
+  const activeFlaggedInstance = liveProjectInstances.find((instance) => Boolean(instance.active));
   if (activeFlaggedInstance) {
     return activeFlaggedInstance.model;
   }
 
-  const runningInstances = instances.filter((instance) => Boolean(instance.running));
-  if (runningInstances.length === 1) {
-    return runningInstances[0].model;
+  if (liveProjectInstances.length === 1) {
+    return liveProjectInstances[0].model;
   }
 
   return '';
@@ -1458,6 +1524,19 @@ function isProjectInstance(instance) {
   return false;
 }
 
+function isLiveInstance(instance) {
+  if (!instance || typeof instance !== 'object') {
+    return false;
+  }
+  if (!instance.running) {
+    return false;
+  }
+  // pid=null/0/absent => processus hôte disparu : instance fantôme.
+  // Number(null)=0, Number('')=0, Number(undefined)=NaN : tout est rejeté.
+  const pid = Number(instance.pid);
+  return Number.isFinite(pid) && pid > 0;
+}
+
 function buildLoadedModelList(runtime) {
   const instances = Array.isArray(runtime?.instances)
     ? runtime.instances
@@ -1467,12 +1546,17 @@ function buildLoadedModelList(runtime) {
   const activeModel = resolveActiveModel(runtime);
 
   const loaded = instances
-    .filter((instance) => isProjectInstance(instance))
+    // Un modèle n'est réellement « chargé » que si une instance tourne ET
+    // possède un PID vivant côté hôte. Un state persisté peut conserver
+    // running=true avec pid=null (processus disparu, GGUF supprimé) : sans ce
+    // filtre l'UI affichait des modèles chargés alors qu'aucun GGUF n'existe.
+    .filter((instance) => isProjectInstance(instance) && isLiveInstance(instance))
     .map((instance) => ({
       id: instance.model || instance.proxy_id || `${PROXY_MODEL_ID}-${instance.port}`,
       model: instance.model,
       filename: instance.filename,
       port: instance.port,
+      pid: instance.pid ?? null,
       running: Boolean(instance.running),
       size_vram: instance.estimated_vram_bytes ?? null,
       context_length: Number.isFinite(Number(instance.context)) ? Number(instance.context) : null,
@@ -1481,7 +1565,11 @@ function buildLoadedModelList(runtime) {
     }))
     .filter((item) => Boolean(item.model));
 
-  if (loaded.length === 0 && activeModel) {
+  // Repli « state legacy » : uniquement si le controller confirme un processus
+  // vivant (running + pid). Sans PID, il s'agit d'un fantôme de state persisté
+  // et l'UI ne doit surtout pas afficher un modèle principal inexistant.
+  const runtimeHasLiveProcess = Boolean(runtime?.running) && runtime?.pid !== null && runtime?.pid !== undefined && runtime?.pid !== '';
+  if (loaded.length === 0 && activeModel && runtimeHasLiveProcess) {
     loaded.push({
       id: activeModel,
       model: activeModel,
@@ -2709,10 +2797,81 @@ app.get('/api/models/available', async (req, res) => {
         recommended_gpu_layers: recommendation.gpu_layers,
       };
     }));
-    res.json({ files, source: snapshot.source });
+    res.json({ files, source: snapshot.source, hostDir: await resolveHostModelsDir() || MODEL_HOST_DIR || null });
   } catch (error) {
     err(res, 502, error.message);
   }
+});
+
+// Ouvre le dossier des modèles dans l'Explorateur Windows (côté hôte).
+// Le controller (service Windows) est le seul à pouvoir lancer explorer.exe :
+// en session 0 l'ouverture est impossible, on renvoie alors mode='session0'
+// pour que l'UI propose le raccourci .url (toujours fonctionnel).
+app.post('/api/system/open-models-folder', async (req, res) => {
+  const target = normalizeHostDir(req.body?.path) || (await resolveHostModelsDir());
+  if (!target) {
+    return err(res, 503, "Dossier des modèles hôte inconnu (HOST_MODELS_DIR / runtime config non renseigné)");
+  }
+
+  const failures = [];
+
+  try {
+    const launcherResult = await hostLauncherRequest('/open-folder', {
+      method: 'POST',
+      body: JSON.stringify({ path: target }),
+      timeout: 8000,
+    });
+    if (launcherResult?.ok) {
+      return res.json({ ok: true, path: target, mode: 'launcher', result: launcherResult });
+    }
+    failures.push(`launcher: ${launcherResult?.message || 'refus'}`);
+  } catch (error) {
+    failures.push(`launcher: ${error.message}`);
+  }
+
+  try {
+    const controllerResult = await controllerRequest('/open-folder', {
+      method: 'POST',
+      body: JSON.stringify({ path: target }),
+      timeout: 15000,
+    });
+    const ok = Boolean(controllerResult?.ok);
+    return res.json({
+      ok,
+      path: controllerResult?.path || target,
+      mode: controllerResult?.mode || 'controller',
+      message: controllerResult?.message || '',
+      shortcut_url: '/api/system/models-folder-shortcut',
+      failures,
+    });
+  } catch (error) {
+    failures.push(`controller: ${error.message}`);
+    return err(res, 502, `Ouverture du dossier impossible (${failures.join(' ; ')})`);
+  }
+});
+
+// Raccourci Windows (.url) vers le dossier des modèles : cliqué, il ouvre
+// l'Explorateur sur le bon chemin. Fonctionne même quand le service tourne en
+// session 0 (cas nominal d'une installation NSSM).
+app.get('/api/system/models-folder-shortcut', async (req, res) => {
+  const target = await resolveHostModelsDir();
+  if (!target) {
+    return err(res, 503, "Dossier des modèles hôte inconnu (HOST_MODELS_DIR / runtime config non renseigné)");
+  }
+
+  const fileUrl = `file:///${target.replace(/\\/g, '/').replace(/ /g, '%20')}`;
+  const iconFile = normalizeHostDir(process.env.HOST_INSTALL_DIR) ? `${process.env.HOST_INSTALL_DIR}\\logo.ico` : '';
+  const lines = ['[InternetShortcut]', `URL=${fileUrl}`];
+  if (iconFile) {
+    lines.push(`IconFile=${iconFile}`);
+    lines.push('IconIndex=0');
+  }
+  const body = `${lines.join('\r\n')}\r\n`;
+
+  pushLogEntry('server', '/api/system/models-folder-shortcut', 'info', `Raccourci demandé pour ${target}`);
+  res.setHeader('Content-Type', 'application/internet-shortcut');
+  res.setHeader('Content-Disposition', 'attachment; filename="Dossier-modeles-LIA-X.url"');
+  res.send(body);
 });
 
 app.get('/api/models', async (req, res) => {

@@ -11,6 +11,9 @@ function App() {
   const [ollamaName, setOllamaName] = useState("");
   const [hfModelName, setHfModelName] = useState("");
   const [availableFiles, setAvailableFiles] = useState([]);
+  const [modelsHostDir, setModelsHostDir] = useState(null);
+  const [openingFolder, setOpeningFolder] = useState(false);
+  const [hostPathCopied, setHostPathCopied] = useState(false);
   const [loadedModels, setLoadedModels] = useState([]);
   const [activeModel, setActiveModel] = useState("");
   const [version, setVersion] = useState(null);
@@ -411,10 +414,48 @@ function App() {
     try {
       const data = await apiFetch('/api/models/available');
       setAvailableFiles(Array.isArray(data.files) ? data.files : []);
+      setModelsHostDir(data.hostDir || null);
     } catch (err) {
       setAvailableFiles([]);
       if (!silent) updateStatus(`Impossible de lister les fichiers : ${err.message}`);
     }
+  }
+
+  // Ouvre le dossier des modèles côté hôte via le controller (session 0 → on
+  // retombe sur le raccourci .url, qui lui fonctionne toujours).
+  async function openModelsFolder() {
+    setOpeningFolder(true);
+    try {
+      const data = await apiFetch('/api/system/open-models-folder', { method: 'POST', body: {} });
+      if (data?.ok) {
+        updateStatus(`Dossier ouvert : ${data.path}`);
+      } else if (data?.mode === 'session0') {
+        // Le service Windows tourne en session 0 : explorer.exe ne peut pas
+        // s'afficher. On fournit immédiatement le raccourci .url à cliquer.
+        downloadModelsFolderShortcut();
+        updateStatus("Service Windows en session 0 : Explorateur non ouvrable. Le raccourci « Dossier-modeles-LIA-X.url » a été téléchargé — double-cliquez-le pour ouvrir le dossier.");
+      } else {
+        downloadModelsFolderShortcut();
+        updateStatus(`Ouverture impossible (${data?.message || 'raison inconnue'}) — raccourci .url téléchargé.`);
+      }
+      return data;
+    } catch (err) {
+      downloadModelsFolderShortcut();
+      updateStatus(`Ouverture impossible : ${err.message} — raccourci .url téléchargé.`);
+      return null;
+    } finally {
+      setOpeningFolder(false);
+    }
+  }
+
+  // Télécharge le raccourci Windows pointant vers le dossier des modèles.
+  function downloadModelsFolderShortcut() {
+    const link = document.createElement('a');
+    link.href = `${apiBase}/api/system/models-folder-shortcut`;
+    link.download = 'Dossier-modeles-LIA-X.url';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   }
 
   async function refreshLoadedModels(silent = false) {
@@ -1106,6 +1147,25 @@ async function handleDownloadUrl() {
           <div className="hero-routing">
             <article className="hero-route hero-route-primary"><div className="hero-route-kicker">Principal</div><h3>{activeModel || 'Aucun modèle principal'}</h3><p>{activeModel ? `Proxy lia-local diffuse le modèle principal ${activeModel}.` : 'Sélectionne un modèle chargé pour le définir comme principal.'}</p></article>
             <article className="hero-route"><div className="hero-route-kicker">Disponibles</div><h3>{availableFiles.length}</h3><p>{availableFiles.length > 0 ? 'Fichiers GGUF détectés sur disque.' : 'Aucun fichier GGUF disponible.'}</p></article>
+            {modelsHostDir && (
+              <article className="hero-route">
+                <div className="hero-route-kicker">📁 Dossier des modèles (hôte)</div>
+                <h3 style={{ wordBreak: 'break-all', fontSize: '0.95rem', lineHeight: 1.3 }}>{modelsHostDir}</h3>
+                <p>Stockage local des fichiers GGUF utilisé par LIA-X.</p>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <button type="button" className="btn btn-reload btn-sm" disabled={openingFolder} onClick={openModelsFolder}>
+                    {openingFolder ? '⏳ Ouverture…' : '📂 Ouvrir le dossier'}
+                  </button>
+                  <a className="btn btn-reload btn-sm" href={`${apiBase}/api/system/models-folder-shortcut`} download="Dossier-modeles-LIA-X.url">⤓ Raccourci dossier</a>
+                  <button type="button" className="btn btn-reload btn-sm" onClick={() => { navigator.clipboard?.writeText(modelsHostDir); setHostPathCopied(true); setTimeout(() => setHostPathCopied(false), 2000); }}>
+                    {hostPathCopied ? '✓ Copié !' : '📋 Copier le chemin'}
+                  </button>
+                </div>
+                <p style={{ fontSize: '0.8rem', opacity: 0.85 }}>
+                  « Ouvrir le dossier » lance l'Explorateur hôte ; s'il est bloqué (service Windows), téléchargez le raccourci puis ouvrez-le.
+                </p>
+              </article>
+            )}
             <article className="hero-route"><div className="hero-route-kicker">Chargés</div><h3>{loadedModels.length}</h3><p>{loadedModels.length > 0 ? 'Les modèles en mémoire sont exposés via /api/models.' : 'Aucun modèle chargé.'}</p></article>
             <article className="hero-route hero-route-endpoint">
               <div className="hero-route-kicker">🔌 Endpoint API (OpenAI-compatible)</div>
@@ -1139,6 +1199,26 @@ async function handleDownloadUrl() {
             <div>
               <div className="card-title">🧠 Modèles</div>
               <div className="card-subtitle card-subtitle-inline">Basculer le chargement et définir le modèle principal.</div>
+              {modelsHostDir && (
+                <div className="models-folder-inline" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginTop: '0.35rem' }}>
+                  <span style={{ fontSize: '0.85rem', opacity: 0.85 }}>📁 Dossier de stockage :</span>
+                  <code style={{ fontFamily: 'monospace', fontSize: '0.85rem', wordBreak: 'break-all' }}>{modelsHostDir}</code>
+                  <button type="button" className="btn btn-reload btn-sm" onClick={openModelsFolder} disabled={openingFolder} title="Ouvrir le dossier des modèles dans l'Explorateur Windows">
+                    {openingFolder ? '⏳ Ouverture…' : '📂 Ouvrir le dossier'}
+                  </button>
+                  <a
+                    className="btn btn-reload btn-sm"
+                    href={`${apiBase}/api/system/models-folder-shortcut`}
+                    download="Dossier-modeles-LIA-X.url"
+                    title="Télécharger un raccourci Windows pointant vers ce dossier (fonctionne même service en session 0)"
+                  >
+                    ⤓ Raccourci vers le dossier
+                  </a>
+                  <button type="button" className="btn btn-reload btn-sm" onClick={() => { navigator.clipboard?.writeText(modelsHostDir); setHostPathCopied(true); setTimeout(() => setHostPathCopied(false), 2000); }} title="Copier le chemin du dossier">
+                    {hostPathCopied ? '✓ Copié !' : '📋 Copier le chemin'}
+                  </button>
+                </div>
+              )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
               <button type="button" className="btn btn-secondary btn-icon" onClick={() => setShowRecommendedRuntimeModal(true)} disabled={loading || Boolean(pendingAction)} title="Voir les recommandations runtime">

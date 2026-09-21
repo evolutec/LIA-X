@@ -45,6 +45,8 @@ function Start-ModelLoaderContainer {
         '-e', 'RUNTIME_STATE_PATH=/runtime/host-runtime-state.json',
         '-e', 'EMBEDDING_MODEL_STATE_PATH=/models/.lia/embedding-model.json',
         '-e', 'PROXY_MODEL_ID=lia-local',
+        '-e', "HOST_MODELS_DIR=$($Config.modelsDir)",
+
         '--mount', $modelMountArg,
         '--mount', $runtimeMountArg,
         '--health-cmd', 'curl -fsS http://127.0.0.1:3005/health > /dev/null || exit 1',

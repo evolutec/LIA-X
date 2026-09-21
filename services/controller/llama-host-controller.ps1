@@ -479,6 +479,15 @@ function Convert-LegacyState([hashtable]$state) {
                 )
             }
         }
+        # Aucun PID : aucun llama-server ne tourne → purger aussi les champs
+        # active_* orphelins. Sans ça le state conservait un « modèle principal »
+        # fantôme (affiché dans le model-loader et /status) alors qu'aucun GGUF
+        # n'existait plus sur le disque.
+        $state.active_model    = ''
+        $state.active_filename = ''
+        $state.active_path     = ''
+        $state.running         = $false
+        $state.pid             = $null
         return @{ instances = @(); schema_version = $SCHEMA_VERSION }
     }
     # Normalisations v2 : compléter les champs attendus absents des états v1.
@@ -642,6 +651,20 @@ function Get-ConsistentState {
         $newInstances += $instance
     }
     $state.instances = $newInstances
+
+    # ── 5bis. Purger le « modèle principal » quand plus aucune instance ──────
+    # Après suppression des fantômes (running=false), il ne doit plus rester de
+    # active_model/active_filename/active_path orphelins dans le state : sinon
+    # le model-loader (et /status) annonçait un modèle principal inexistant.
+    if (@($state.instances).Count -eq 0) {
+        if ($state.active_model -or $state.active_filename -or $state.active_path) {
+            $state.active_model    = ''
+            $state.active_filename = ''
+            $state.active_path     = ''
+            $state.started_at      = ''
+            $changed               = $true
+        }
+    }
 
     # ── 6. Garantir que instances est un tableau ───────────────────────────
     if ($state.instances -is [System.Collections.IDictionary]) {
@@ -841,6 +864,19 @@ function Repair-DeadInstances([hashtable]$state) {
             }
 
             Write-Host "[Controller] Processus mort détecté pour $($instance.model) (port $($instance.port)). Redémarrage..."
+            # Purge des instances fantômes : si le GGUF n'existe plus sur disque,
+            # relancer échouera systématiquement. On marque running=false pour
+            # que le nettoyage d'état supprime l'instance (et l'UI cesse de
+            # l'afficher comme « chargée »).
+            $record = if ($instance.filename) { $instance.filename } else { $instance.model }
+            if (-not (Test-ModelRecordExists $record)) {
+                Write-Host "[Controller] 🧹 Instance fantôme retirée (GGUF absent) : $($instance.model)"
+                Write-DebugLog "Repair: phantom pruned id=$($instance.id) model=$($instance.model)"
+                $instance.running = $false
+                $Global:PendingRepair = $true
+                Save-State $state
+                continue
+            }
             try {
                 $ctx       = if ($instance.context       -and [int]$instance.context       -gt 0) { [int]$instance.context       } else { [int](Get-Config).default_context }
                 $ngl       = if ($null -ne $instance.gpu_layers -and [int]$instance.gpu_layers -ge 0) { [int]$instance.gpu_layers } else { [int](Get-Config).default_gpu_layers }
@@ -895,6 +931,24 @@ function Resolve-ModelRecord([string]$identifier) {
     }
 
     throw "Modèle introuvable : $identifier"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test-ModelRecordExists
+# Vrai si le GGUF référencé existe encore dans le dossier de modèles configuré.
+# Sert à purger les « instances fantômes » : un state persisté peut référencer
+# un modèle supprimé du disque (ou un dossier de modèles déplacé). Sans ce
+# test, le watchdog relançait indéfiniment une instance impossible à démarrer
+# et l'UI affichait des modèles « chargés » alors qu'aucun GGUF n'existe.
+# ─────────────────────────────────────────────────────────────────────────────
+function Test-ModelRecordExists([string]$identifier) {
+    if (-not $identifier) { return $false }
+    try {
+        $null = Resolve-ModelRecord $identifier
+        return $true
+    } catch {
+        return $false
+    }
 }
 
 function Get-NextAvailablePort([hashtable]$config, [hashtable]$state) {
@@ -1015,6 +1069,43 @@ function Get-GpuStateUncached {
         label           = if ($labels) { ($labels -join ' | ') } else { 'GPU inconnu' }
         vendor          = "generic"
     }
+}
+
+function Open-FolderInExplorer([string]$targetPath) {
+    $result = @{ ok = $false; mode = 'none'; path = [string]$targetPath; message = '' }
+
+    if (-not $targetPath) {
+        $result.message = 'Chemin vide'
+        return $result
+    }
+    if (-not (Test-Path -LiteralPath $targetPath)) {
+        $result.message = "Chemin introuvable : $targetPath"
+        return $result
+    }
+
+    $sessionId = 0
+    try { $sessionId = [int][System.Diagnostics.Process]::GetCurrentProcess().SessionId } catch {}
+
+    if ($sessionId -eq 0) {
+        # Service NSSM = LocalSystem/session 0 : l'Explorateur ne peut pas
+        # s'afficher sur le bureau de l'utilisateur. On le signale pour que le
+        # model-loader propose le raccourci .url (qui, lui, fonctionne toujours).
+        $result.mode = 'session0'
+        $result.message = "Service en session 0 : ouverture de l'Explorateur impossible depuis le service. Chemin : $targetPath"
+        return $result
+    }
+
+    try {
+        Start-Process -FilePath 'explorer.exe' -ArgumentList @($targetPath) -ErrorAction Stop | Out-Null
+        $result.ok = $true
+        $result.mode = 'explorer'
+        $result.message = "Dossier ouvert : $targetPath"
+    } catch {
+        $result.mode = 'error'
+        $result.message = $_.Exception.Message
+    }
+
+    return $result
 }
 
 function Stop-LlamaProcess([hashtable]$body) {
@@ -1570,6 +1661,80 @@ function Write-Json([System.Net.Sockets.NetworkStream]$stream, [int]$statusCode,
     $stream.Flush()
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Open-HostFolder — ouverture d'un dossier de l'hôte dans l'Explorateur.
+# Le service NSSM tourne en session 0 : explorer.exe n'y est pas visible par
+# l'utilisateur. On s'appuie sur le shell déjà actif (« explorer.exe <dossier> »
+# est transféré au processus explorer de la session interactive) et on renvoie
+# mode='session0' quand aucun shell interactif n'existe, afin que l'UI propose
+# le raccourci .url (toujours fonctionnel).
+# Sécurité : le chemin est restreint au dossier des modèles de la configuration.
+# ─────────────────────────────────────────────────────────────────────────────
+function Resolve-AllowedFolder([string]$candidate) {
+    $config    = Get-Config
+    $modelsDir = [string]$config.models_dir
+    if (-not $modelsDir) { throw 'models_dir non configuré' }
+
+    $raw  = if ($candidate) { $candidate } else { $modelsDir }
+    $full = [IO.Path]::GetFullPath($raw)
+    $root = [IO.Path]::GetFullPath($modelsDir).TrimEnd('\')
+
+    $insideRoot = $full.TrimEnd('\').Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+                  $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
+    if (-not $insideRoot) {
+        throw "Chemin hors du dossier des modèles : $raw"
+    }
+    return $full
+}
+
+function Get-InteractiveShellSession {
+    foreach ($proc in (Get-Process -Name 'explorer' -ErrorAction SilentlyContinue)) {
+        if ($proc.SessionId -gt 0) { return [int]$proc.SessionId }
+    }
+    return 0
+}
+
+function Open-HostFolder([string]$requestedPath) {
+    $full = Resolve-AllowedFolder $requestedPath
+
+    # Les modèles peuvent être déposés par l'utilisateur : le dossier doit exister
+    # pour qu'Explorer s'ouvre (création idempotente, sans effet s'il existe).
+    if (-not (Test-Path -LiteralPath $full)) {
+        New-Item -ItemType Directory -Path $full -Force | Out-Null
+    }
+
+    $shellSession = Get-InteractiveShellSession
+    if ($shellSession -le 0) {
+        Write-DebugLog "open-folder path=$full mode=session0 (aucun shell interactif)" 'warn'
+        return @{
+            ok      = $false
+            path    = $full
+            mode    = 'session0'
+            message = "Aucune session interactive : utilisez le raccourci .url"
+        }
+    }
+
+    try {
+        Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $full) -ErrorAction Stop
+        Write-DebugLog "open-folder path=$full mode=user-session session=$shellSession"
+        return @{ ok = $true; path = $full; mode = 'user-session'; session = $shellSession }
+    } catch {
+        Write-DebugLog "open-folder explorer échec ($($_.Exception.Message)), repli cmd start" 'warn'
+        try {
+            Start-Process -FilePath 'cmd.exe' -ArgumentList ('/c start "" "{0}"' -f $full) -WindowStyle Hidden -ErrorAction Stop
+            return @{ ok = $true; path = $full; mode = 'user-session'; session = $shellSession }
+        } catch {
+            Write-DebugLog "open-folder échec définitif : $($_.Exception.Message)" 'error'
+            return @{
+                ok      = $false
+                path    = $full
+                mode    = 'session0'
+                message = $_.Exception.Message
+            }
+        }
+    }
+}
+
 function Read-HttpRequest([System.Net.Sockets.NetworkStream]$stream) {
     $reader      = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $false, 1024, $true)
     $requestLine = $reader.ReadLine()
@@ -1802,6 +1967,16 @@ try {
                 $saved.last_error = [string]$_.Exception.Message
                 $saved.started_at = ""
                 # running reste true → watchdog retentera
+                # SAUF si le GGUF a disparu du disque : dans ce cas l'instance est
+                # un fantôme. On la marque running=false pour que le nettoyage
+                # d'état la supprime (elle ne doit ni être relancée par le
+                # watchdog ni apparaître comme « chargée » dans l'UI).
+                $record = if ($saved.filename) { $saved.filename } else { $saved.model }
+                if (-not (Test-ModelRecordExists $record)) {
+                    $saved.running = $false
+                    Write-Host "[Controller] 🧹 Instance fantôme retirée (GGUF absent) : $($saved.model)"
+                    Write-DebugLog "Startup: phantom pruned id=$($saved.id) model=$($saved.model)"
+                }
             }
             Save-State $state2
         }
@@ -1851,7 +2026,14 @@ try {
                 $saved.pid        = $null
                 $saved.last_error = [string]$_.Exception.Message
                 $saved.started_at = ""
-                # running reste true → watchdog retentera
+                # running reste true → watchdog retentera, sauf si le GGUF a
+                # disparu du disque (instance fantôme) : on la retire.
+                $record = if ($saved.filename) { $saved.filename } else { $saved.model }
+                if (-not (Test-ModelRecordExists $record)) {
+                    $saved.running = $false
+                    Write-Host "[Controller] 🧹 Modèle principal fantôme retiré (GGUF absent) : $($saved.model)"
+                    Write-DebugLog "Startup: phantom pruned active id=$($saved.id) model=$($saved.model)"
+                }
             }
             Save-State $state2
         }
@@ -2019,6 +2201,32 @@ while ($true) {
                 Write-Json $stream 200 (Get-RuntimeStatus)
                 continue
             }
+            'POST /open-folder' {
+                # Ouvre le dossier des modèles (ou un sous-dossier) dans
+                # l'Explorateur Windows. Appelé par le model-loader depuis l'UI.
+                $body   = Read-JsonBody $request
+                $config = Get-Config
+                $target = if ($body -and $body.path) { [string]$body.path } else { [string]$config.models_dir }
+
+                # Sécurité : n'autoriser que le dossier de modèles configuré ou
+                # un de ses sous-dossiers (évite l'ouverture de C:\Windows).
+                $modelsDir = [string]$config.models_dir
+                if ($modelsDir -and $target) {
+                    $normalizedModels = $modelsDir.TrimEnd('\', '/')
+                    $normalizedTarget = $target.TrimEnd('\', '/')
+                    if ($normalizedTarget -ne $normalizedModels -and
+                        -not $normalizedTarget.StartsWith($normalizedModels + '\', [System.StringComparison]::OrdinalIgnoreCase) -and
+                        -not $normalizedTarget.StartsWith($normalizedModels + '/', [System.StringComparison]::OrdinalIgnoreCase)) {
+                        Write-Json $stream 403 @{ ok = $false; path = $target; message = 'Chemin hors du dossier de modèles' }
+                        continue
+                    }
+                }
+
+                $opened = Open-FolderInExplorer $target
+                Write-Host "[controller] POST /open-folder path=$target ok=$($opened.ok) mode=$($opened.mode)"
+                Write-Json $stream 200 $opened
+                continue
+            }
             'POST /start' {
                 $body = Read-JsonBody $request
                 if (-not $body.model) {
@@ -2075,6 +2283,16 @@ while ($true) {
                 
                 Start-LlamaProcess $body | Out-Null
                 Write-Json $stream 200 (Get-RuntimeStatus)
+                continue
+            }
+            'POST /open-folder' {
+                $body = Read-JsonBody $request
+                try {
+                    $folderResult = Open-HostFolder ([string]$body.path)
+                    Write-Json $stream 200 $folderResult
+                } catch {
+                    Write-Json $stream 403 @{ ok = $false; mode = 'refused'; message = $_.Exception.Message }
+                }
                 continue
             }
             default {
