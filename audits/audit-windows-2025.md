@@ -102,6 +102,17 @@ LIA-X est une stack locale d'inférence LLM qui orchestre :
 
 ## 4. COMPARAISON AVEC LE MARCHÉ
 
+### 4.0 README utilisateur (mise à jour 2025-09-22)
+
+Le README a été simplifié pour un public non-technique :
+- conservé en haut : logo + badges Windows 11 / Docker Desktop / llama.cpp / Multi-LLM / LibreChat-ready
+- nouvelles sections : installation rapide, prérequis, fonctionnalités en langage simple, interfaces disponibles, guide d'ajout de modèle, dépannage grand public
+- retiré : diagramme ASCII complet, endpoints détaillés, flux de données détaillés, structure interne détaillée
+- ton : utilisateur final, pas développeur
+- longueur : ~180 lignes au lieu de ~560 lignes
+
+
+
 ### 4.1 Logiciels comparés
 
 | Logiciel | Type | License | Plateformes | Maturité |
@@ -184,11 +195,11 @@ LIA-X est une stack locale d'inférence LLM qui orchestre :
 |----|--------|----------|---------------|
 | C-1 | Controller 100% PowerShell, pas de watchdog externe | 🔴 Critique | Si le controller PowerShell crash, tout s'arrête. Pas de redémarrage automatique par Windows si NSSM échoue. |
 | C-2 | Aucune authentification sur les endpoints | 🔴 Critique | N'importe quel processus sur la machine peut appeler `/start`, `/stop`, `/restart`. Risque de sécurité. |
-| C-3 | Listener bindé sur `0.0.0.0` | 🟠 Élevé | Accessible depuis le réseau local, pas seulement localhost. |
+| C-3 | Controller + Model Loader + Host Launcher bindés sur `0.0.0.0` | 🟠 Élevé | Accessibles depuis le réseau local ; seul GPU Metrics est sur `127.0.0.1`. llama-server est aussi lancé avec `--host 0.0.0.0`. |
 | C-4 | Pas de TLS sur les endpoints | 🟠 Élevé | Communication en clair, même en local. |
-| C-5 | Circuit breaker sur le controller (40 failures/5s) | 🟠 Élevé | Seuil trop élevé, pas de backoff exponentiel. |
-| C-6 | `checkDiskSpace` utilise `df -B1` (Linux) dans un conteneur | 🟠 Élevé | Ne fonctionne pas correctement sur Windows hôte. |
-| C-7 | Pas de gestion du swap/zombie processes | 🟠 Élevé | Les instances llama-server peuvent devenir des zombies. |
+| C-5 | Circuit breaker faible (40 failures / 5s) | 🟠 Élevé | Seuil élevé, pas de backoff exponentiel, pas d ouverture prolongée du circuit. |
+| C-6 | `checkDiskSpace` utilise `df -B1` (Linux) | 🟠 Élevé | Commande Linux dans un serveur Node.js Windows ; ne fonctionne pas sur l hôte Windows. |
+| C-7 | Port metrics en dur contradictoire (`13610` vs `13621`) | 🟠 Élevé | `server.js` proxy `/metrics/host` vers `13610`, mais le service GPU Metrics écoute sur `13621` ; la mesure depuis l UI casse. |
 
 ### 5.2 Installation et déploiement
 
@@ -196,7 +207,7 @@ LIA-X est une stack locale d'inférence LLM qui orchestre :
 |----|--------|----------|---------------|
 | D-1 | Inno Setup non signé | 🟠 Élevé | SmartScreen bloque l'installeur |
 | D-2 | Pas de désinstallation propre | 🟠 Élevé | Services, conteneurs, raccourcis orphelins |
-| D-3 | Binaire llama.cpp limité à Vulkan | 🟠 Élevé | Utilisateurs NVIDIA CUDA non optimisés |
+| D-3 | Binaire llama.cpp embarqué limité + mismatch port metrics | 🟠 Élevé | Seul Vulkan est inclus ; le proxy metrics utilise le mauvais port (`13610` au lieu de `13621`). |
 | D-4 | Pas de rollback installation | 🟠 Élevé | État incohérent en cas d'échec |
 | D-5 | Dépendances non vérifiées préalablement | 🟠 Élevé | Docker, Node.js, etc. vérifiés trop tard |
 
