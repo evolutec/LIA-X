@@ -126,6 +126,11 @@ docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-
                      <td className="doc-table-cell">Collecte et expose les métriques GPU (utilisation, mémoire)</td>
                   </tr>
                   <tr>
+                    <td className="doc-table-cell"><strong>Host Launcher</strong></td>
+                     <td className="doc-table-cell">http://127.0.0.1:13580</td>
+                     <td className="doc-table-cell">Ouvre le dossier des modèles dans l'Explorateur Windows (premier plan)</td>
+                  </tr>
+                  <tr>
                     <td className="doc-table-cell"><code>llama-server</code></td>
                     <td className="doc-table-cell">http://127.0.0.1:12434-12444</td>
                     <td className="doc-table-cell">Instance par modèle sur ports dynamiques</td>
@@ -142,6 +147,18 @@ docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-
                 <li>Utilisation mémoire dédiée (Dedicated Usage)</li>
                 <li>API exposée sur le port 13621</li>
                 <li>Fallback vers les compteurs Windows si <code>hw-smi.exe</code> n'est pas disponible</li>
+              </ul>
+            </div>
+
+            <div className="doc-section">
+              <h3 className="doc-subheading">Service Host Launcher</h3>
+              <p className="doc-note">Le service Host Launcher permet d'ouvrir le dossier des modèles dans l'Explorateur Windows depuis l'interface Model Loader :</p>
+              <ul className="doc-list">
+                <li>Service léger sur le port <code>13580</code></li>
+                <li>Ouvre l'Explorateur dans la session interactive de l'utilisateur, même si le contrôleur tourne en service Windows (session 0)</li>
+                <li>Fenêtre forcée au premier plan via <code>ShowWindow</code> + <code>SetForegroundWindow</code></li>
+                <li>Repli automatique sur <code>Start-Process</code> si l'ouverture de session échoue</li>
+                <li>Démarrage automatique via raccourci dans le dossier <code>%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup</code></li>
               </ul>
             </div>
           </div>

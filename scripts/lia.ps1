@@ -257,6 +257,7 @@ Ensure-ControllerServiceInstalled $Config
 Start-HostMetricsService $Config
 Ensure-ControllerRunning $Config
 Start-DefaultRuntime $Config
+Start-HostLauncher $Config
 
 Step "5/6" "Conteneurs applicatifs"
 Ensure-DockerNetwork $Config.docker.network

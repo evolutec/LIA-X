@@ -41,6 +41,7 @@ Source: "..\services\controller\install-service.ps1"; DestDir: "{app}\services\c
 Source: "..\services\gpu-metrics\service.ps1"; DestDir: "{app}\services\gpu-metrics"; Flags: ignoreversion
 Source: "..\services\gpu-metrics\install-service.ps1"; DestDir: "{app}\services\gpu-metrics"; Flags: ignoreversion
 Source: "..\config.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\installer\scripts\postinstall.ps1"; DestDir: "{app}\installer\scripts"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 Source: "..\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs
 Source: "..\tests\smoke.ps1"; DestDir: "{app}\tests"; Flags: ignoreversion
@@ -53,6 +54,7 @@ Source: "..\model-manager\server-package.json"; DestDir: "{app}\model-manager"; 
 Source: "..\model-manager\src\*"; DestDir: "{app}\model-manager\src"; Flags: ignoreversion recursesubdirs
 Source: "..\model-manager\public\*"; DestDir: "{app}\model-manager\public"; Flags: ignoreversion recursesubdirs
 Source: "..\runtime\llama-releases\b11013-vulkan\*"; DestDir: "{app}\runtime\llama-releases\b11013-vulkan"; Flags: ignoreversion recursesubdirs
+Source: "..\services\host-launcher\host-launcher.ps1"; DestDir: "{app}\services\host-launcher"; Flags: ignoreversion
 Source: "..\tools\hw-smi\*"; DestDir: "{app}\tools\hw-smi"; Flags: ignoreversion recursesubdirs
 Source: "logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "nssm\win64\nssm.exe"; DestDir: "{app}\tools\nssm"; Flags: ignoreversion
@@ -83,6 +85,8 @@ Type: files; Name: "{userdesktop}\LIA-X Model Manager.lnk"
 Name: "desktopicon"; Description: "Créer un raccourci sur le Bureau"; GroupDescription: "Raccourcis supplémentaires:"; Flags: checkedonce
 
 [Run]
+
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\installer\scripts\postinstall.ps1"" -InstallDir ""{app}"" -ModelsDir ""{userdocs}\LIA-X\Models"" -ControllerPort 13579 -LlamaPort 12434 -LoaderPort 3005"; Flags: postinstall waituntilterminated runhidden; StatusMsg: "Post-installation en cours (services, build frontend, Docker)..."
 
 [Icons]
 Name: "{commonprograms}\LIA-X\LIA-X Model Manager"; Filename: "http://localhost:3005"; IconFilename: "{app}\logo.ico"; IconIndex: 0; Comment: "Interface LIA-X (Model Manager)"

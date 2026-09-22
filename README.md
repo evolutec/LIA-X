@@ -89,6 +89,12 @@ LIA-X est une plateforme locale pour tester et déployer des modèles GGUF sur W
 │  │  ├─ Auto-restart des processus morts                                     │   │
 │  │  └─ Relance au démarrage du système                                      │   │
 │  └──────────────────────────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────────────────────────┐   │
+│  │  Host Launcher (PowerShell)                                               │   │
+│  │  ├─ Port 13580: ouverture du dossier modèles dans l'Explorateur         │   │
+│  │  ├─ CreateProcessAsUser vers la session interactive                      │   │
+│  │  └─ Démarrage automatique (Startup)                                       │   │
+│  └──────────────────────────────────────────────────────────────────────────┘   │
 │      │                                                                          │
 │      │ Spawns instances                                                         │
 │      ▼                                                                          │
@@ -190,15 +196,28 @@ Fichier: [`runtime/host-runtime-config.json`](runtime/host-runtime-config.json:1
 
 ## Services
 
-| Service | URL | Rôle |
-|---------|-----|------|
+| Service | URL / Port | Rôle |
+|---------|-----------|------|
 | Model Loader | http://localhost:3005 | Import GGUF, métadonnées, catalogue, proxy OpenAI |
 | AnythingLLM | http://localhost:3006 | Interface de chat principale |
 | Open WebUI | http://localhost:3008 | Interface de chat alternative |
 | LibreChat | http://localhost:3007 | Frontend OpenAI-compatible |
 | Contrôleur hôte | http://127.0.0.1:13579 | Contrôle des processus `llama-server` |
+| Host Launcher | http://127.0.0.1:13580 | Ouvre le dossier des modèles dans l'Explorateur Windows (premier plan) |
 | `llama-server` | http://127.0.0.1:12434-12444 | Instance par modèle sur ports dynamiques |
 | GPU Metrics | http://127.0.0.1:13621 | Collecte et expose les métriques GPU (utilisation, mémoire) |
+
+### Host Launcher
+
+Fichier: [`services/host-launcher/host-launcher.ps1`](services/host-launcher/host-launcher.ps1:1)
+
+- **Rôle** : Ouvre le dossier des modèles dans l'Explorateur Windows depuis l'interface Model Loader, même quand le contrôleur tourne en tant que service Windows (session 0).
+- **Fonctionnalités** :
+  - Service léger sur le port 13580
+  - Délègue l'ouverture à la session interactive de l'utilisateur via `CreateProcessAsUser`
+  - Force la fenêtre Explorateur au premier plan avec `ShowWindow` + `SetForegroundWindow`
+  - Repli automatique sur `Start-Process` si l'ouverture de session échoue
+  - Démarrage automatique via raccourci dans le dossier `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`
 
 ## Flux de données
 
@@ -399,6 +418,16 @@ docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-
 .\controller\llama-host-controller.ps1
 ```
 
+## Release officielle (Windows)
+
+Un installeur Windows est publié sur GitHub Releases :
+[https://github.com/evolutec/LIA-X/releases](https://github.com/evolutec/LIA-X/releases)
+
+Télécharger `LIA-X-Setup.exe` puis :
+1. Lancer l'installateur en tant qu'administrateur
+2. Choisir le dossier d'installation et le dossier des modèles
+3. Laisser l'installateur configurer les services Windows et Docker
+
 ## Commandes
 
 ```powershell
@@ -434,6 +463,7 @@ Les ports sont définis dans [`scripts/lia.ps1`](scripts/lia.ps1:16-22) :
 - `libreChatPort = 3007` - LibreChat
 - `libreChatInternalPort = 3080` - LibreChat interne
 - `controllerPort = 13579` - Contrôleur hôte
+- `hostLauncherPort = 13580` - Host Launcher (ouverture dossier modèles)
 - `llamaPort = 12434` - Base des ports llama-server
 
 ### Réseau

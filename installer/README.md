@@ -9,13 +9,23 @@ Ce dossier contient les fichiers nécessaires pour construire `LIA-X-Setup.exe` 
 - `nssm/win64/nssm.exe` : NSSM 2.24 embarqué pour l'installation des services Windows.
 - `README.md` : ce fichier.
 
-## Construction
+## Construction locale
 
 1. Ouvrir `installer\LIA-X.iss` avec Inno Setup.
 2. Vérifier les chemins `Source:` si la structure du repo change.
 3. Lancer la compilation (Ctrl+F9 ou menu `Build`).
 
 Le résultat est produit dans `dist\LIA-X-Setup.exe`.
+
+## Release GitHub (automatique)
+
+Le fichier `LIA-X-Setup.exe` est également publié automatiquement sur GitHub Releases via GitHub Actions :
+[https://github.com/evolutec/LIA-X/releases](https://github.com/evolutec/LIA-X/releases)
+
+À chaque tag `v*`, le workflow :
+1. Construit l'installateur Windows avec Inno Setup
+2. Crée une release GitHub
+3. Publie `LIA-X-Setup.exe` en tant qu'asset téléchargeable
 
 ## Fonctionnement de l'installateur
 

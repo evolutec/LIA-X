@@ -7,7 +7,8 @@
     "openWebUi": 3008,
     "libreChat": 3007,
     "libreChatInternal": 3080,
-    "gpuMetrics": 13621
+    "gpuMetrics": 13621,
+    "hostLauncher": 13580
   },
   "docker": {
     "network": "lia-network",
@@ -30,6 +31,7 @@
     "llamaRepoDir": "runtime/llama.cpp",
     "controllerScript": "services/controller/llama-host-controller.ps1",
     "gpuMetricsScript": "services/gpu-metrics/service.ps1",
+    "hostLauncherScript": "services/host-launcher/host-launcher.ps1",
     "controllerServiceHelper": "services/controller/install-service.ps1",
     "gpuMetricsServiceHelper": "services/gpu-metrics/install-service.ps1",
     "runtimeConfigPath": "runtime/host-runtime-config.json",

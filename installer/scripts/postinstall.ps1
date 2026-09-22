@@ -185,6 +185,7 @@ if (-not $SkipServiceInstall) {
 
     $controllerScript = Join-Path $rootDir 'services\controller\llama-host-controller.ps1'
     $gpuMetricsScript = Join-Path $rootDir 'services\gpu-metrics\service.ps1'
+    $hostLauncherScript = Join-Path $rootDir 'services\host-launcher\host-launcher.ps1'
 
     # LIA Controller
     if (Test-Path -LiteralPath $controllerScript) {
@@ -245,6 +246,41 @@ if (-not $SkipServiceInstall) {
     } else {
         Write-Fail "Script GPU Metrics introuvable : $gpuMetricsScript"
     }
+
+    # Host Launcher (session utilisateur)
+    if (Test-Path -LiteralPath $hostLauncherScript) {
+        Write-Info 'Demarrage du host launcher (session utilisateur)...'
+        try {
+            $pwsh = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+            Start-Process $pwsh -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $hostLauncherScript
+            ) -WindowStyle Hidden | Out-Null
+
+            $maxTries = 10
+            $delay = 1
+            $launcherOk = $false
+            for ($i = 0; $i -lt $maxTries; $i++) {
+                try {
+                    $tcp = New-Object Net.Sockets.TcpClient('localhost', 13580)
+                    $tcp.Close()
+                    $launcherOk = $true
+                    break
+                } catch {
+                    Start-Sleep -Seconds $delay
+                }
+            }
+
+            if ($launcherOk) {
+                Write-Ok "Host launcher demarre sur http://localhost:13580"
+            } else {
+                Write-Fail "Host launcher non confirmé après $maxTries tentatives."
+            }
+        } catch {
+            Write-Fail "Demarrage du host launcher impossible : $($_.Exception.Message)"
+        }
+    } else {
+        Write-Fail "Script host launcher introuvable : $hostLauncherScript"
+    }
 } else {
     Write-Info 'Installation des services ignorée (-SkipServiceInstall).'
 }
@@ -273,6 +309,24 @@ $wsShell = $null
 $wsShell = New-Object -ComObject WScript.Shell
 $shortcut = $wsShell.CreateShortcut((Join-Path $startMenuPath 'LIA-X Model Manager.lnk'))
 $shortcut.TargetPath = $loaderUrl
+$shortcut.IconLocation = 'shell32.dll,13'
+$shortcut.Save()
+$wsShell = $null
+
+# Raccourci startup : Host Launcher
+$startupPath = [Environment]::GetFolderPath('Startup')
+if (-not (Test-Path -LiteralPath $startupPath)) {
+    New-Item -ItemType Directory -Path $startupPath -Force | Out-Null
+}
+$wsShell = New-Object -ComObject WScript.Shell
+$shortcut = $wsShell.CreateShortcut((Join-Path $startupPath 'LIA-X Host Launcher.lnk'))
+$shortcut.TargetPath = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+$shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$hostLauncherScript`""
+$shortcut.WorkingDirectory = $rootDir
+$shortcut.WindowStyle = 7
+$shortcut.IconLocation = 'shell32.dll,13'
+$shortcut.Save()
+$wsShell = $null
 $shortcut.IconLocation = 'shell32.dll,13'
 $shortcut.Save()
 $wsShell = $null

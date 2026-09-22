@@ -1,6 +1,65 @@
 # modules/services.ps1
 # Fonctions de gestion des services Windows
 
+function Start-HostLauncher([hashtable]$Config) {
+    $launcherScript = Join-Path $Config.rootDir 'services\host-launcher\host-launcher.ps1'
+    if (-not (Test-Path -LiteralPath $launcherScript)) {
+        WARN "Host launcher introuvable : $launcherScript"
+        return
+    }
+
+    $port = 13580
+    $taken = netstat -ano | Select-String ":${port}\s"
+    if ($taken) {
+        if ($taken -match "\s+(\d+)\s*$") {
+            $owner = [int]$Matches[1]
+            if ($owner -ne $pid) {
+                INFO "Host launcher déjà en fonctionnement sur le port $port (PID=$owner)"
+                return
+            }
+        }
+    }
+
+    INFO "Démarrage du host launcher sur le port $port..."
+    $pwshExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+    Start-Process $pwshExe -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcherScript
+    ) -WindowStyle Hidden | Out-Null
+
+    $maxTries = 10
+    $delay = 1
+    for ($i = 0; $i -lt $maxTries; $i++) {
+        try {
+            $tcp = New-Object Net.Sockets.TcpClient('localhost', $port)
+            $tcp.Close()
+            OK "Host launcher prêt sur http://localhost:$port"
+            return
+        } catch {
+            Start-Sleep -Seconds $delay
+        }
+    }
+
+    WARN "Host launcher non confirmé sur le port $port après $maxTries tentatives."
+}
+
+function Stop-HostLauncher([hashtable]$Config) {
+    $port = 13580
+    $owner = $null
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($conn) { $owner = [int]$conn.OwningProcess }
+    } catch {}
+
+    if ($owner) {
+        try {
+            Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
+            OK "Host launcher arrêté (PID=$owner)"
+        } catch {
+            WARN "Impossible d'arrêter le host launcher : $($_.Exception.Message)"
+        }
+    }
+}
+
 function Start-HostMetricsService([hashtable]$Config) {
     Ensure-WingetPackage -id 'NSSM.NSSM' -name 'NSSM (Non-Sucking Service Manager)' -checkCommand 'nssm.exe'
 
