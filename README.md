@@ -1,20 +1,25 @@
-# LIA-X
+<div align="center">
 
-**Assistant IA local pour Windows**
+<img src="./model-manager/public/logo.svg" width="150" alt="LIA Logo" />
 
-LIA-X te permet de faire tourner des modèles de langage (LLM) directement sur ton PC Windows, sans envoyer tes données à des serveurs externes.
+<h1>LIA-X</h1>
 
-```
-┌─────────────────────────────────────────────┐
-│  LIA-X en résumé                           │
-├─────────────────────────────────────────────┤
-│  ✓ LLM local (llama.cpp)                   │
-│  ✓ Interface web simple                    │
-│  ✓ Chat avec tes propres modèles           │
-│  ✓ Compatible avec les outils OpenAI       │
-│  ✓ Docker inclus pour plus d'interfaces    │
-└─────────────────────────────────────────────┘
-```
+<p><strong>Assistant IA local pour Windows</strong></p>
+
+<p>
+  LIA-X te permet de faire tourner des modèles de langage (LLM) directement sur ton PC Windows,
+  sans envoyer tes données à des serveurs externes.
+</p>
+
+<p>
+  <img alt="Windows 11" src="https://img.shields.io/badge/Windows-11-0078D4?style=for-the-badge&logo=windows&logoColor=white">
+  <img alt="Docker Desktop" src="https://img.shields.io/badge/Docker-Desktop-2496ED?style=for-the-badge&logo=docker&logoColor=white">
+  <img alt="llama.cpp" src="https://img.shields.io/badge/llama.cpp-native-111111?style=for-the-badge">
+  <img alt="Multi-LLM" src="https://img.shields.io/badge/Multi--LLM-parallel-2EA043?style=for-the-badge">
+  <img alt="LibreChat" src="https://img.shields.io/badge/LibreChat-ready-7C3AED?style=for-the-badge">
+</p>
+
+</div>
 
 ---
 
