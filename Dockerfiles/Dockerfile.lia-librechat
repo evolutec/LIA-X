@@ -1,0 +1,19 @@
+FROM ghcr.io/danny-avila/librechat:latest
+
+# Configuration LIA préintégrée
+COPY Dockerfiles/librechat.yaml /app/librechat.yaml
+ENV CONFIG_PATH=/app/librechat.yaml
+
+# Patch d'init pour forcer l'affichage du modèle local
+USER root
+COPY Dockerfiles/entrypoint.librechat.sh /entrypoint.librechat.sh
+RUN chmod +x /entrypoint.librechat.sh
+USER node
+ENTRYPOINT ["/entrypoint.librechat.sh"]
+CMD ["npm", "run", "backend"]
+
+# Health check intégré
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3080/health || exit 1
+
+EXPOSE 3080

@@ -1,0 +1,6 @@
+FROM mintplexlabs/anythingllm:latest
+
+# La configuration LIA est injectée au lancement du conteneur pour éviter de
+# reconstruire cette image et de figer des valeurs assimilées à des secrets.
+
+EXPOSE 3001

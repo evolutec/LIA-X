@@ -1,0 +1,76 @@
+name: Release Windows Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag a utiliser pour la release (ex. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installer Inno Setup
+        # choco installe la derniere version majeure (7.x). Le chemin est
+        # decouvert dynamiquement : INNO_SETUP_PATH etait fige sur la 6 (x86),
+        # et Compil32.exe a disparu a partir d'Inno Setup 6.3 au profit de
+        # ISCC.exe — l'ancien workflow echouait donc systematiquement.
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Inno Setup*","$env:ProgramFiles\Inno Setup*" `
+                                 -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue |
+                   Select-Object -First 1 -ExpandProperty FullName
+          if (-not $iscc) { throw "ISCC.exe introuvable apres installation d'Inno Setup" }
+          "ISCC_PATH=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Verifier les assets graphiques
+        # Les .bmp / .ico sont des binaires versionnes : une divergence ferait
+        # diverger l'installateur de l'icone du logo. On echoue plutot que de
+        # compiler avec des images obsoletes ou manquantes.
+        run: |
+          foreach ($f in @('logo.ico','wizard.bmp','wizard-small.bmp','logo-big.bmp')) {
+            $p = Join-Path $env:GITHUB_WORKSPACE "installer\$f"
+            if (-not (Test-Path $p)) { throw "Asset manquant : installer\$f" }
+            "  {0,-18} {1} octets" -f $f, (Get-Item $p).Length
+          }
+
+      - name: Compiler l'installateur
+        # LIA-X.iss ecrit dans dist\ (OutputDir), relatif au .iss : on compile
+        # depuis installer\ et l'EXE atterrit donc dans installer\dist\.
+        working-directory: installer
+        run: '& $env:ISCC_PATH LIA-X.iss'
+
+      - name: Verifier la sortie
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'installer\dist\LIA-X-Setup.exe'
+          if (-not (Test-Path $exe)) { throw "LIA-X-Setup.exe absent apres compilation" }
+          $mb = [math]::Round((Get-Item $exe).Length / 1MB, 2)
+          "LIA-X-Setup.exe : $mb Mo"
+          if ($mb -lt 1) { throw "Installateur suspect ($mb Mo) : la compression a-t-elle echoue ?" }
+
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lia-x-setup
+          path: installer/dist/LIA-X-Setup.exe
+          if-no-files-found: error
+
+      - name: Creer la GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          # Sur workflow_dispatch, le tag vient de l'entree du formulaire.
+          tag_name: ${{ inputs.tag }}
+          files: installer/dist/LIA-X-Setup.exe
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

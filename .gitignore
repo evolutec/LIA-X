@@ -1,0 +1,35 @@
+# --- Rejets de build et artefacts locaux -------------------------
+model-manager/node_modules/
+model-manager/dist/
+logs/
+services/logs/
+
+# L'installateur est genere par .github\workflows\release.yml (ISCC) a chaque
+# tag : le binaire n'a pas sa place dans l'historique git.
+installer/dist/
+installer/*.iss.bak
+# Les sources NSSM ne sont pas necessaires a la compilation : l'ISS n'embarque
+# que installer\nssm\win64\nssm.exe.
+installer/nssm/nssm-2.24/
+
+# --- Runtime llama.cpp (telecharge, jamais versionne) -------------
+# Le runtime n'est plus embarque dans l'installateur : le backend adapte au
+# materiel (CUDA / ROCm / Vulkan / CPU) est telecharge a l'installation par
+# installer\scripts\detect-hardware.ps1 depuis les releases officielles
+# github.com/ggml-org/llama.cpp, avec verification SHA-256.
+runtime/llama-releases/
+runtime/host-runtime-config.json
+runtime/host-runtime-state.json
+runtime/hardware-profile.json
+runtime/_*.txt
+
+# --- Outils d'agents (conserves en local, jamais versionnes) ----
+.kilocode/
+.kilo/
+.blackboxrules/
+.cortex/
+.vscode/
+
+# ATTENTION : docs/ est necessaire a la compilation de
+# installer\LIA-X.iss (Source: "..\docs\*"). Ne pas l'ignorer, sinon ISCC
+# echoue sur un clone frais ou dans la CI.

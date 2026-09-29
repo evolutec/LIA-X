@@ -1,0 +1,40 @@
+FROM node:20-bookworm-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN apt-get update && apt-get install -y curl unzip && rm -rf /var/lib/apt/lists/*
+
+# Copy sources
+COPY model-manager/ /app/model-manager/
+
+# Build frontend
+RUN cd /app/model-manager && \
+    npm install && \
+    VITE_API_BASE_URL="" npm run build && \
+    npm prune --omit=dev
+
+# Le backend server.js est CommonJS alors que le package frontend est en ESM.
+# On le lance via une copie .cjs pour éviter le conflit de type de module.
+RUN cp /app/model-manager/server.js /app/model-manager/server.cjs
+
+# Configuration
+ENV NODE_ENV=production
+ENV MODEL_MANAGER_PORT=3005
+ENV MODEL_STORAGE_DIR=/models
+ENV EMBEDDING_MODEL_STATE_PATH=/models/.lia/embedding-model.json
+ENV PROXY_MODEL_ID=lia-local
+ENV CONTROLLER_PORT=13579
+ENV LLAMA_PORT=12434
+ENV METRICS_HOST_URL=http://host.docker.internal:13621
+ENV DOCKER_INTERNAL=true
+
+EXPOSE 3005
+EXPOSE 13579
+EXPOSE 12434
+
+HEALTHCHECK --interval=15s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:3005/health > /dev/null || exit 1
+
+# Start command
+CMD ["node", "/app/model-manager/server.cjs"]

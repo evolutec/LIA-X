@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5" />
+      <stop offset="100%" stop-color="#9333ea" />
+    </linearGradient>
+    <radialGradient id="glow-core" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+    </radialGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="16" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="500" height="500" fill="none" />
+  <ellipse rx="198.5" ry="166" cx="244.5" cy="254" fill="rgba(15, 23, 42, 0.14)" stroke="url(#grad)" stroke-width="10" />
+  <ellipse rx="139" ry="154.5" cx="244" cy="254.5" fill="none" stroke="rgba(255, 255, 255, 0.12)" stroke-width="6" />
+
+  <g transform="matrix(1,0,0,1,250,250)" filter="url(#glow)">
+    <path transform="matrix(0.9,0,0,1,0.7,0)" d="M -6.5 -137 L 113.5 -67 L 113.5 73 L -6.5 143 L -126.5 73 L -126.5 -67 Z" fill="none" stroke="url(#grad)" stroke-width="18" />
+    <path transform="matrix(0.9,0,0,1,0.7,0)" d="M -6.5 -137 L -6.5 -37 M -126.5 -67 L -46.5 3 M 113.5 -67 L 33.5 3 M 113.5 73 L 33.5 3 M -126.5 73 L -46.5 3 M -6.5 143 L -6.5 43" stroke="#ffffff" stroke-width="12" stroke-linecap="round" />
+    <circle transform="matrix(0.9,0,0,1,0.7,0)" cx="-6.5" cy="3" r="30" fill="#ffffff" opacity="0.95" />
+    <circle transform="matrix(0.9,0,0,1,0.7,0)" cx="-6.5" cy="3" r="18" fill="url(#glow-core)" />
+  </g>
+
+  <circle cx="245" cy="110" r="14" fill="#ffffff" />
+  <circle cx="349" cy="187" r="14" fill="#ffffff" />
+  <circle cx="345" cy="318" r="14" fill="#ffffff" />
+  <circle cx="246" cy="388" r="14" fill="#ffffff" />
+  <circle cx="140" cy="326" r="14" fill="#ffffff" />
+  <circle cx="140" cy="188" r="14" fill="#ffffff" />
+  <!-- Seconde ellipse, croisee avec la premiere via une rotation de 90 deg
+       (rx et ry sont donc inverses : 166 horizontal, 198.5 vertical).
+       Centre effectif : (244.5, 257). Volontaire. -->
+  <ellipse transform="matrix(0,-1,1,0,20.5,528.5)" stroke-width="10" fill="rgba(15, 23, 42, 0.14)" stroke="url(#grad)" cx="271.5" cy="224" rx="198.5" ry="166"/>
+</svg>
