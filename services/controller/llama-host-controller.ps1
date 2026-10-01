@@ -1093,12 +1093,35 @@ function Resolve-InstanceRecord([string]$identifier) {
 #   - gpu_memory_bytes     : mémoire GPU attribuée au processus (fiable dGPU/iGPU)
 #   - process_memory_bytes : WorkingSet (pertinent en backend CPU, borne basse ailleurs)
 # ─────────────────────────────────────────────────────────────────────────────
-function Get-GpuProcessMemoryMap {
+<#
+ * Memoire GPU par PID, pour l affichage uniquement.
+ *
+ * La requete sous-jacente (Win32_PerfFormattedData_GPUProcessMemory) est une
+ * classe WMI de compteurs de performance : elle interroge le sous-systeme de
+ * compteurs Windows et coute jusqu a 39 s mesurees sur cette machine. Appelee
+ * depuis Get-RuntimeStatus, elle bloquait la boucle d acceptation du controleur
+ * mono-thread : /status, /start et le chat attendaient tous derriere, ce qui
+ * rendait les reponses du modele longues et le changement d espace lent.
+ *
+ * -NoRefresh rend la valeur en cache SANS la recalculer : c est ce qu utilise
+ * le chemin de requete. Le rafraichissement reel est fait par le watchdog,
+ * qui ne tourne que lorsque le controleur est inactif. Une valeur legerement
+ * fraiche vaut mieux qu une requete bloquee, et le model-loader retombe de toute
+ * facon sur le WorkingSet quand la carte est absente.
+ #>
+function Get-GpuProcessMemoryMap([switch]$NoRefresh) {
     $now = Get-Date
     if ($null -ne $Global:GpuProcessMemoryCache -and $now -lt $Global:GpuProcessMemoryCacheExpiresAt) {
         return $Global:GpuProcessMemoryCache
     }
-
+    if ($NoRefresh) {
+        # Cache expire : on rend la derniere valeur connue plutot que de
+        # bloquer une requete de plusieurs secondes sur le chemin critique.
+        if ($null -ne $Global:GpuProcessMemoryCache) {
+            return $Global:GpuProcessMemoryCache
+        }
+        return @{}
+    }
     $map = @{}
     try {
         # Une instance de perf-counter par (pid, luid, phys) : on additionne toutes
@@ -1734,6 +1757,11 @@ function Start-LlamaProcess([hashtable]$body, [switch]$NoWait) {
             active               = $activate
             context              = $context
             gpu_layers           = $gpuLayers
+            # Le drapeau embedding doit SURVIVRE au redemarrage du controleur :
+            # sans lui, la restauration relance llama-server sans --embedding et
+            # l instance repond 501 sur /v1/embeddings, ce qui casse la
+            # recherche RAG jusqu au prochain rechargement manuel.
+            embedding            = ($body.ContainsKey('embedding') -and [bool]$body.embedding)
         }
         $state2.instances = @($newEntry) + $state2.instances
     }
@@ -1889,17 +1917,6 @@ function ConvertTo-SerializableObject($value) {
 # future devra respecter.
 $script:StateFileLock = New-Object System.Object
 
-$script:TtsCache = @{}
-
-<#
- * Synthetise un texte en WAV, avec un cache.
- *
- * Le controleur est mono-thread : une synthese bloque /status. Le cache evite
- * de resynthetiser les phrases repetees, mais pas les phrases neuves (1,6 a
- * 3 s chacune). C est ce qui rend le changement de conversation penetrant
- * pendant une reponse lue a voix haute.
- #>
-
 <#
  # Synthese vocale : lancement dans un PROCESSUS FILS, lecture differee.
  #
@@ -1977,8 +1994,29 @@ function Start-TtsJob([string]$text, [int]$rate = 0) {
     # test d echec plus bas conclut a tort que la synthese a rate.
     $null = $proc.Handle
 
-    $script:TtsJobs[$id] = @{ path = $path; proc = $proc; debut = Get-Date }
+    $script:TtsJobs[$id] = @{ path = $path; proc = $proc; debut = Get-Date; texte = $text; rate = $rate }
     return @{ pret = $false; octets = $null; id = $id }
+}
+
+<#
+ * Cache des WAV deja synthetises.
+ *
+ * L cache existait mais n etait JAMAIS alimente : seule la lecture y
+ * accedait. Toute phrase, meme repetee, relancait donc un processus fils et
+ * une synthese SAPI complete (0,7 a 3 s). C est ce qui creusait le decalage
+ # entre le texte affiche et la voix : la file de phrases s accumulait pendant
+ * que la generation continuait.
+ *
+ * Le cache est volontairement BORNE et FIFO. Un WAV de phrase courte pese
+ * environ 150 Ko ; sans borne, une longue session de dialogue ferait
+ * grossir indefiniment la memoire du service.
+ #>
+function Add-TtsToCache([string]$cacheKey, [byte[]]$bytes) {
+    $script:TtsCache[$cacheKey] = @{ octets = $bytes }
+    while ($script:TtsCache.Count -gt 96) {
+        $oldest = @($script:TtsCache.Keys)[0]
+        $script:TtsCache.Remove($oldest)
+    }
 }
 
 <#
@@ -1993,29 +2031,54 @@ function Read-TtsJob([string]$id) {
     $job   = $script:TtsJobs[$id]
     $path  = [string]$job.path
     $proc  = $job.proc
+    $fini  = $proc.HasExited
+
+    if ($fini -and $proc.ExitCode -ne 0) {
+        # Le worker a rendu la main en erreur : c'est definitif, on ne relit pas
+        # un eventuel fichier partiel.
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        $script:TtsJobs.Remove($id)
+        return @{ pret = $true; octets = $null; erreur = "synthese en erreur (code $($proc.ExitCode))" }
+    }
+
+    # Filet de securite : au-dela de 60 s, on abandonne plutot que d'attendre
+    # indefiniment et de laisser une entree dans la table.
+    if (((Get-Date) - $job.debut).TotalSeconds -gt 60) {
+        $script:TtsJobs.Remove($id)
+        return @{ pret = $true; octets = $null; erreur = 'synthese trop longue' }
+    }
+
+    if (-not $fini) {
+        # Le worker ecrit ENCORE. SAPI cree le fichier des la premiere ecriture :
+        # lire a ce stade donne soit un WAV tronque, soit une erreur « the
+        # process cannot access the file ». C'etait la deuxieme cause de la
+        # lecture vocale muette : une phrase sur quatre echouait, en silence.
+        # On rend donc la main et on laisse le client repasser.
+        return @{ pret = $false; octets = $null; erreur = $null }
+    }
 
     if (-not (Test-Path -LiteralPath $path)) {
-        # Le fichier n existe pas encore. Si le processus a rendu la main avec une
-        # erreur, c'est definitif ; sinon on continue d'attendre.
-        if ($proc.HasExited -and $proc.ExitCode -ne 0) {
-            $script:TtsJobs.Remove($id)
-            return @{ pret = $true; octets = $null; erreur = "synthese en erreur (code $($proc.ExitCode))" }
-        }
-        # Filet de securite : au-dela de 60 s, on abandonne plutot que d'attendre
-        # indefiniment et de laisser une entree dans la table.
-        if (((Get-Date) - $job.debut).TotalSeconds -gt 60) {
-            $script:TtsJobs.Remove($id)
-            return @{ pret = $true; octets = $null; erreur = 'synthese trop longue' }
-        }
-        return @{ pret = $false; octets = $null; erreur = $null }
+        $script:TtsJobs.Remove($id)
+        return @{ pret = $true; octets = $null; erreur = 'synthese sans fichier' }
     }
 
     try {
         $bytes = [System.IO.File]::ReadAllBytes($path)
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         $script:TtsJobs.Remove($id)
+        # Alimentation du cache : la phrase sera rejouee instantanement si elle
+        # revient (relance d'une phrase interrompue, retour en arriere, boucle
+        # de discussion ou encore le mode dialogue qui repete les memes
+        # connecteurs).
+        $texte = [string]$job.texte
+        if ($texte) { Add-TtsToCache "$($job.rate)|$texte" $bytes }
         return @{ pret = $true; octets = $bytes; erreur = $null }
     } catch {
+        # Fichier encore verrouille par l'anti-virus ou par une ecriture
+        # retardee : ce n'est PAS definitif, on laisse le client repasser.
+        if (((Get-Date) - $job.debut).TotalSeconds -lt 55) {
+            return @{ pret = $false; octets = $null; erreur = $null }
+        }
         $script:TtsJobs.Remove($id)
         return @{ pret = $true; octets = $null; erreur = $_.Exception.Message }
     }
@@ -2166,18 +2229,81 @@ function Open-HostFolder([string]$requestedPath) {
     }
 }
 
+<#
+ * Position de la fin des en-tetes (octets), c'est-a-dire l'index juste apres
+ * le CRLFCRLF qui les clot.
+ *
+ * Pourquoi une recherche d'octets et non une lecture de lignes : voir
+ * Read-HttpRequest. Un StreamReader décode en caracteres alors que
+ * Content-Length compte des OCTETS ; chercher la separation dans les octets
+ * est la seule methode qui ne consomme pas le debut du corps.
+ #>
+function Find-HeaderEnd([byte[]]$data, [int]$length) {
+    $limit = $length - 4
+    for ($i = 0; $i -le $limit; $i++) {
+        if ($data[$i] -eq 13 -and $data[$i + 1] -eq 10 -and
+            $data[$i + 2] -eq 13 -and $data[$i + 3] -eq 10) {
+            return $i + 4
+        }
+    }
+    return -1
+}
+
+<#
+ * Lit une requete HTTP entiere, en-tetes + corps, a partir du flux brut.
+ *
+ * POURQUOI DES OCTETS ET NON DES CARACTERES (correctif de fond)
+ * -----------------------------------------------------------
+ * L ancienne version allouait un char[] de la TAILLE DE Content-Length et le
+ * remplissait avec StreamReader.Read. Or :
+ *   - Content-Length compte des OCTETS ;
+ *   - le corps est de l'UTF-8, donc 1 accent = 2 octets (1 'e' = 3 octets).
+ * Le buffer demanded etait donc trop grand de moitie, la boucle attendait des
+ * octets qui n'existaient plus, et le Read bloquait jusqu'au ReceiveTimeout
+ * (30 s) avant de rendre la main.
+ *
+ * Mesure sur cette machine, avant/apres :
+ *   POST /tts {"text":"Bonjour, je suis un modèle"}  ->  30,156 ms puis echec
+ *   idem sans accent                                ->  0,9 s (nominal)
+ *
+ * Le controleur etant MONO-THREAD, ce blocage ne concernait pas seulement la
+ * synthese vocale : la connexion reste dans la file d'attente de la boucle
+ * d'acceptation, et TOUTES les autres requetes (/status, /start, /tts) sont
+ * restees derriere. C'est la cause unique mesuree des trois symptomes :
+ *   - pas de sortie vocale en mode dialogue (chaque phrase accentuee
+ *     expirent en 504 et le WAV n'est jamais joue) ;
+ *   - reponses llama plus longues a venir (chaque mot genere releve au
+ *     moins d'une requete /status, qui attendait la queue) ;
+ *   - changement d'espace de travail lent (les rafraichissements d'UI
+ *     passent aussi par /status et /api/models/status).
+ #>
 function Read-HttpRequest([System.Net.Sockets.NetworkStream]$stream) {
-    $reader      = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $false, 1024, $true)
-    $requestLine = $reader.ReadLine()
+    $readBuffer = New-Object byte[] 4096
+    $acc        = New-Object System.Collections.Generic.List[byte]
+    $headEnd    = -1
+
+    while ($headEnd -lt 0) {
+        $read = $stream.Read($readBuffer, 0, $readBuffer.Length)
+        if ($read -le 0) { break }
+        for ($i = 0; $i -lt $read; $i++) { $acc.Add($readBuffer[$i]) }
+        $headEnd = Find-HeaderEnd $acc.ToArray() $acc.Count
+    }
+    if ($headEnd -lt 0) { return $null }
+
+    $all      = $acc.ToArray()
+    $headText = [System.Text.Encoding]::UTF8.GetString($all, 0, $headEnd)
+    $lines    = $headText -split "`r`n"
+
+    $requestLine = $lines[0]
     if (-not $requestLine) { return $null }
 
     $parts = $requestLine.Split(' ')
     if ($parts.Count -lt 2) { throw 'Ligne de requete HTTP invalide.' }
 
     $headers = @{}
-    while ($true) {
-        $line = $reader.ReadLine()
-        if ($null -eq $line -or $line -eq '') { break }
+    for ($i = 1; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -eq '') { continue }
         $separator = $line.IndexOf(':')
         if ($separator -gt 0) {
             $headers[$line.Substring(0, $separator).Trim()] = $line.Substring($separator + 1).Trim()
@@ -2190,14 +2316,20 @@ function Read-HttpRequest([System.Net.Sockets.NetworkStream]$stream) {
         [void][int]::TryParse([string]$headers['Content-Length'], [ref]$contentLength)
     }
     if ($contentLength -gt 0) {
-        $buffer = New-Object char[] $contentLength
-        $offset = 0
+        # Les octets du corps deja lus avec les en-tetes partent en premier,
+        # puis on complete exactement jusqu'a Content-Length OCTETS.
+        $buffer = New-Object byte[] $contentLength
+        $have   = $all.Length - $headEnd
+        if ($have -gt $contentLength) { $have = $contentLength }
+        if ($have -gt 0) { [Array]::Copy($all, $headEnd, $buffer, 0, $have) }
+
+        $offset = $have
         while ($offset -lt $contentLength) {
-            $read = $reader.Read($buffer, $offset, $contentLength - $offset)
+            $read = $stream.Read($buffer, $offset, $contentLength - $offset)
             if ($read -le 0) { break }
             $offset += $read
         }
-        if ($offset -gt 0) { $rawBody = -join $buffer[0..($offset - 1)] }
+        if ($offset -gt 0) { $rawBody = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $offset) }
     }
 
     return @{
@@ -2236,7 +2368,7 @@ function Get-RuntimeStatus {
 
     # UNE seule lecture des compteurs GPU par requête (cache 10 s) : les mesures
     # sont ensuite résolues par PID pour chaque instance, sans coût additionnel.
-    $gpuProcessMemory = Get-GpuProcessMemoryMap
+    $gpuProcessMemory = Get-GpuProcessMemoryMap -NoRefresh
 
     foreach ($instance in $rawInstances) {
         $portKey = [string]$instance.port
@@ -2404,6 +2536,10 @@ try {
                 sleep_idle_seconds = $sleepSecs
             }
             if ($instance.estimated_vram_bytes) { $body.estimated_vram_bytes = [int64]$instance.estimated_vram_bytes }
+            # Rejoue le drapeau --embedding enregistre au demarrage. Sans ce
+            # report, l instance restauree refuse /v1/embeddings (HTTP 501) et la
+            # recherche RAG reste muette jusqu au prochain rechargement manuel.
+            if ($instance.embedding -eq $true) { $body.embedding = $true }
 
             # -NoWait : la restauration ne doit PAS bloquer le démarrage du
             # controller. Avant, /status restait injoignable 40-90 s après un
@@ -2584,6 +2720,9 @@ while ($true) {
                 try {
                     Write-Host "[Watchdog] Vérification état..."
                     Monitor-LlamaInstances
+                    # Seul moment ou une requete de compteurs GPU, potentiellement tres
+                    # lente, ne bloque personne : le controleur est inactif ici.
+                    Get-GpuProcessMemoryMap | Out-Null
                     $wdState = Get-ConsistentState
                     Repair-DeadInstances $wdState
                     $Global:PendingRepair = $false

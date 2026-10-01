@@ -1,10 +1,10 @@
-﻿; ==============================================================================
+; ==============================================================================
 ; LIA-X Setup for Windows 10/11
 ; Inno Setup 7 script — conforme aux scripts scripts/lia.ps1 + modules/docker.ps1
 ; ==============================================================================
 
 #define AppName "LIA-X"
-#define AppVersion "0.1.0"
+#define AppVersion "2.0.0"
 #define AppPublisher "LIA-X"
 #define DefaultInstallDir "{autopf}\LIA-X"
 #define DefaultModelsDir "{userdocs}\LIA-X\Models"
@@ -187,6 +187,69 @@ begin
     LogMemo.Refresh;
     WizardForm.Refresh;
   end;
+end;
+
+{ Telecharge le modele de synthese vocale neuronale (Kokoro-82M, Apache-2.0).
+  Ne bloque JAMAIS l installation : en cas d echec reseau, la synthese vocale
+  bascule sur SAPI, qui est toujours present sur Windows. Le modele pese
+  310 Mo, d ou un fichier dePresence pour ne pas le retelecharger.
+
+  Les deux fichiers sontc dans le volume /models (dossier .cache/kokoro),
+  ce qui evite de les recopier dans l installation et les rend accessibles au
+  conteneur comme a l execution hors conteneur. }
+procedure FetchKokoroVoiceModel(const ModelsDir: String);
+var
+  TargetDir : String;
+  ModelUrl  : String;
+  VoiceUrl  : String;
+  ModelFile : String;
+  VoiceFile : String;
+  ResultCode: Integer;
+  Args      : String;
+begin
+  TargetDir := ModelsDir + '\.cache\kokoro';
+  if not DirExists(TargetDir) then
+    CreateDir(TargetDir);
+  { CreateDir ne cree qu un niveau : .cache peut manquer. }
+  if not DirExists(ModelsDir + '\.cache') then
+    CreateDir(ModelsDir + '\.cache');
+  if not DirExists(TargetDir) then
+    Exit;   { creation impossible : la voix restera sur SAPI }
+
+  ModelFile := TargetDir + '\model.onnx';
+  VoiceFile := TargetDir + '\ff_siwis.bin';
+  if FileExists(ModelFile) and FileExists(VoiceFile) then
+  begin
+    Log('  Voix neuronale déjà présente (non retéléchargée).');
+    Exit;
+  end;
+
+  ModelUrl := 'https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.onnx';
+  VoiceUrl := 'https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/ff_siwis.bin';
+
+  Log('  Téléchargement de la voix neuronale Kokoro (310 Mo)...');
+  { curl est déjà requis par le healthcheck du conteneur : on l utilise plutôt
+    que d ajouter une dépendance à PowerShell. }
+  Args := '-L --fail --silent --show-error --retry 2 --retry-delay 3 -o "' + ModelFile + '" "' + ModelUrl + '"';
+  Exec('curl.exe', Args, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if (ResultCode <> 0) or not FileExists(ModelFile) then
+  begin
+    Log('  Voix neuronale indisponible (réseau) — la voix utilisera SAPI.');
+    Deletefile(ModelFile);
+    Exit;
+  end;
+
+  Args := '-L --fail --silent --show-error --retry 2 --retry-delay 3 -o "' + VoiceFile + '" "' + VoiceUrl + '"';
+  Exec('curl.exe', Args, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if (ResultCode <> 0) or not FileExists(VoiceFile) then
+  begin
+    Log('  Voix neuronale incomplète — la voix utilisera SAPI.');
+    Deletefile(ModelFile);
+    Deletefile(VoiceFile);
+    Exit;
+  end;
+
+  Log('  Voix neuronale installée.');
 end;
 
 procedure LogStep(const S: String);
@@ -1102,6 +1165,10 @@ begin
     else
       Log('  ATTENTION : nettoyage des contrôleurs obsolètes en échec (code ' + IntToStr(ResultCode) + ').');
     BuildModelLoaderImage(InstallDir);
+    { Voix neuronale (Kokoro-82M) : modèle de 310 Mo téléchargé dans le
+      dossier des modèles. Facultatif : en cas d'échec, la synthèse vocale
+      bascule sur SAPI, qui reste disponible. Rien n'est donc bloquant. }
+    FetchKokoroVoiceModel(ModelsDir);
     { PostgreSQL + pgvector : historique des conversations et base du RAG.
       Démarré AVANT le model-loader, qui attend la base au boot mais reste
       joignable si elle met du temps. }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { trimWavSilence } from './wavTrim';
 
 /**
  * Synthese vocale : le WAV est produit par le CONTROLEUR (SAPI Windows) et
@@ -90,57 +91,87 @@ export default function useSpeechOutput({ rate = 1 } = {}) {
     setSpeaking(false);
   }, [releaseAudio]);
 
-  /** Telecharge un WAV et le joue ; resout quand l enonce est fini. */
-  const playChunk = useCallback((text) => {
-    setError('');
-    return fetch('/api/voice/tts', {
+/** Telecharge le WAV d un enonce. Separe du playing pour permettre le prefetch. */
+  const fetchChunk = useCallback(async (text) => {
+    const response = await fetch('/api/voice/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, rate: rateRef.current }),
-    })
-      .then((response) => {
-        if (!response.ok) {
-          return response.text().then((detail) => {
-            throw new Error(detail.slice(0, 200) || `TTS ${response.status}`);
-          });
-        }
-        return response.blob();
-      })
-      .then((blob) => new Promise((resolve, reject) => {
-        if (urlRef.current) URL.revokeObjectURL(urlRef.current);
-        const url = URL.createObjectURL(blob);
-        urlRef.current = url;
-        const audio = new window.Audio(url);
-        audioRef.current = audio;
-        audio.onended = () => { releaseAudio(); resolve(); };
-        audio.onerror = () => { releaseAudio(); reject(new Error('lecture audio impossible')); };
-        const played = audio.play();
-        // Chrome refuse parfois de demarrer sans geste utilisateur : le reje
-        // joue quand la promesse est rejetee plutot que de laisser muet.
-        if (played && typeof played.catch === 'function') {
-          played.catch(reject);
-        }
-      }));
-  }, [releaseAudio]);
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(detail.slice(0, 200) || `TTS ${response.status}`);
+    }
+    const buffer = await response.arrayBuffer();
+    // Rognage des silences : SAPI encadre chaque phrase de ~880 ms de blanc
+    // (110 ms de tete, 772 ms de queue). Comme les enonces s enchainent, ces
+    // blancs s additionnaient et chaque point de la reponse couteait pres de
+    // deux secondes de muet : c etait la diction robotique signalee.
+    const cleaned = trimWavSilence(buffer);
+    // Un WAV sans en-tete ne peut pas etre relu : on retombe alors sur
+    // l original plutot que de faire echouer la lecture.
+    return cleaned.byteLength > 44 ? cleaned : buffer;
+  }, []);
 
-  const speak = useCallback((text) => {
+  /** Joue un WAV deja telecharge ; resout quand l enonce est fini. */
+  const playChunk = useCallback((buffer) => new Promise((resolve, reject) => {
+    if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+    const url = URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+    urlRef.current = url;
+    const audio = new window.Audio(url);
+    audioRef.current = audio;
+    // L AEC a besoin de la copie EXACTE du son joue : qu elle soit decalee
+    // d un rognage, et c est l echo de la voix du modele qui reste dans le
+    // flux du micro. D ou le rognage fait en amont, dans fetchChunk.
+    audio.onended = () => { releaseAudio(); resolve(); };
+    audio.onerror = () => { releaseAudio(); reject(new Error('lecture audio impossible')); };
+    const played = audio.play();
+    // Chrome refuse parfois de demarrer sans geste utilisateur : le reje
+    // joue quand la promesse est rejetee plutot que de laisser muet.
+    if (played && typeof played.catch === 'function') {
+      played.catch(reject);
+    }
+  }), [releaseAudio]);
+
+  /**
+   * Joue une suite d enonces en PIPELINE.
+   *
+   * Le decalage entre la voix et le texte venait d ici : chaque enonce etait
+   * attendu en entier avant que le suivant ne soit meme demande. La synthese
+   * SAPI coutant 0,6 a 3 s, la voix arrivait donc toujours plusieurs phrases en
+   * retard, d autant plus que le cache du controleur n etait jamais alimente et
+   * que chaque phrase relancait une synthese complete.
+   *
+   * On demande donc l enonce N+1 PENDANT la lecture de N : la seule latence qui
+   * subsiste est celle de la premiere phrase.
+   */
+  const runParts = useCallback((parts) => {
+    let pending = fetchChunk(parts[0]);
+    return (async () => {
+      for (let i = 0; i < parts.length; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const blob = await pending;
+        if (i + 1 < parts.length) pending = fetchChunk(parts[i + 1]);
+        // eslint-disable-next-line no-await-in-loop
+        await playChunk(blob);
+      }
+    })();
+  }, [fetchChunk, playChunk]);
+
+  /** Ajoute une suite d enonces a la file de lecture. */
+  const queue = useCallback((text) => {
     const clean = stripMarkdown(text);
     if (!clean) return false;
 
-    cancel();
     const parts = chunkText(clean);
     if (!parts.length) return false;
 
+    setError('');
     setSpeaking(true);
     // Les enonces s enchainent : chacun attend la fin du precedent, sinon ils se
     // superposent et l annulation d echo a plusieurs references a suivre.
     chainRef.current = chainRef.current
-      .then(async () => {
-        for (const part of parts) {
-          // eslint-disable-next-line no-await-in-loop
-          await playChunk(part);
-        }
-      })
+      .then(() => runParts(parts))
       .catch((cause) => {
         setError(`Lecture impossible : ${cause?.message || cause}`);
       })
@@ -149,7 +180,15 @@ export default function useSpeechOutput({ rate = 1 } = {}) {
       });
 
     return true;
-  }, [cancel, playChunk]);
+  }, [runParts]);
+
+  const speak = useCallback((text) => {
+    // speak() sert a repartir de zero : il coupe la lecture en cours avant
+    // d enqueuer. C est ce qui le distingue de enqueue(), et la seule raison
+    // pour laquelle cancel() reste appele ici.
+    cancel();
+    return queue(text);
+  }, [cancel, queue]);
 
   /**
    * Ajoute un enonce a la file SANS interrompre la lecture en cours.
@@ -162,31 +201,7 @@ export default function useSpeechOutput({ rate = 1 } = {}) {
    *
    * cancel() reste le bon outil pour repartir de zero (nouvelle intervention).
    */
-  const enqueue = useCallback((text) => {
-    const clean = stripMarkdown(text);
-    if (!clean) return false;
-
-    const parts = chunkText(clean);
-    if (!parts.length) return false;
-
-    setError('');
-    setSpeaking(true);
-    chainRef.current = chainRef.current
-      .then(async () => {
-        for (const part of parts) {
-          // eslint-disable-next-line no-await-in-loop
-          await playChunk(part);
-        }
-      })
-      .catch((cause) => {
-        setError(`Lecture impossible : ${cause?.message || cause}`);
-      })
-      .then(() => {
-        setSpeaking(false);
-      });
-
-    return true;
-  }, [playChunk]);
+  const enqueue = useCallback((text) => queue(text), [queue]);
   useEffect(() => () => releaseAudio(), [releaseAudio]);
 
   return { supported, speaking, error, speak, enqueue, cancel };

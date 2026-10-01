@@ -18,6 +18,22 @@ const ragRepository = require('./src/rag/repository.cjs');
 const ragLimits = require('./src/rag/limits.cjs');
 const extractors = require('./src/rag/extractors.cjs');
 const ragQueue = require('./src/rag/ingestQueue.cjs');
+// Moteur de synthese vocale neuronale (Kokoro). Le require est tolerant :
+// si le module est absent (installation sans la voix), le serveur demarre
+// normalement et la synthese retombe sur SAPI.
+// Moteur indisponible = objet neutre : la route TTS appelle toujours
+// isAvailable()/synthesize(), qui deviennent sans effet, et le repli SAPI part.
+let kokoroEngine = {
+  isAvailable: () => false,
+  synthesize: async () => { throw new Error('moteur non charge'); },
+  KOKORO_DIR: '',
+};
+try {
+  // eslint-disable-next-line global-require
+  kokoroEngine = require('./src/voice/kokoro.cjs');
+} catch (error) {
+  console.warn('[model-manager] moteur Kokoro indisponible :', error.message);
+}
 const execFileAsync = promisify(execFile);
 const Agent = require('agentkeepalive');
 
@@ -1160,6 +1176,16 @@ async function buildModelStartRequest(identifier, requestedContext = null, reque
     model: model.name,
   };
 
+  // Plafond absolu : le contexte natif du GGUF. Une valeur superieure allouerait
+  // un cache KV que le modele ne peut pas remplir et ferait echouer la
+  // generation ("the current context is larger than the model's context").
+  // La demande explicite de l'utilisateur reste prioritaire : seule la valeur
+  // issue du runtime state, qui peut dater d'une autre version, est bornee.
+  const nativeContext = (Number.isInteger(details.context_length) && details.context_length > 0)
+    ? details.context_length
+    : null;
+  const capContext = (value) => (nativeContext ? Math.min(value, nativeContext) : value);
+
   // ✅ 1. PRIORITE ABSOLUE: Valeur explicitement demandée par l'utilisateur (UI) - JAMAIS bridée
   const normalizedContext = normalizeRequestedContext(requestedContext);
   if (normalizedContext !== null) {
@@ -1171,7 +1197,13 @@ async function buildModelStartRequest(identifier, requestedContext = null, reque
       i => i.filename === model.filename && Number.isInteger(i.context) && i.context > 0
     );
     if (existingInstance) {
-      payload.context = existingInstance.context;
+      // Bornée par le recommandé en plus du contexte natif : cette valeur peut
+      // dater d'une version anterieure du produit (qui renvoyait 131072 par
+      // defaut) et ne reflecte donc pas necessarily un choix de l'utilisateur.
+      // Mesure : ctx=74752 sur un 1,8 Go fait passer le prefill d'un historique
+      // de 40 messages de ~0,6 s a ~4,2 s. Un reglage pose depuis l'onglet
+      // Accueil reste couvert par la priorite 1, qui n'est pas bridée.
+      payload.context = Math.min(capContext(existingInstance.context), recommended.context);
     }
   }
   // ✅ 3. Seulement si aucune valeur personnalisée: utiliser native modèle + hardware limite
@@ -1361,7 +1393,6 @@ app.delete('/api/messages/:id', async (req, res) => {
     err(res, 500, `Impossible de supprimer le message : ${error.message}`);
   }
 });
-
 
 // ---------------------------------------------------------------------------
 // API RAG — ingestion asynchrone et recherche vectorielle
@@ -1613,7 +1644,6 @@ app.get('/api/rag/queue', async (req, res) => {
     handleRagError(res, error);
   }
 });
-
 
 // ---------------------------------------------------------------------------
 // Espaces de travail
@@ -2209,12 +2239,26 @@ function buildHardwareDiagnostic(runtimeConfig, hardwareProfile) {
 }
 
 function getRecommendedRuntimeDefaults(hardwareProfile) {
-  // ✅ PLUS AUCUN BRIDAGE AUTOMATIQUE
-  // ✅ La fonction ne retourne PLUS AUCUNE VALEUR PAR DEFAUT DANS LE PAYLOAD /start
-  // (la valeur explicite de l'UI reste toujours prioritaire, cf. buildModelStartRequest).
+  // Valeur de DERNIER RECOURS, employee uniquement quand l'utilisateur n'a
+  // rien choisi ET qu'aucune instance memoire ne fournit de contexte (voir
+  // l'ordre de priorite de buildModelStartRequest).
+  //
+  // Elle doit rester SAGESSE, pas ambitieuse : --ctx-size alloue un cache KV
+  // proportionnel au contexte, et ce cache commande le temps de demarrage ET
+  // le traitement du prompt. Mesure sur cette machine (Arc 140V, 16 Go
+  // partages) : ctx=8192 demarre en ~45 s la ou ctx=109568 demande ~195 s, et
+  // le prefill d'un historique de 40 messages passe de ~0,6 s a ~4,2 s.
+  //
+  // 131072 (ancienne valeur) transformait donc chaque premier lancement en
+  // plein chargement de 75 a 98k de contexte, sans que l'utilisateur l'ait
+  // demande. La valeur reste identique a default_context du controleur, donc
+  // c'est le comportement nominal du produit, et non une restriction de plus.
+  //
+  // Le choix explicite de l'utilisateur reste prioritaire et n'est jamais
+  // bride ici : un contexte superieur se regle depuis l'onglet Accueil.
   return {
     backend: 'cpu',
-    context: 131072,
+    context: 8192,
     gpu_layers: 999,
   };
 }
@@ -3456,7 +3500,6 @@ async function streamUrlToFile({ url, targetPath, partPath, jobKey, headers = {}
         throw Object.assign(new Error('Espace disque insuffisant pour le téléchargement.'), { fatal: true });
       }
 
-
       // Pause demandée pendant la préparation de la requête : on attend la
       // reprise avant d'écrire quoi que ce soit de plus sur disque.
       await waitWhilePaused(jobKey);
@@ -4054,82 +4097,138 @@ app.get('/metrics/host', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Synthèse vocale : moteur neuronal local, avec repli sur SAPI.
+//
+// DEUX MOTEURS, UN SEUL CONTRAT
+// -----------------------------
+// 1. Kokoro-82M (src/voice/kokoro.cjs) : reseau StyleTTS 2 execute dans ce
+//    conteneur via ONNX Runtime, qui est DEJA present (tire par
+//    @huggingface/transformers, le meme qui sert Whisper pour la reconnaissance
+//    vocale). Aucune installation supplementaire, aucun GPU.
+//
+// 2. SAPI, via le controleur : le seul TTS systeme de la machine (trois voix,
+//    aucune voix neuronale Windows installee). Conserve comme REPLI.
+//
+// Le repli n est pas decoratif. Kokoro exige espeak-ng et un modele de 310 Mo
+// present dans le cache : sur une installation fraiche, ou si le modele n a pas
+// encore ete telecharge, SAPI est la seule chose qui fonctionne. On ne laisse
+// donc jamais l utilisateur sans voix.
+//
+// Pourquoi ne pas synthetiser dans le navigateur : speechSynthesis sort du
+// systeme, donc le navigateur ne dispose pas du signal de reference qui
+// permettrait d annuler l echo. En passant par un <audio>, ce signal existe, et
+// l annulation d echo peut enfin fonctionner. C est la condition du duplex.
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Synthèse vocale (relais vers le contrôleur).
-//
-// Le contrôleur est le seul processus sous Windows : c est lui qui parle avec
-// SAPI. On relaie simplement son WAV jusqu au navigateur.
-//
-// Pourquoi ne pas synthétiser dans le navigateur : speechSynthesis sort du
-// système, donc le navigateur ne dispose pas du signal de référence qui
-// permettrait d annuler l écho. En passant par un <audio>, ce signal existe, et
-// l annulation d écho peut enfin fonctionner. C est la condition du duplex.
-// ─────────────────────────────────────────────────────────────────────────────
-app.post('/api/voice/tts', async (req, res) => {
-  try {
-    const text = String(req.body?.text || '').trim();
-    if (!text) return err(res, 400, 'texte manquant');
-
-    // L interface expose un multiplicateur (0,5 a 2) ; SAPI attend une echelle
-    // entiere de -10 a +10. On convertit ici pour que le frontend ignore SAPI.
-    const rateMultiplier = Number.isFinite(Number(req.body?.rate))
-      ? Number(req.body.rate)
-      : 1;
-    const sapiRate = Math.max(-10, Math.min(10, Math.round((rateMultiplier - 1) * 10)));
-
-    const start = await fetch(`${CONTROLLER_URL}/tts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, rate: sapiRate }),
-    });
-
-    // 202 : le controleur a lance la synthese dans un processus fils et rend la
-    // main. C est indispensable : le controleur est mono-thread, et une
-    // synthese bloquante empilait les requetes jusqu a 18 s de latence mesuree,
-    // ce qui faisait echouer le chat en 502 des qu il avait de la charge.
-    let jobId = null;
-    if (start.status === 202) {
-      const payload = await start.json().catch(() => null);
-      jobId = payload?.jobId || null;
-    } else if (start.ok) {
-      // Cas nominal : la phrase etait deja en cache, le WAV est immediat.
-      const wav = Buffer.from(await start.arrayBuffer());
-      res.setHeader('Content-Type', 'audio/wav');
-      res.setHeader('Content-Length', String(wav.length));
-      res.setHeader('Cache-Control', 'no-store');
-      return res.end(wav);
-    } else {
-      const detail = await start.text().catch(() => '');
-      return err(res, 502, `TTS indisponible : ${detail.slice(0, 200)}`);
-    }
-
-    if (!jobId) return err(res, 502, 'TTS : le controleur n a pas rendu de job');
-
-    // Interrogation du job toutes les 150 ms : assez fin pour ne pas ajouter de
-    // latence audible, assez econome pour ne pas marteler le controleur. Le
-    // plafond de 400 essais laisse 60 s de synthese, au-dela duquel le
-    // controleur abandonne de son cote.
-    for (let essai = 0; essai < 400; essai += 1) {
-      await new Promise((r) => setTimeout(r, 150));
-      const poll = await fetch(`${CONTROLLER_URL}/tts/${jobId}`);
-      if (poll.status === 202) continue;
-      if (!poll.ok) {
-        const detail = await poll.text().catch(() => '');
-        return err(res, 502, `TTS en erreur : ${detail.slice(0, 200)}`);
-      }
-      const wav = Buffer.from(await poll.arrayBuffer());
-      res.setHeader('Content-Type', 'audio/wav');
-      res.setHeader('Content-Length', String(wav.length));
-      res.setHeader('Cache-Control', 'no-store');
-      return res.end(wav);
-    }
-
-    return err(res, 504, 'TTS : synthese terminee dans les delais');
-  } catch (error) {
-    logError('/api/voice/tts', error);
-    err(res, 502, error.message);
-  }
+// Disponibilite decidee au premier appel, jamais recalculee a chaque requete.
+const TTS_ENGINE_STATE = { kokoro: null, notice: '' };
+
+app.get('/api/voice/engines', (req, res) => {
+  res.json({
+    engines: {
+      kokoro: TTS_ENGINE_STATE.kokoro === null ? kokoroEngine.isAvailable() : TTS_ENGINE_STATE.kokoro,
+      sapi: true,
+    },
+    kokoro_dir: kokoroEngine.KOKORO_DIR,
+    notice: TTS_ENGINE_STATE.notice,
+  });
+});
+
+app.post('/api/voice/tts', async (req, res) => {
+
+  try {
+
+    const text = String(req.body?.text || '').trim();
+
+    if (!text) return err(res, 400, 'texte manquant');
+
+    // L interface expose un multiplicateur (0,5 a 2), identique pour les deux
+    // moteurs : l utilisateur ne doit avoir a regler ni SAPI ni le reseau.
+    const rateMultiplier = Number.isFinite(Number(req.body?.rate))
+      ? Math.max(0.5, Math.min(2, Number(req.body.rate)))
+      : 1;
+
+    // ── Moteur neuronal, s il est utilisable ──────────────────────────────
+    // On tente d abord Kokoro. Toute erreur (modele absent, espeak-ng manquant,
+    // session impossible) fait TOMBER sur SAPI plutot que de renvoyer une
+    // erreur a l interface : une voix mediocre vaut mieux qu aucune voix.
+    if (kokoroEngine.isAvailable() && TTS_ENGINE_STATE.kokoro !== false) {
+      try {
+        const wav = await kokoroEngine.synthesize(text, rateMultiplier);
+        TTS_ENGINE_STATE.kokoro = true;
+        res.setHeader('Content-Type', 'audio/wav');
+        res.setHeader('Content-Length', String(wav.length));
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('X-TTS-Engine', 'kokoro');
+        return res.end(wav);
+      } catch (engineError) {
+        TTS_ENGINE_STATE.kokoro = false;
+        TTS_ENGINE_STATE.notice = `Kokoro indisponible (${engineError.message}) - repli sur SAPI.`;
+        logError('/api/voice/tts', engineError);
+      }
+    }
+
+    // ── Repli : SAPI via le controleur ────────────────────────────────────
+    // SAPI attend une echelle entiere de -10 a +10 : on convertit ici pour que
+    // le frontend ignore completement la difference d API.
+    const sapiRate = Math.max(-10, Math.min(10, Math.round((rateMultiplier - 1) * 10)));
+
+    const start = await fetch(`${CONTROLLER_URL}/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, rate: sapiRate }),
+    });
+
+    // 202 : le controleur a lance la synthese dans un processus fils et rend la
+    // main. C est indispensable : le controleur est mono-thread, et une
+    // synthese bloquante empilait les requetes jusqu a 18 s de latence mesuree,
+    // ce qui faisait echouer le chat en 502 des qu il avait de la charge.
+    let jobId = null;
+    if (start.status === 202) {
+      const payload = await start.json().catch(() => null);
+      jobId = payload?.jobId || null;
+    } else if (start.ok) {
+      // Cas nominal : la phrase etait deja en cache, le WAV est immediat.
+      const wav = Buffer.from(await start.arrayBuffer());
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', String(wav.length));
+      res.setHeader('Cache-Control', 'no-store');
+      return res.end(wav);
+    } else {
+      const detail = await start.text().catch(() => '');
+      return err(res, 502, `TTS indisponible : ${detail.slice(0, 200)}`);
+    }
+
+    if (!jobId) return err(res, 502, 'TTS : le controleur n a pas rendu de job');
+
+    // Interrogation du job avec BACKOFF : on demarre serre (60 ms) car une
+    // synthese SAPI courte est souvent prete en ~600 ms, puis on allonge
+    // progressivement jusqu'a 200 ms. Le plateau de 200 ms retire en moyenne
+    // une fraction de seconde de latence audibe par phrase par rapport aux
+    // 150 ms fixes d'avant, sans marteler le controleur sur une synthese longue.
+    let waitMs = 60;
+    for (let essai = 0; essai < 600; essai += 1) {
+      await new Promise((r) => setTimeout(r, waitMs));
+      if (waitMs < 200) waitMs = Math.min(200, Math.round(waitMs * 1.5));
+      const poll = await fetch(`${CONTROLLER_URL}/tts/${jobId}`);
+      if (poll.status === 202) continue;
+      if (!poll.ok) {
+        const detail = await poll.text().catch(() => '');
+        return err(res, 502, `TTS en erreur : ${detail.slice(0, 200)}`);
+      }
+      const wav = Buffer.from(await poll.arrayBuffer());
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', String(wav.length));
+      res.setHeader('Cache-Control', 'no-store');
+      return res.end(wav);
+    }
+
+    return err(res, 504, 'TTS : synthese terminee dans les delais');
+  } catch (error) {
+    logError('/api/voice/tts', error);
+    err(res, 502, error.message);
+  }
 });
 app.get('/health', async (req, res) => {
   // P1 : /health est le healthcheck Docker (toutes les 15 s, timeout 10 s).
@@ -4820,7 +4919,6 @@ app.delete('/api/models/download/:model', async (req, res) => {
   }
 });
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Modèles épinglés : résidence permanente en VRAM.
 //
@@ -5261,7 +5359,6 @@ app.all(['/api/models/*', '/models/*'], async (req, res) => {
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
-
 
 const httpServer = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Model Loader] UI: http://0.0.0.0:${PORT} -> controller: ${CONTROLLER_URL}`);

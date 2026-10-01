@@ -185,6 +185,11 @@ function ChatPage() {
   }, [persistence]);
 
   // Ouvre une conversation existante et restaure son modèle.
+  //
+  // Les trois lectures qui suivent ne dependent pas l'une de l'autre : on les
+  // lance ensemble. Enchainees, elles cumulaient leurs temps d'aller-retour
+  // alors que l'affichage des messages, lui, est deja pose : l'utilisateur
+  // attendait le rafraichissement de la barre RAG avant de voir son chat.
   const openConversation = useCallback(async (id) => {
     if (streaming) return;
     const result = await fetchConversation(id);
@@ -202,21 +207,22 @@ function ChatPage() {
       streaming: false,
     })));
 
-    // Restaure la sélection de dossiers propre à cette conversation.
-    if (persistence) {
-      const selected = await fetchConversationFolders(result.conversation.id);
-      if (selected.ok) setActiveFolders(selected.folderIds);
-    }
-
     // L'espace courant suit la conversation ouverte : c'est lui qui détermine
     // quelles dossiers sont proposées dans la barre RAG.
     const owner = result.conversation.workspace_id || '';
-    if (owner) {
-      setActiveWorkspaceId(owner);
-      const detail = await fetchWorkspace(owner);
-      if (detail.ok) {
-        setWorkspaceFolders((detail.folders || []).map((c) => c.id));
-      }
+    if (!owner) return;
+
+    const [selected, detail] = await Promise.all([
+      persistence ? fetchConversationFolders(result.conversation.id) : null,
+      fetchWorkspace(owner),
+    ]);
+
+    // Restaure la sélection de dossiers propre à cette conversation.
+    if (selected?.ok) setActiveFolders(selected.folderIds);
+
+    setActiveWorkspaceId(owner);
+    if (detail.ok) {
+      setWorkspaceFolders((detail.folders || []).map((c) => c.id));
     }
   }, [streaming, persistence]);
 
@@ -521,8 +527,18 @@ function ChatPage() {
   const hasMessages = messages.length > 0;
 
   // --- RAG : chargement des dossiers et files ---
+  //
+  // Les trois lectures sont INDEPENDANTES : les enchainer additionnait leurs
+  // latences (mesurees : /api/rag/status 261 ms + /api/rag/files 223 ms +
+  // /api/workspaces 7 ms ≈ 500 ms pour un simple changement d'espace). Les
+  // lancer ensemble ramene ce plancher a celle de la plus lente.
   const refreshRag = useCallback(async () => {
-    const status = await fetchRagStatus();
+    const [status, docs, spaces] = await Promise.all([
+      fetchRagStatus(),
+      listDocuments(null),
+      fetchWorkspaces(),
+    ]);
+
     if (status.ok) {
       setFolders(status.folders || []);
       setRagLimits({
@@ -532,10 +548,8 @@ function ChatPage() {
         supportedExtensions: status.supportedExtensions,
       });
     }
-    const docs = await listDocuments(null);
     if (docs.ok) setDocuments(docs.files);
 
-    const spaces = await fetchWorkspaces();
     if (spaces.ok) {
       setWorkspaces(spaces.workspaces);
       // À la première ouverture, on présélectionne le premier espace : sans
@@ -561,7 +575,13 @@ function ChatPage() {
     if (!created.ok) return;
     const workspaceId = created.workspace.id;
     setActiveWorkspaceId(workspaceId);
-    await refreshRag();
+    setMessages([]);
+    setActiveFolders([]);
+
+    // Le rafraichissement de la barre RAG tourne EN ARRIERE-PLAN : sans cela,
+    // l'utilisateur attendait ~500 ms de plus avant de voir son nouvel
+    // espace. Il ne depend pas du chat qu'on cree juste apres.
+    const refresh = refreshRag();
 
     // Premier chat de l'espace : créé en base seulement si la persistance est
     // active, sinon il apparaîtra à l'envoi du premier message.
@@ -570,20 +590,19 @@ function ChatPage() {
       // l'identifiant est dans conversation.conversation.id. Utiliser
       // conversation.id renvoyait « undefined » et le rattachement partait sur
       // PUT /api/conversations/undefined/workspace.
-      const created = await createConversation({
+      const chat = await createConversation({
         title: 'Nouvelle conversation',
         model: selectedModel || undefined,
       });
-      if (created.ok && created.conversation?.id) {
-        await setConversationWorkspace(created.conversation.id, workspaceId);
-        setConversationId(created.conversation.id);
-        rememberConversation(created.conversation.id);
+      if (chat.ok && chat.conversation?.id) {
+        await setConversationWorkspace(chat.conversation.id, workspaceId);
+        setConversationId(chat.conversation.id);
+        rememberConversation(chat.conversation.id);
         const list = await listConversations();
         if (list.ok) setConversations(list.conversations);
       }
     }
-    setMessages([]);
-    setActiveFolders([]);
+    await refresh;
   }, [streaming, persistence, refreshRag, selectedModel]);
 
   // Ajoute un chat dans un espace existant (« ＋ » à droite de chaque espace)
@@ -741,14 +760,23 @@ function ChatPage() {
 
   // Sélection d'un espace : on charge ses dossiers, et on y rattache la
   // conversation courante pour qu'elle en hérite.
+  //
+  // Les écritures (rattachement) et la relecture des dossiers effectifs sont
+  // enchaînées parce qu'elles dépendent l'une de l'autre, mais la lecture des
+  // dossiers de l'espace est immediate et n'a rien à voir avec le rattachement :
+  // les deux partent ensemble au lieu de s'additionner.
   const selectWorkspace = useCallback(async (id) => {
     setActiveWorkspaceId(id);
-    const detail = await fetchWorkspace(id);
+
+    const [detail] = await Promise.all([
+      fetchWorkspace(id),
+      persistence && conversationId ? setConversationWorkspace(conversationId, id) : null,
+    ]);
+
     if (detail.ok) {
       setWorkspaceFolders((detail.folders || []).map((folder) => folder.id));
     }
     if (persistence && conversationId) {
-      await setConversationWorkspace(conversationId, id);
       // Le rattachement vient de changer : la recherche doit le voir tout de
       // suite, sans attendre l'ouverture d'une autre conversation.
       await syncActiveFolders(conversationId);

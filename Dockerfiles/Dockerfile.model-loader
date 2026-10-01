@@ -3,7 +3,15 @@ FROM node:20-bookworm-slim
 WORKDIR /app
 
 # Install dependencies
-RUN apt-get update && apt-get install -y curl unzip && rm -rf /var/lib/apt/lists/*
+#
+# espeak-ng est requis par le moteur de synthese vocale neuronale (Kokoro) :
+# c'est lui qui transforme le texte francais en phonemes. Sans lui, la synthese
+# tombe sur SAPI (cf. src/voice/kokoro.cjs). Paquet petit, sans dependance
+# lourde, et identique a celui utilise par le modele a l'entrainement.
+RUN apt-get update && apt-get install -y \
+      curl unzip \
+      espeak-ng \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy sources
 COPY model-manager/ /app/model-manager/
