@@ -34,7 +34,19 @@ $GPU_STATE_CACHE_TTL_SECONDS        = 15
 $INSTANCE_PORTS_CACHE_TTL_SECONDS   = 5
 $LIVE_INSTANCES_CACHE_TTL_SECONDS   = 2
 $STATE_CACHE_TTL_SECONDS            = 2
-$GPU_PROCESS_MEMORY_CACHE_TTL_SECONDS = 10
+# Duree de vie du cache de "memoire GPU par PID".
+#
+# Chaque expiration declenche
+# Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory, une classe WMI
+# de compteurs de performance qui interroge le sous-systeme de compteurs
+# Windows : 1 a 3 s selon la charge. C est le poste dominant du temps de
+# reponse de /status, et on ne peut pas la filtrer cote WMI : le fournisseur ne
+# pousse pas le filtre jusqu aux donnees et la requete se bloque (essaye, puis
+# reverti). Le cache est donc le seul levier.
+#
+# La valeur n est qu une mesure d affichage : 60 s de granularite est largement
+# suffisant et divise par 6 le cout cumule de /status.
+$GPU_PROCESS_MEMORY_CACHE_TTL_SECONDS = 60
 $script:LastConsistentState         = $null
 $script:LastConsistentStateAt       = [datetime]::MinValue
 # Mémoire réelle par processus llama-server.exe (WorkingSet + compteurs GPU
