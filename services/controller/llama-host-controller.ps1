@@ -2156,6 +2156,12 @@ function Get-RuntimeStatus {
             server_base_url      = [string]$instance.server_base_url
             proxy_id             = [string]$instance.proxy_id
             context              = if ($instance.context    -and [int]$instance.context    -gt 0) { [int]$instance.context    } else { $null }
+            # Expose au client la duree d inactivite avant dechargement. Une
+            # valeur negative signifie que l instance est epinglee : le
+            # controleur a alors omet --sleep-idle-seconds, le modele ne se
+            # decharge jamais, et il n a donc jamais a etre reveille. Sans ce
+            # champ, le chat ne peut pas distinguer ces deux cas.
+            sleep_idle_seconds   = if ($null -ne $instance.sleep_idle_seconds) { [int]$instance.sleep_idle_seconds } else { $null }
             gpu_layers           = if ($null -ne $instance.gpu_layers -and [int]$instance.gpu_layers -ge 0) { [int]$instance.gpu_layers } else { $null }
             # ── Mesures réelles lues sur l'hôte Windows (llama-server.exe) ──
             # process_* : WorkingSet du processus (backend CPU surtout).
