@@ -23,7 +23,19 @@ import { useSettings } from '../Settings/settingsStore';
  *    que l utilisateur prend la parole.
  */
 
-const GATE_SPEECH_THRESHOLD = 0.006;
+// Seuil de parole du flux assaini par l AEC, calcule RELATIVEMENT au bruit de
+// fond observe plutot que fixe.
+//
+// Un seuil absolu ne tient pas : l efficacite de l annulation d echo depend de
+// la distance micro / haut-parleurs et du volume de lecture. Une valeur
+// mesuree dans de bonnes conditions ne vaut pas pour toutes les situations, et
+// un seuil trop bas laisse passer l echo residual, que le microphone presente
+// alors comme une voix.
+//
+// On releve donc le plancher observe et on se cale au-dessus, avec un plancher
+// minimal pour rester sensible dans une piece silencieuse.
+const GATE_NOISE_FLOOR_MIN = 0.0015;
+const GATE_NOISE_FACTOR = 6;
 // Duree pendant laquelle une energie breve vaut encore preuve de parole.
 const GATE_MEMORY_MS = 1800;
 
@@ -80,6 +92,8 @@ export default function useVoiceConversation({ onSend, onStop, streaming, text }
   const ctxRef = useRef(null);
   const spokenCursorRef = useRef(0);
   const realSpeechAtRef = useRef(0);
+  // Plancher de bruit du flux, releve en continu pour calibrer le seuil.
+  const noiseFloorRef = useRef(GATE_NOISE_FLOOR_MIN);
 
   const speechRef = useRef(speech);
   const onSendRef = useRef(onSend);
@@ -120,7 +134,15 @@ export default function useVoiceConversation({ onSend, onStop, streaming, text }
 
     worklet.port.onmessage = (event) => {
       const level = rms(new Float32Array(event.data));
-      if (level < GATE_SPEECH_THRESHOLD) return;
+      const seuil = Math.max(noiseFloorRef.current * GATE_NOISE_FACTOR, GATE_NOISE_FLOOR_MIN);
+
+      if (level < seuil) {
+        // Releve du bruit de fond sur les niveaux FAIBLES seulement : si la
+        // voix entraine le plancher, le seuil la suivrait et la porte ne
+        // detecterait plus rien.
+        noiseFloorRef.current = noiseFloorRef.current * 0.98 + level * 0.02;
+        return;
+      }
 
       // Preuve de parole reelle : l echo du TTS a ete soustrait, il ne peut pas
       // faire monter l energie au-dessus du seuil.

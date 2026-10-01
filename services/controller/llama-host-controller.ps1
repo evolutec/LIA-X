@@ -516,6 +516,15 @@ function Save-State([hashtable]$state) {
             $serializableState.instances = @($serializableState.instances)
         }
 
+        # ── Ecriture serialisee de host-runtime-state.json ──────────────────
+        # Le controleur est mono-thread aujourd hui : ce verrou ne change rien
+        # au comportement. Il enserre desormais tout le passage vers le
+        # fichier — y compris l ouverture en FileMode::Create, qui TRONQUE le
+        # fichier avant ecriture — pour que la concurrence future ne puisse
+        # pas produire deux versions concurrentes ni tronquer un ecrit en cours.
+        # Il protege le FICHIER, pas l execution : Save-State n est pas reentrant.
+        [System.Threading.Monitor]::Enter($script:StateFileLock)
+        try {
         $data   = $serializableState | ConvertTo-Json -Depth 6
         $stream = [System.IO.File]::Open($StatePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
         try {
@@ -525,6 +534,9 @@ function Save-State([hashtable]$state) {
         } finally {
             $writer.Dispose()
             $stream.Dispose()
+        }
+        } finally {
+            [System.Threading.Monitor]::Exit($script:StateFileLock)
         }
     } catch {
         Write-Host ('[controller] Save-State failed writing {0}: {1}' -f $StatePath, $_.Exception.Message)
@@ -1871,6 +1883,12 @@ function ConvertTo-SerializableObject($value) {
  # modele s entend parler. En passant le TTS par un <audio> alimente par cette
  # route, on rend au navigateur la reference qui lui manquait.
  #>
+# Objet de verrou pour les ecritures de host-runtime-state.json. Toutes les
+# ecritures du fichier passent par Save-State, qui verrouille dessus. Inutile
+# tant que le controleur est mono-thread : c est l invariant que la concurrence
+# future devra respecter.
+$script:StateFileLock = New-Object System.Object
+
 $script:TtsCache = @{}
 
 <#
