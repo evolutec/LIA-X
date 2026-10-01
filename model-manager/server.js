@@ -3656,7 +3656,23 @@ async function importFromOllamaLibrary(reference, localName) {
 
   // Le blob Ollama est téléchargé comme n'importe quelle URL GGUF : reprise via
   // Range, progression réelle et fichier .part (jamais de GGUF tronqué).
-  const baseName = String(localName || parsed.safeName).trim();
+  //
+  // IMPORTANT — nom de fichier et deux-points.
+  // Un nom Ollama s'écrit « modele:tag » (qwen3-embedding:0.6b). Le caractère
+  // deux-points est INTERDIT dans un nom de fichier Windows, et le volume
+  // /models est un montage lié : le fichier est donc créé par le conteneur
+  // (Linux, où ':' est légal) puis transcrit par Docker Desktop en U+F03A sur
+  // NTFS. Résultat mesuré : le conteneur voit
+  // « qwen3-embedding:0.6b.gguf » et le contrôleur, natif Windows,
+  // « qwen3-embedding<U+F03A>0.6b.gguf » — la résolution du modèle échoue
+  // alors que le fichier est là, avec un message trompeur
+  // (« Modèle introuvable ») et un dossier annoncé comme vide.
+  //
+  // On applique donc au nom local la même neutralisation que safeName : le
+  // fichier est créé avec un nom directement lisible par Windows, et le
+  // deux-points disparaît au lieu d'être transcrit en un caractère fantôme.
+  const requestedName = String(localName || parsed.safeName).trim();
+  const baseName = requestedName.replace(/[\\/]/gu, '-').replace(/[^a-zA-Z0-9._-]/gu, '-');
   const targetFilename = baseName.toLowerCase().endsWith('.gguf') ? baseName : `${baseName}.gguf`;
   const targetPath = path.join(MODEL_STORAGE_DIR, targetFilename);
   const partPath = `${targetPath}.part`;

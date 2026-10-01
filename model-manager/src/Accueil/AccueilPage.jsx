@@ -57,7 +57,7 @@ export default function AccueilPage(props) {
     <div className="card download-card">
       <div className="card-title">⬇️ Importer un modèle GGUF</div>
       <div className="download-grid">
-        <label className="field-block"><span className="field-label">Nom local</span><input type="text" value={hfModelName} onChange={(e) => setHfModelName(e.target.value)} placeholder="qwen2.5-coder-3b" /></label>
+        <label className="field-block"><span className="field-label">Nom local</span><input type="text" value={hfModelName} onChange={(e) => setHfModelName(e.target.value)} placeholder="qwen2.5-coder-3b" /><small className="field-hint">Nom du fichier .gguf dans {modelsHostDir}. N'utilisez pas le deux-points : il est interdit sous Windows et serait réécrit en un caractère illisible par le montage du conteneur. Exemple : qwen3-embedding-0.6b</small></label>
         <label className="field-block"><span className="field-label">Lien Hugging Face</span><input type="text" value={huggingfaceUrl} onChange={(e) => setHuggingfaceUrl(e.target.value)} placeholder="https://huggingface.co/.../resolve/model.gguf" /></label>
         <label className="field-block download-grid-span"><span className="field-label">Référence Ollama</span><input type="text" value={ollamaName} onChange={(e) => setOllamaName(e.target.value)} placeholder="gemma3n:e4b" /></label>
       </div>
