@@ -1857,6 +1857,73 @@ function ConvertTo-SerializableObject($value) {
     return $value
 }
 
+<#
+ # Synthese vocale Windows via SAPI.
+ #
+ # Pourquoi dans le controleur et pas dans le conteneur : le conteneur est Linux
+ # et n a aucun moteur de synthese. Le controleur est le seul processus tourne
+ # sur Windows, et SAPI expose les voix installees (3 voix FR sur cette machine).
+ #
+ # Pourquoi c est indispensable au duplex : l annulation d echo du navigateur a
+ # besoin de la copie du son QU ON SOUSTRAIT, or le navigateur ne la fournit que
+ # pour les chemins qu il possede lui-meme (un <audio>, une piste WebRTC).
+ # speechSynthesis sort du systeme : aucune annulation n est alors possible et le
+ # modele s entend parler. En passant le TTS par un <audio> alimente par cette
+ # route, on rend au navigateur la reference qui lui manquait.
+ #>
+$script:TtsCache = @{}
+
+<#
+ * Synthetise un texte en WAV, avec un cache.
+ *
+ * Le controleur est mono-thread : une synthese bloque /status. Le cache evite
+ * de resynthetiser les phrases repetees, mais pas les phrases neuves (1,6 a
+ * 3 s chacune). C est ce qui rend le changement de conversation penetrant
+ * pendant une reponse lue a voix haute.
+ #>
+function Convert-TextToWav([string]$text, [int]$rate = 0) {
+    if (-not $text) { throw 'texte vide' }
+    if ($text.Length -gt 2000) { $text = $text.Substring(0, 2000) }
+
+    $cacheKey = "$rate|$text"
+    if ($script:TtsCache.ContainsKey($cacheKey)) { return $script:TtsCache[$cacheKey] }
+
+    Add-Type -AssemblyName System.Speech
+    $tmpFile = [IO.Path]::Combine([IO.Path]::GetTempPath(), ("lia-tts-" + [Guid]::NewGuid().ToString('N') + '.wav'))
+    $synth   = New-Object System.Speech.Synthesis.SpeechSynthesizer
+    try {
+        # Voix francophone si elle existe, sinon la voix par defaut du systeme.
+        $french = $synth.GetInstalledVoices() |
+            Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -like 'fr*' } |
+            Select-Object -First 1
+        if ($french) { $synth.SelectVoice($french.VoiceInfo.Name) }
+
+        $synth.Rate = [Math]::Max(-10, [Math]::Min(10, $rate))
+        $synth.SetOutputToWaveFile($tmpFile)
+        $synth.Speak($text)
+        $synth.SetOutputToNull()
+    } finally {
+        $synth.Dispose()
+    }
+
+    $bytes = [System.IO.File]::ReadAllBytes($tmpFile)
+    Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+
+    # Cache borne : une longue conversation ne doit pas grossir indefiniment.
+    if ($script:TtsCache.Count -ge 200) { $script:TtsCache.Clear() }
+    $script:TtsCache[$cacheKey] = $bytes
+    return $bytes
+}
+
+# Reponse binaire : necessaire pour le WAV, que Write-Json ne peut pas produire.
+function Write-Binary([System.Net.Sockets.NetworkStream]$stream, [int]$statusCode, [byte[]]$bytes, [string]$contentType) {
+    $statusText   = Get-HttpStatusText $statusCode
+    $headerText   = "HTTP/1.1 {0} {1}`r`nContent-Type: {2}`r`nContent-Length: {3}`r`nAccess-Control-Allow-Origin: *`r`nConnection: close`r`n`r`n" -f $statusCode, $statusText, $contentType, $bytes.Length
+    $headerBytes  = [System.Text.Encoding]::ASCII.GetBytes($headerText)
+    $stream.Write($headerBytes, 0, $headerBytes.Length)
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush()
+}
 function Get-HttpStatusText([int]$statusCode) {
     switch ($statusCode) {
         200 { return 'OK' }
@@ -2626,6 +2693,23 @@ while ($true) {
                 
                 Start-LlamaProcess $body | Out-Null
                 Write-Json $stream 200 (Get-RuntimeStatus)
+                continue
+            }
+            'POST /tts' {
+                $body = Read-JsonBody $request
+                $text = [string]$body.text
+                if (-not $text) {
+                    Write-Json $stream 400 @{ detail = 'champ text manquant' }
+                    continue
+                }
+                $rate = 0
+                if ($body.ContainsKey('rate')) { $rate = [int]$body.rate }
+                try {
+                    $wav = Convert-TextToWav -text $text -rate $rate
+                    Write-Binary $stream 200 $wav 'audio/wav'
+                } catch {
+                    Write-Json $stream 500 @{ detail = "TTS indisponible : $($_.Exception.Message)" }
+                }
                 continue
             }
             default {
