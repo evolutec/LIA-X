@@ -1899,38 +1899,126 @@ $script:TtsCache = @{}
  * 3 s chacune). C est ce qui rend le changement de conversation penetrant
  * pendant une reponse lue a voix haute.
  #>
-function Convert-TextToWav([string]$text, [int]$rate = 0) {
+
+<#
+ # Synthese vocale : lancement dans un PROCESSUS FILS, lecture differee.
+ #
+ # Pourquoi : le controleur est mono-thread et SAPI est synchrone. Appelee
+ # directement, la synthese bloquait la boucle d acceptation : chaque phrase
+ # coutait 1,6 a 3 s, et par empilement une requete /tts a ete mesuree a 18 S.
+ # Pendant ce temps, /status et /start se mettaient en file et le conteneur
+ # abandonnait la synthese en 502 : la lecture vocale etait cassee des que le
+ # controleur avait de la moindre charge.
+ #
+ # On ne peut pas eviter d attendre la reponse HTTP, mais on peut ne pas
+ # bloquer le controleur : on lance dans un processus fils, on rend la main, et
+ # le client relit le WAV quand il est pret. /tts repond alors en ~100 ms.
+ #>
+$script:TtsCache     = @{}
+$script:TtsJobs      = @{}
+$script:TtsRunnerB64 = 'cGFyYW0oDQogICAgW3N0cmluZ10kVGV4dDY0LA0KICAgIFtpbnRdJFJhdGUsDQogICAgW3N0cmluZ10kT3V0UGF0aA0KKQ0KDQojIFdvcmtlciBkZSBzeW50aGVzZSB2b2NhbGUsIGV4ZWN1dGUgZGFucyB1biBwcm9jZXNzdXMgRklMUyBwYXIgbGUgY29udHJvbGV1ci4NCiMNCiMgSWwgZG9pdCByZXN0ZXIgYXV0b25vbWUgZXQgcmFwaWRlIGEgZMOpbWFycmVyIDogQWRkLVR5cGUgc3VyIFN5c3RlbS5TcGVlY2gNCiMgY2/Du3RlIGVudmlyb24gMjAwIG1zLCBvbiBuZSBsZSBmYWl0IGRvbmMgcXVpY2ksIGV0IGphbWFpcyBkYW5zIGxlDQojIGNvbnRyb2xldXIgbHVpLW3Dqm1lIChsZSBjaGFyZ2VtZW50IHkgYmxvcXVlcmFpdCBsYSBib3VjbGUgZCBhY2NlcHRhdGlvbikuDQoNCiRFcnJvckFjdGlvblByZWZlcmVuY2UgPSAnU3RvcCcNCkFkZC1UeXBlIC1Bc3NlbWJseU5hbWUgU3lzdGVtLlNwZWVjaA0KDQokc3ludGggPSBOZXctT2JqZWN0IFN5c3RlbS5TcGVlY2guU3ludGhlc2lzLlNwZWVjaFN5bnRoZXNpemVyDQp0cnkgew0KICAgICMgVm9peCBmcmFuY29waG9uZSBzaSBlbGxlIGV4aXN0ZSwgc2lub24gbGEgdm9peCBwYXIgZGVmYXV0IGR1IHN5c3RlbWUuDQogICAgJGZyZW5jaCA9ICRzeW50aC5HZXRJbnN0YWxsZWRWb2ljZXMoKSB8DQogICAgICAgIFdoZXJlLU9iamVjdCB7ICRfLkVuYWJsZWQgLWFuZCAkXy5Wb2ljZUluZm8uQ3VsdHVyZS5OYW1lIC1saWtlICdmcionIH0gfA0KICAgICAgICBTZWxlY3QtT2JqZWN0IC1GaXJzdCAxDQogICAgaWYgKCRmcmVuY2gpIHsgJHN5bnRoLlNlbGVjdFZvaWNlKCRmcmVuY2guVm9pY2VJbmZvLk5hbWUpIH0NCg0KICAgICRzeW50aC5SYXRlID0gW01hdGhdOjpNYXgoLTEwLCBbTWF0aF06Ok1pbigxMCwgJFJhdGUpKQ0KICAgICRzeW50aC5TZXRPdXRwdXRUb1dhdmVGaWxlKCRPdXRQYXRoKQ0KICAgICRzeW50aC5TcGVhayhbU3lzdGVtLlRleHQuRW5jb2RpbmddOjpVVEY4LkdldFN0cmluZyhbQ29udmVydF06OkZyb21CYXNlNjRTdHJpbmcoJFRleHQ2NCkpKQ0KICAgICRzeW50aC5TZXRPdXRwdXRUb051bGwoKQ0KfSBmaW5hbGx5IHsNCiAgICAkc3ludGguRGlzcG9zZSgpDQp9DQo='
+
+function Get-TtsRunnerPath {
+    # Le worker est ecrit sur disque a partir d une copie base64 embarquee ici.
+    # Base64 et non un here-string : le script contient des apostrophes et des
+    # accents, qui casseraient tout chainage de guillemets.
+    $path = Join-Path (Get-RuntimeLogDir) 'lia-tts-worker.ps1'
+    if (-not (Test-Path -LiteralPath $path)) {
+        try {
+            [System.IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($script:TtsRunnerB64))
+        } catch { return $null }
+    }
+    return $path
+}
+
+<#
+ * Lance une synthese et rend la main immediatement.
+ *
+ * @returns [hashtable] @{ pret ; octets ; id } — pret=true si deja en cache.
+ #>
+function Start-TtsJob([string]$text, [int]$rate = 0) {
     if (-not $text) { throw 'texte vide' }
     if ($text.Length -gt 2000) { $text = $text.Substring(0, 2000) }
 
     $cacheKey = "$rate|$text"
-    if ($script:TtsCache.ContainsKey($cacheKey)) { return $script:TtsCache[$cacheKey] }
-
-    Add-Type -AssemblyName System.Speech
-    $tmpFile = [IO.Path]::Combine([IO.Path]::GetTempPath(), ("lia-tts-" + [Guid]::NewGuid().ToString('N') + '.wav'))
-    $synth   = New-Object System.Speech.Synthesis.SpeechSynthesizer
-    try {
-        # Voix francophone si elle existe, sinon la voix par defaut du systeme.
-        $french = $synth.GetInstalledVoices() |
-            Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -like 'fr*' } |
-            Select-Object -First 1
-        if ($french) { $synth.SelectVoice($french.VoiceInfo.Name) }
-
-        $synth.Rate = [Math]::Max(-10, [Math]::Min(10, $rate))
-        $synth.SetOutputToWaveFile($tmpFile)
-        $synth.Speak($text)
-        $synth.SetOutputToNull()
-    } finally {
-        $synth.Dispose()
+    if ($script:TtsCache.ContainsKey($cacheKey)) {
+        return @{ pret = $true; octets = $script:TtsCache[$cacheKey].octets; id = $null }
     }
 
-    $bytes = [System.IO.File]::ReadAllBytes($tmpFile)
-    Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+    $runner = Get-TtsRunnerPath
+    if (-not $runner) { throw 'worker de synthèse indisponible' }
 
-    # Cache borne : une longue conversation ne doit pas grossir indefiniment.
-    if ($script:TtsCache.Count -ge 200) { $script:TtsCache.Clear() }
-    $script:TtsCache[$cacheKey] = $bytes
-    return $bytes
+    $id   = [Guid]::NewGuid().ToString('N')
+    $path = Join-Path (Get-RuntimeLogDir) "tts-$id.wav"
+
+    # Texte en base64 : apostrophes, accents et sauts de ligne casseraient
+    # tous une ligne de commande.
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($text))
+
+    # WindowStyle Hidden : le service NSSM tourne en session 0, une fenetre
+    # console par phrase serait inutile.
+    # ArgumentList en tableau : PowerShell joint les elements avec un espace et
+    # ne cite PAS les chemins qui en contiennent. Le runtime est sous
+    # C:\Program Files (x86)\..., ce qui cassait la ligne de commande et
+    # faisait echouer l enfant (code -196608). On passe donc une chaine unique
+    # ou chemins et valeurs sont explicitement entre guillemets.
+    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
+        ('-File "{0}" ' -f $runner) +
+        ('-Text64 {0} ' -f $encoded) +
+        ('-Rate {0} ' -f [string]$rate) +
+        ('-OutPath "{0}"' -f $path)
+
+    $proc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList $arguments `
+        -WindowStyle Hidden -PassThru -ErrorAction Stop
+
+    # Start-Process -PassThru ne renseigne ExitCode que si le handle a ete
+    # touche : sans cette lecture, ExitCode rend une valeur fantaisiste et l
+    # test d echec plus bas conclut a tort que la synthese a rate.
+    $null = $proc.Handle
+
+    $script:TtsJobs[$id] = @{ path = $path; proc = $proc; debut = Get-Date }
+    return @{ pret = $false; octets = $null; id = $id }
+}
+
+<#
+ * Relit l'avancement d'une synthese.
+ *
+ * @returns [hashtable] @{ pret ; octets ; erreur }
+ #>
+function Read-TtsJob([string]$id) {
+    if (-not $script:TtsJobs.ContainsKey($id)) {
+        return @{ pret = $true; octets = $null; erreur = 'synthese inconnue' }
+    }
+    $job   = $script:TtsJobs[$id]
+    $path  = [string]$job.path
+    $proc  = $job.proc
+
+    if (-not (Test-Path -LiteralPath $path)) {
+        # Le fichier n existe pas encore. Si le processus a rendu la main avec une
+        # erreur, c'est definitif ; sinon on continue d'attendre.
+        if ($proc.HasExited -and $proc.ExitCode -ne 0) {
+            $script:TtsJobs.Remove($id)
+            return @{ pret = $true; octets = $null; erreur = "synthese en erreur (code $($proc.ExitCode))" }
+        }
+        # Filet de securite : au-dela de 60 s, on abandonne plutot que d'attendre
+        # indefiniment et de laisser une entree dans la table.
+        if (((Get-Date) - $job.debut).TotalSeconds -gt 60) {
+            $script:TtsJobs.Remove($id)
+            return @{ pret = $true; octets = $null; erreur = 'synthese trop longue' }
+        }
+        return @{ pret = $false; octets = $null; erreur = $null }
+    }
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        $script:TtsJobs.Remove($id)
+        return @{ pret = $true; octets = $bytes; erreur = $null }
+    } catch {
+        $script:TtsJobs.Remove($id)
+        return @{ pret = $true; octets = $null; erreur = $_.Exception.Message }
+    }
 }
 
 # Reponse binaire : necessaire pour le WAV, que Write-Json ne peut pas produire.
@@ -1942,6 +2030,7 @@ function Write-Binary([System.Net.Sockets.NetworkStream]$stream, [int]$statusCod
     $stream.Write($bytes, 0, $bytes.Length)
     $stream.Flush()
 }
+
 function Get-HttpStatusText([int]$statusCode) {
     switch ($statusCode) {
         200 { return 'OK' }
@@ -2553,6 +2642,21 @@ while ($true) {
             }
         }
 
+        # Les identifiants de job sont dynamiques. Le switch compare les chaines
+        # EXACTEMENT (insensible a la casse, mais sans joker), un motif du type
+        # GET /tts/* ne correspondrait donc jamais : ce prefixe se traite ici.
+        if ($request.method -eq 'GET' -and $path.StartsWith('/tts/')) {
+            $status = Read-TtsJob $path.Substring('/tts/'.Length)
+            if (-not $status.pret) {
+                Write-Json $stream 202 @{ pending = $true }
+            } elseif ($status.erreur) {
+                Write-Json $stream 500 @{ detail = $status.erreur }
+            } else {
+                Write-Binary $stream 200 $status.octets 'audio/wav'
+            }
+            continue
+        }
+
         switch ("$($request.method) $path") {
             'OPTIONS /' {
                 Write-Json $stream 200 @{ ok = $true }
@@ -2729,13 +2833,20 @@ while ($true) {
                 $rate = 0
                 if ($body.ContainsKey('rate')) { $rate = [int]$body.rate }
                 try {
-                    $wav = Convert-TextToWav -text $text -rate $rate
-                    Write-Binary $stream 200 $wav 'audio/wav'
+                    $job = Start-TtsJob -text $text -rate $rate
+                    if ($job.pret) {
+                        Write-Binary $stream 200 $job.octets 'audio/wav'
+                    } else {
+                        # 202 : la synthese tourne dans un processus fils, on rend
+                        # la main au lieu de bloquer la boucle d acceptation.
+                        Write-Json $stream 202 @{ jobId = $job.id }
+                    }
                 } catch {
                     Write-Json $stream 500 @{ detail = "TTS indisponible : $($_.Exception.Message)" }
                 }
                 continue
             }
+
             default {
                 Write-Json $stream 404 @{ detail = 'Route introuvable' }
                 continue

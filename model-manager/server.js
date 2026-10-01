@@ -4066,38 +4066,70 @@ app.get('/metrics/host', async (req, res) => {
 // permettrait d annuler l écho. En passant par un <audio>, ce signal existe, et
 // l annulation d écho peut enfin fonctionner. C est la condition du duplex.
 // ─────────────────────────────────────────────────────────────────────────────
-app.post('/api/voice/tts', async (req, res) => {
-  try {
-    const text = String(req.body?.text || '').trim();
-    if (!text) return err(res, 400, 'texte manquant');
-
-    // L interface expose un multiplicateur (0,5 à 2) ; SAPI attend une échelle
-    // entière de -10 à 10. On convertit ici pour que le frontend ignore SAPI.
-    const rateMultiplier = Number.isFinite(Number(req.body?.rate))
-      ? Number(req.body.rate)
-      : 1;
-    const sapiRate = Math.max(-10, Math.min(10, Math.round((rateMultiplier - 1) * 10)));
-
-    const upstream = await fetch(`${CONTROLLER_URL}/tts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, rate: sapiRate }),
-    });
-
-    if (!upstream.ok) {
-      const detail = await upstream.text().catch(() => '');
-      return err(res, 502, `TTS indisponible : ${detail.slice(0, 200)}`);
-    }
-
-    const wav = Buffer.from(await upstream.arrayBuffer());
-    res.setHeader('Content-Type', 'audio/wav');
-    res.setHeader('Content-Length', String(wav.length));
-    res.setHeader('Cache-Control', 'no-store');
-    res.end(wav);
-  } catch (error) {
-    logError('/api/voice/tts', error);
-    err(res, 502, error.message);
-  }
+app.post('/api/voice/tts', async (req, res) => {
+  try {
+    const text = String(req.body?.text || '').trim();
+    if (!text) return err(res, 400, 'texte manquant');
+
+    // L interface expose un multiplicateur (0,5 a 2) ; SAPI attend une echelle
+    // entiere de -10 a +10. On convertit ici pour que le frontend ignore SAPI.
+    const rateMultiplier = Number.isFinite(Number(req.body?.rate))
+      ? Number(req.body.rate)
+      : 1;
+    const sapiRate = Math.max(-10, Math.min(10, Math.round((rateMultiplier - 1) * 10)));
+
+    const start = await fetch(`${CONTROLLER_URL}/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, rate: sapiRate }),
+    });
+
+    // 202 : le controleur a lance la synthese dans un processus fils et rend la
+    // main. C est indispensable : le controleur est mono-thread, et une
+    // synthese bloquante empilait les requetes jusqu a 18 s de latence mesuree,
+    // ce qui faisait echouer le chat en 502 des qu il avait de la charge.
+    let jobId = null;
+    if (start.status === 202) {
+      const payload = await start.json().catch(() => null);
+      jobId = payload?.jobId || null;
+    } else if (start.ok) {
+      // Cas nominal : la phrase etait deja en cache, le WAV est immediat.
+      const wav = Buffer.from(await start.arrayBuffer());
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', String(wav.length));
+      res.setHeader('Cache-Control', 'no-store');
+      return res.end(wav);
+    } else {
+      const detail = await start.text().catch(() => '');
+      return err(res, 502, `TTS indisponible : ${detail.slice(0, 200)}`);
+    }
+
+    if (!jobId) return err(res, 502, 'TTS : le controleur n a pas rendu de job');
+
+    // Interrogation du job toutes les 150 ms : assez fin pour ne pas ajouter de
+    // latence audible, assez econome pour ne pas marteler le controleur. Le
+    // plafond de 400 essais laisse 60 s de synthese, au-dela duquel le
+    // controleur abandonne de son cote.
+    for (let essai = 0; essai < 400; essai += 1) {
+      await new Promise((r) => setTimeout(r, 150));
+      const poll = await fetch(`${CONTROLLER_URL}/tts/${jobId}`);
+      if (poll.status === 202) continue;
+      if (!poll.ok) {
+        const detail = await poll.text().catch(() => '');
+        return err(res, 502, `TTS en erreur : ${detail.slice(0, 200)}`);
+      }
+      const wav = Buffer.from(await poll.arrayBuffer());
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', String(wav.length));
+      res.setHeader('Cache-Control', 'no-store');
+      return res.end(wav);
+    }
+
+    return err(res, 504, 'TTS : synthese terminee dans les delais');
+  } catch (error) {
+    logError('/api/voice/tts', error);
+    err(res, 502, error.message);
+  }
 });
 app.get('/health', async (req, res) => {
   // P1 : /health est le healthcheck Docker (toutes les 15 s, timeout 10 s).
