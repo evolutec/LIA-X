@@ -465,7 +465,7 @@ begin
     ' --add-host host.docker.internal:host-gateway' +
     ' -e STORAGE_DIR=/app/server/storage' +
     ' -e LLM_PROVIDER=generic-openai' +
-    ' -e GENERIC_OPEN_AI_BASE_PATH=http://host.docker.internal:3005/v1' +
+    ' -e GENERIC_OPEN_AI_BASE_PATH=http://model-loader:3005/v1' +
     ' -e GENERIC_OPEN_AI_MODEL_PREF=lia-local' +
     ' -e GENERIC_OPEN_AI_API_KEY=not-used' +
     ' -e GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=8192' +
@@ -495,8 +495,8 @@ begin
     ' -e WEBUI_SECRET_KEY=lia-local-secret' +
     ' -e ENABLE_OLLAMA_API=false' +
     ' -e ENABLE_OPENAI_API=true' +
-    ' -e OPENAI_API_BASE_URL=http://host.docker.internal:3005/v1' +
-    ' -e OPENAI_API_BASE_URLS=http://host.docker.internal:3005/v1' +
+    ' -e OPENAI_API_BASE_URL=http://model-loader:3005/v1' +
+    ' -e OPENAI_API_BASE_URLS=http://model-loader:3005/v1' +
     ' -e OPENAI_API_KEYS=not-used' +
     ' -e OPENAI_API_KEY=not-used' +
     ' -v open-webui-data:/app/backend/data' +
@@ -537,10 +537,10 @@ begin
     ' -e JWT_REFRESH_SECRET=5a8c2e6b9d3f5a7c1e4b8d2f6a9c3e7b5d1a4f8c2e6b9d3f5a7c1e4b8d2f6a9c' +
     ' -e ALLOW_EMAIL_LOGIN=true -e ALLOW_REGISTRATION=true -e ALLOW_SOCIAL_LOGIN=false' +
     ' -e OPENAI_API_KEY=not-used' +
-    ' -e OPENAI_BASE_URL=http://host.docker.internal:3005/v1' +
-    ' -e OPENAI_API_BASE_URL=http://host.docker.internal:3005/v1' +
-    ' -e OPENAI_API_BASE_URLS=http://host.docker.internal:3005/v1' +
-    ' -e OPENAI_REVERSE_PROXY=http://host.docker.internal:3005/v1' +
+    ' -e OPENAI_BASE_URL=http://model-loader:3005/v1' +
+    ' -e OPENAI_API_BASE_URL=http://model-loader:3005/v1' +
+    ' -e OPENAI_API_BASE_URLS=http://model-loader:3005/v1' +
+    ' -e OPENAI_REVERSE_PROXY=http://model-loader:3005/v1' +
     ' -e OPENAI_MODELS_FETCH=true -e OPENAI_MODELS=lia-local' +
     ' -e AUTO_FETCH_MODELS=true' +
     ' -e CUSTOM_MODELS=[{"user":"system","name":"lia-local","displayName":"LIA Local LLM","modelName":"lia-local","icon":"llama"}]' +

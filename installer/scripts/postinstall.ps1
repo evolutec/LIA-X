@@ -482,7 +482,7 @@ function Wait-Port($port, $label, $timeoutSec = 120) {
 }
 
 # LibreChat — aligne sur LIA-X.iss RunLibreChatContainer : mongo + 3007:3080,
-# reseau lia-network, host-gateway vers le proxy http://host.docker.internal:3005/v1
+# reseau lia-network, host-gateway vers le proxy http://model-loader:3005/v1
 if ($InstallLibreChat) {
     Write-Host '    Démarrage de LibreChat...' -ForegroundColor Cyan
     try {
@@ -498,10 +498,10 @@ if ($InstallLibreChat) {
             -e JWT_REFRESH_SECRET=5a8c2e6b9d3f5a7c1e4b8d2f6a9c3e7b5d1a4f8c2e6b9d3f5a7c1e4b8d2f6a9c `
             -e ALLOW_EMAIL_LOGIN=true -e ALLOW_REGISTRATION=true -e ALLOW_SOCIAL_LOGIN=false `
             -e OPENAI_API_KEY=not-used `
-            -e OPENAI_BASE_URL=http://host.docker.internal:3005/v1 `
-            -e OPENAI_API_BASE_URL=http://host.docker.internal:3005/v1 `
-            -e OPENAI_API_BASE_URLS=http://host.docker.internal:3005/v1 `
-            -e OPENAI_REVERSE_PROXY=http://host.docker.internal:3005/v1 `
+            -e OPENAI_BASE_URL=http://model-loader:3005/v1 `
+            -e OPENAI_API_BASE_URL=http://model-loader:3005/v1 `
+            -e OPENAI_API_BASE_URLS=http://model-loader:3005/v1 `
+            -e OPENAI_REVERSE_PROXY=http://model-loader:3005/v1 `
             -e OPENAI_MODELS_FETCH=true -e OPENAI_MODELS=lia-local `
             -e AUTO_FETCH_MODELS=true `
             -e ENABLE_OPENAI=true -e OPENAI_PROXY_ENABLED=true `
@@ -524,8 +524,8 @@ if ($InstallOpenWebUI) {
         docker run -d --name openwebui --network lia-network -p 3008:8080 --add-host host.docker.internal:host-gateway `
             -e WEBUI_AUTH=False -e WEBUI_SECRET_KEY=lia-local-secret `
             -e ENABLE_OLLAMA_API=false -e ENABLE_OPENAI_API=true `
-            -e OPENAI_API_BASE_URL=http://host.docker.internal:3005/v1 `
-            -e OPENAI_API_BASE_URLS=http://host.docker.internal:3005/v1 `
+            -e OPENAI_API_BASE_URL=http://model-loader:3005/v1 `
+            -e OPENAI_API_BASE_URLS=http://model-loader:3005/v1 `
             -e OPENAI_API_KEYS=not-used -e OPENAI_API_KEY=not-used `
             -v open-webui-data:/app/backend/data --restart unless-stopped `
             ghcr.io/open-webui/open-webui:main | Out-Null
@@ -544,7 +544,7 @@ if ($InstallAnythingLLM) {
         docker rm -f anythingllm 2>$null | Out-Null
         docker run -d --name anythingllm --network lia-network -p 3006:3001 --add-host host.docker.internal:host-gateway `
             -e STORAGE_DIR=/app/server/storage -e LLM_PROVIDER=generic-openai `
-            -e GENERIC_OPEN_AI_BASE_PATH=http://host.docker.internal:3005/v1 `
+            -e GENERIC_OPEN_AI_BASE_PATH=http://model-loader:3005/v1 `
             -e GENERIC_OPEN_AI_MODEL_PREF=lia-local -e GENERIC_OPEN_AI_API_KEY=not-used `
             -e GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=8192 -e EMBEDDING_ENGINE=native `
             -v anythingllm-storage:/app/server/storage --restart unless-stopped `
