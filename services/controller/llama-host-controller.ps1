@@ -1135,16 +1135,70 @@ function Get-GpuState {
     return $result
 }
 
+<#
+ # Detecte UNE SEULE FOIS quel outil de mesure GPU est disponible.
+ #
+ # Get-Command balaie l integralite du PATH : environ 0,5 s par appel. Comme
+ # /status est appele plusieurs fois par requete, et que Get-GpuState refait la
+ # detection a chaque expiration de cache, ces balayages se cumulaient et
+ # dominaient le temps de reponse.
+ #
+ # Le resultat ne change pas pendant l execution du service : on le memorise.
+ # Sur une machine sans NVIDIA ni ROCM (ici Intel Arc, Vulkan), la detection
+ # renvoie none une fois, puis plus jamais.
+ #>
+function Get-GpuVendorTool {
+    if ($null -ne $Global:GpuVendorToolCache) {
+        return $Global:GpuVendorToolCache
+    }
+
+    $tool = 'none'
+    if (Test-Path 'C:\Windows\System32\nvidia-smi.exe') {
+        $tool = 'nvidia'
+    } else {
+        $rocmSmi = Get-Command rocm-smi -ErrorAction SilentlyContinue
+        if ($rocmSmi) {
+            $tool = 'amd'
+            $Global:GpuVendorToolPath = $rocmSmi.Source
+        }
+    }
+
+    $Global:GpuVendorToolCache = $tool
+    return $tool
+}
+
+<#
+ * Lit la liste des adaptateurs video via WMI, une seule fois.
+ *
+ * Get-CimInstance Win32_VideoController coute 0,5 a 1,5 s. Ces donnees (nom de
+ * l adaptateur et VRAM total) sont STATIQUES : elles ne changent pas sans
+ * remplacer la carte, ce qui suppose un redemarrage du service. Sans ce cache,
+ * chaque expiration du cache GPU remettait cette somme dans /status.
+ #>
+function Get-VideoControllerInfo {
+    if ($null -ne $Global:VideoControllersCache) {
+        return $Global:VideoControllersCache
+    }
+    $list = @()
+    try {
+        $list = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+    } catch {
+        $list = @()
+    }
+    $Global:VideoControllersCache = $list
+    return $list
+}
+
 function Get-GpuStateUncached {
-    $controllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
     $total  = [int64]0
     $used   = [int64]0
     $labels = @()
 
-    # P2 : Get-Command balaye TOUT le PATH (~1 s cumulé avec les 2 appels).
-    # Chemins absolus directs : pas de recherche disque, pas de spawn.
-    $nvidiaSmiPath = 'C:\Windows\System32\nvidia-smi.exe'
-    if (Test-Path $nvidiaSmiPath) {
+    # Vendor et WMI deja memorises : ni balayage de PATH, ni appel WMI ici.
+    $vendor      = Get-GpuVendorTool
+    $controllers = Get-VideoControllerInfo
+
+    if ($vendor -eq 'nvidia') {
         try {
             $gpuData = & nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits 2>$null
             if ($gpuData) {
@@ -1165,8 +1219,7 @@ function Get-GpuStateUncached {
         } catch {}
     }
 
-    $rocmSmi = Get-Command rocm-smi -ErrorAction SilentlyContinue
-    if ($rocmSmi) {
+    if ($vendor -eq 'amd') {
         try {
             $amdData = & rocm-smi --showproductname --showmeminfo vram --json 2>$null | ConvertFrom-Json
             if ($amdData) {
