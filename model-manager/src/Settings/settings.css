@@ -1,0 +1,228 @@
+/* Page Paramètres — réglages voix.
+   Mêmes tokens que le reste de l'application (App.css) : aucune couleur
+  codée en dur, pour que le thème reste piloté par un seul endroit. */
+
+.settings-page {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem 4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.settings-header h2 {
+    margin: 0 0 .35rem;
+    font-size: 1.6rem;
+}
+
+.settings-subtitle,
+.settings-section-hint {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: .88rem;
+    line-height: 1.5;
+}
+
+.settings-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.4rem 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: .85rem;
+}
+
+.settings-section h3 {
+    margin: 0;
+    font-size: 1.02rem;
+    letter-spacing: .01em;
+}
+
+/* ── Interrupteur ─────────────────────────────────────────────────────── */
+
+.settings-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: .7rem .85rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(148, 163, 184, .04);
+    cursor: pointer;
+    transition: border-color .15s ease, background .15s ease;
+}
+
+.settings-toggle:hover {
+    border-color: var(--accent-line);
+}
+
+.settings-toggle.is-disabled {
+    opacity: .5;
+    cursor: not-allowed;
+}
+
+.settings-toggle-text {
+    display: flex;
+    flex-direction: column;
+    gap: .2rem;
+}
+
+.settings-toggle-label {
+    font-size: .92rem;
+    font-weight: 600;
+}
+
+.settings-toggle-hint {
+    font-size: .78rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
+.settings-switch {
+    position: relative;
+    flex: 0 0 auto;
+    width: 42px;
+    height: 24px;
+}
+
+.settings-switch input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+}
+
+.settings-switch-track {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, .28);
+    border: 1px solid var(--border);
+    transition: background .18s ease, border-color .18s ease;
+    pointer-events: none;
+}
+
+.settings-switch-track::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--text);
+    transition: transform .18s ease;
+}
+
+.settings-switch input:checked + .settings-switch-track {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.settings-switch input:checked + .settings-switch-track::after {
+    transform: translateX(18px);
+    background: #052e2b;
+}
+
+.settings-switch input:focus-visible + .settings-switch-track {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* ── Champs (langue, débit, hauteur) ──────────────────────────────────── */
+
+.settings-fields {
+    display: flex;
+    flex-direction: column;
+    gap: .9rem;
+    padding: .95rem 1rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(148, 163, 184, .03);
+}
+
+.settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: .35rem;
+}
+
+.settings-field-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: .82rem;
+    color: var(--text-muted);
+}
+
+.settings-field-value {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.settings-field select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .5rem .6rem;
+    font-size: .86rem;
+}
+
+.settings-field input[type='range'] {
+    accent-color: var(--accent);
+    width: 100%;
+}
+
+.settings-test-button,
+.settings-reset-button {
+    align-self: flex-start;
+    background: var(--accent-bg);
+    color: var(--text);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: .5rem 1rem;
+    font-size: .84rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s ease;
+}
+
+.settings-test-button:hover,
+.settings-reset-button:hover {
+    background: rgba(20, 184, 166, .2);
+}
+
+.settings-reset-button {
+    background: transparent;
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.settings-reset-button:hover {
+    background: var(--danger-bg);
+}
+
+/* ── Messages d'information ───────────────────────────────────────────── */
+
+.settings-notice,
+.settings-note {
+    margin: 0;
+    font-size: .8rem;
+    line-height: 1.55;
+    padding: .65rem .8rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    background: rgba(148, 163, 184, .05);
+}
+
+.settings-notice {
+    border-color: var(--accent-line);
+    background: var(--accent-bg);
+}

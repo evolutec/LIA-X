@@ -1,4 +1,5 @@
 import { useState } from "react";
+import "./documentation.css";
 
 const Documentation = () => {
   const [activeTab, setActiveTab] = useState('installation');
@@ -147,7 +148,7 @@ docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-
                 <li>Utilisation mémoire dédiée (Dedicated Usage)</li>
                 <li>API exposée sur le port 13621</li>
                 <li>Collecte via les compteurs Windows (<code>Get-Counter</code>), sans dépendance externe</li>
-                <li>Température et consommation GPU non exposées (<code>null</code>)
+                <li>Température et consommation GPU non exposées (<code>null</code>)</li>
               </ul>
             </div>
 
@@ -266,6 +267,85 @@ print(resp.choices[0].message.content)`}</code></pre>
 }
 `}</code></pre>
               </div>
+            </div>
+
+            <div className="doc-section">
+              <h3 className="doc-subheading">Chat (conversations)</h3>
+              <p className="doc-note">
+                Conversation en streaming contre <code>/v1/chat/completions</code>. Le proxy Model
+                Loader assure l'autochargement du modèle et le routage multi-instances. Les réponses
+                sont rendues en Markdown, nettoyées par DOMPurify (liste blanche stricte) avant
+                insertion dans la page.
+              </p>
+              <ul className="doc-list">
+                <li>Entrée envoie, Maj+Entrée insère un saut de ligne</li>
+                <li>Arrêter interrompt la génération en cours</li>
+                <li>Les modèles à raisonnement (Qwen3, DeepSeek-R1…) exposent un panneau « Raisonnement » séparé</li>
+                <li>Copier, Régénérer et suppression par message</li>
+              </ul>
+
+              <h4 className="doc-subheading">Persistance (PostgreSQL 16 + pgvector)</h4>
+              <p className="doc-note">
+                L'historique est enregistré dans le conteneur <code>lia-postgres</code>, joignable
+                uniquement depuis le réseau Docker privé <code>lia-network</code> (aucun port publié
+                sur l'hôte). Le schéma est appliqué automatiquement au démarrage et reste idempotent.
+              </p>
+              <table className="doc-table">
+                <thead>
+                  <tr>
+                    <th className="doc-table-col">Endpoint</th>
+                    <th className="doc-table-col">Méthode</th>
+                    <th className="doc-table-col">Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td className="doc-table-cell"><code>GET /api/db/health</code></td>
+                    <td className="doc-table-cell">GET</td>
+                    <td className="doc-table-cell">État de la persistance (l'interface bascule en mémoire si indisponible)</td>
+                  </tr>
+                  <tr>
+                    <td className="doc-table-cell"><code>GET /api/conversations</code></td>
+                    <td className="doc-table-cell">GET</td>
+                    <td className="doc-table-cell">Liste des conversations avec leur nombre de messages</td>
+                  </tr>
+                  <tr>
+                    <td className="doc-table-cell"><code>POST /api/conversations</code></td>
+                    <td className="doc-table-cell">POST</td>
+                    <td className="doc-table-cell">Crée une conversation</td>
+                  </tr>
+                  <tr>
+                    <td className="doc-table-cell"><code>GET /api/conversations/:id</code></td>
+                    <td className="doc-table-cell">GET</td>
+                    <td className="doc-table-cell">Conversation complète avec ses messages</td>
+                  </tr>
+                  <tr>
+                    <td className="doc-table-cell"><code>PATCH /api/conversations/:id</code></td>
+                    <td className="doc-table-cell">PATCH</td>
+                    <td className="doc-table-cell">Renomme la conversation</td>
+                  </tr>
+                  <tr>
+                    <td className="doc-table-cell"><code>DELETE /api/conversations/:id</code></td>
+                    <td className="doc-table-cell">DELETE</td>
+                    <td className="doc-table-cell">Supprime la conversation et ses messages (cascade)</td>
+                  </tr>
+                  <tr>
+                    <td className="doc-table-cell"><code>POST /api/conversations/:id/messages</code></td>
+                    <td className="doc-table-cell">POST</td>
+                    <td className="doc-table-cell">Ajoute un message (rôle, contenu, raisonnement)</td>
+                  </tr>
+                  <tr>
+                    <td className="doc-table-cell"><code>DELETE /api/messages/:id</code></td>
+                    <td className="doc-table-cell">DELETE</td>
+                    <td className="doc-table-cell">Supprime un message</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p className="doc-note">
+                Toutes les requêtes SQL sont paramétrées. Les tables <code>folders</code>,
+                <code>files</code> et <code>chunks</code> (colonne <code>vector(768)</code>,
+                index HNSW cosinus) sont déjà créées pour la phase RAG.
+              </p>
             </div>
 
             <div className="doc-section">

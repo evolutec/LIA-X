@@ -1,0 +1,11 @@
+/* =========================================================================
+ * Page « Documentation » (Documentation)
+ * -------------------------------------------------------------------------
+ * Feuille de style dediee a src/Documentation/Documentation.jsx.
+ *
+ * Volet reserve au futur decoupage : le composant n'a aujourd'hui aucune
+ * classe CSS qui lui soit exclusive. Il ne redefinit que des regles
+ * specifiques (documentation, sections de guide) qui vivent encore dans
+ * src/App.css, a côté du socle commun (card, btn, table-*, theme).
+ * Les regles communes doivent rester dans App.css pour ne pas les dupliquer.
+ * ========================================================================= */

@@ -77,12 +77,15 @@ Stop-LlamaServerProcesses -MaxWaitSec 20
 try {
     $dockerInfo = & docker info 2>$null
     if ($LASTEXITCODE -eq 0) {
-        foreach ($c in @('model-loader', 'anythingllm', 'anything-llm', 'openwebui', 'open-webui', 'librechat', 'librechat-mongo')) {
+        foreach ($c in @('model-loader', 'lia-postgres', 'anythingllm', 'anything-llm', 'openwebui', 'open-webui', 'librechat', 'librechat-mongo')) {
             & docker stop --time 5 $c 2>$null | Out-Null
             & docker rm -f $c 2>$null | Out-Null
         }
         if ($Full) {
-            & docker volume rm anythingllm-storage open-webui-data librechat-data librechat-mongo 2>$null | Out-Null
+            # -Full supprime aussi l'historique des conversations. Sans ce
+            # drapeau, le volume lia-postgres-data est conserve : le
+            # re-installateur retrouve les conversations existantes.
+            & docker volume rm anythingllm-storage open-webui-data librechat-data librechat-mongo lia-postgres-data 2>$null | Out-Null
         }
     }
 } catch { }
@@ -149,7 +152,22 @@ if (Test-Path -LiteralPath $releaseRoot) {
     }
 }
 
-# ── 6. Marqueur d'installation ───────────────────────────────────────────
+# ── 6. Donnees de langue OCR (.tesseract) ───────────────────────────────────
+# Le cache tesseract (fra/eng, ~6 Mo) est stocke dans {userdocs}\LIA-X\Models
+# plutot que dans le repertoire d'installation, avec les modeles.
+# Il est donc conserve comme les modeles eux-memes : le desinstaller obligerait a
+# retelecharger 6 Mo au premier import d'une image. Supprimez-le a la main si
+# vous voulez rendre la desinstallation complete :
+#   Remove-Item "$env:USERPROFILE\Documents\LIA-X\Models\.tesseract" -Recurse
+$ocrCache = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'LIA-X\Models\.tesseract'
+if (Test-Path -LiteralPath $ocrCache) {
+    $ocrSize = (Get-ChildItem -LiteralPath $ocrCache -Recurse -File -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum).Sum
+    Write-Info ("Cache OCR conserve dans les modeles ({0:N1} Mo) : {1}" -f `
+        ($ocrSize / 1MB), $ocrCache)
+}
+
+# ── 7. Marqueur d'installation ────────────────────────────────────────────
 $marker = Join-Path $InstallDir '.install-paths.json'
 if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue }
 

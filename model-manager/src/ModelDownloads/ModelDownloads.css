@@ -1,0 +1,55 @@
+/* ====================================================================
+ * Panneau des telechargements en arriere-plan.
+ * --------------------------------------------------------------------
+ * Regles extraites de src/App.css. Le socle commun (variables, .app-shell,
+ * .card, .btn, .table-*) reste dans App.css : seules les classes propres a
+ * cette page ont ete deplacees ici.
+ */
+
+.downloads-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  color: var(--text);
+}
+
+.downloads-list { display: grid; gap: 10px; }
+
+.download-item-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+
+.download-item-percent { font-size: 0.82rem; font-weight: 700; color: #2dd4bf; white-space: nowrap; }
+
+.download-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2dd4bf 0%, #0ea5e9 100%);
+  box-shadow: 0 0 16px rgba(14, 165, 233, 0.35);
+  transition: width 0.35s ease;
+}
+
+.download-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 7px;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.download-item-error { margin-top: 6px; color: #fca5a5; font-size: 0.76rem; word-break: break-word; }
+
+.download-toasts {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 70;
+  display: grid;
+  gap: 10px;
+  width: min(420px, calc(100vw - 36px));
+}
+
+.download-toast-body { display: grid; gap: 4px; color: var(--text); font-size: 0.85rem; }
+
+.download-toast-actions { display: flex; gap: 8px; }

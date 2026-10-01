@@ -1,0 +1,126 @@
+/* ====================================================================
+ *  Page Documents : grille a deux colonnes, en-tete, panneau lateral
+ *  et onglets (documents / folders).
+ *  --------------------------------------------------------------------
+ *  Extrait de l'ancien chat/chat.css, qui contenait le chat, la page
+ * Documents et le panneau RAG dans un seul fichier. Chaque page importe
+ * desormais son propre CSS ; le socle commun reste dans src/App.css.
+ */
+/* ========================================================================
+ * Grille de la page
+ * ------------------------------------------------------------------------
+ */
+.docs-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+/* ========================================================================
+ * En-tete
+ * ------------------------------------------------------------------------
+ */
+.docs-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+.docs-page-header h2 {
+  margin: 0 0 4px;
+  font-size: 1.15rem;
+}
+.docs-page-header p {
+  margin: 0;
+}
+.docs-page-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* Sans panneau latéral, l'explorateur occupe toute la largeur : la grille
+   garderait sinon une colonne vide de 280 px à droite. */
+.docs-page-body.is-full {
+  grid-template-columns: minmax(0, 1fr);
+}
+/* ========================================================================
+ * Onglets (documents / folders)
+ * ------------------------------------------------------------------------
+ */
+.docs-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 14px 16px;
+}
+/* ========================================================================
+ * Panneau lateral
+ * ------------------------------------------------------------------------
+ */
+.docs-page-side {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 14px 16px;
+}
+.docs-side-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.docs-side-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.82rem;
+}
+.docs-side-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.docs-side-list li:hover {
+  background: rgba(148, 163, 184, 0.08);
+}
+.docs-side-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.docs-side-list button {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 0.72rem;
+  padding: 3px 8px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.docs-side-list button:hover {
+  background: var(--accent);
+  color: var(--bg);
+}

@@ -7,10 +7,20 @@
     "build": "vite build"
   },
   "dependencies": {
-    "agentkeepalive": "^4.6.0",
-    "express": "^4.19.2",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "@huggingface/transformers": "^3.3.3",
+    "agentkeepalive": "4.6.0",
+    "dompurify": "3.4.16",
+    "express": "4.22.1",
+    "mammoth": "1.13.0",
+    "marked": "18.0.14",
+    "pdf-parse": "2.4.5",
+    "pg": "8.23.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tesseract.js": "7.0.0",
+    "word-extractor": "1.0.4",
+    "ws": "^8.18.0",
+    "xlsx": "0.18.5"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",

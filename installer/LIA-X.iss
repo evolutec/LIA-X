@@ -352,6 +352,31 @@ begin
     Log('  ERREUR : démarrage de model-loader impossible.');
 end;
 
+procedure RunPostgresContainer;
+var
+  ResultCode: Integer;
+  Args: String;
+begin
+  { Base de données locale (conversations + RAG pgvector).
+    Aucun port n'est publié sur l'hôte : le conteneur n'est joignable que
+    depuis le réseau privé lia-network. Le volume nommé conserve l'historique
+    entre les redémarrages et les mises à jour de LIA-X. }
+  Args := 'run -d --name lia-postgres --network lia-network' +
+    ' -e POSTGRES_DB=lia' +
+    ' -e POSTGRES_USER=lia' +
+    ' -e POSTGRES_PASSWORD=lia_local_dev' +
+    ' -v lia-postgres-data:/var/lib/postgresql/data' +
+    ' --restart unless-stopped' +
+    ' --health-cmd "pg_isready -U lia -d lia"' +
+    ' --health-interval 10s --health-timeout 5s --health-retries 5' +
+    ' pgvector/pgvector:pg16';
+  Exec(DockerPath, Args, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ResultCode = 0 then
+    Log('  lia-postgres démarré (PostgreSQL 16 + pgvector)')
+  else
+    Log('  ERREUR : démarrage de lia-postgres impossible.');
+end;
+
 procedure BuildModelLoaderImage(const InstallDir: String);
 var
   ResultCode: Integer;
@@ -930,6 +955,7 @@ begin
     RemoveContainer('anythingllm');
     RemoveContainer('anything-llm');
     RemoveContainer('model-loader');
+    RemoveContainer('lia-postgres');
     StartMenuFolder := ExpandConstant('{commonprograms}\LIA-X');
     DeleteFile(StartMenuFolder + '\LIA-X Model Manager.url');
     DeleteFile(StartMenuFolder + '\LIA-X Model Manager.lnk');
@@ -969,6 +995,7 @@ begin
     RemoveContainer('anythingllm');
     RemoveContainer('anything-llm');
     RemoveContainer('model-loader');
+    RemoveContainer('lia-postgres');
   end;
 
   LogStep('Étape 2/6 : Détection matérielle et configuration runtime');
@@ -1075,6 +1102,11 @@ begin
     else
       Log('  ATTENTION : nettoyage des contrôleurs obsolètes en échec (code ' + IntToStr(ResultCode) + ').');
     BuildModelLoaderImage(InstallDir);
+    { PostgreSQL + pgvector : historique des conversations et base du RAG.
+      Démarré AVANT le model-loader, qui attend la base au boot mais reste
+      joignable si elle met du temps. }
+    RemoveContainer('lia-postgres');
+    RunPostgresContainer;
     RemoveContainer('model-loader');
     RunModelLoaderContainer(InstallDir, ModelsDir);
   end

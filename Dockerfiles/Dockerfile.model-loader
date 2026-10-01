@@ -9,14 +9,32 @@ RUN apt-get update && apt-get install -y curl unzip && rm -rf /var/lib/apt/lists
 COPY model-manager/ /app/model-manager/
 
 # Build frontend
+# npm ci installe exactement ce que package-lock.json decrit. Un npm install
+# resoudrait potentiellement une version majeure differente au premier build sur
+# une machine vierge, et une incompatibilite (tesseract.js, pdf-parse) serait
+# alors decouverte au moment de compiler l'installateur.
 RUN cd /app/model-manager && \
-    npm install && \
+    npm ci --no-audit --no-fund && \
     VITE_API_BASE_URL="" npm run build && \
     npm prune --omit=dev
+
+# Verifie que les modules RAG se chargent dans un Node neuf, comme en
+# production. Un require() casse ici echoue tot, avec un message clair, au lieu
+# de laisser un conteneur qui demarre puis echoue a la premiere ingestion.
+RUN cd /app/model-manager && node -e " \
+      require('./src/rag/extractors.cjs'); \
+      require('./src/rag/ingestQueue.cjs'); \
+      require('./src/rag/repository.cjs'); \
+      require('./src/rag/service.cjs'); \
+      console.log('modules RAG charges'); \
+    "
 
 # Le backend server.js est CommonJS alors que le package frontend est en ESM.
 # On le lance via une copie .cjs pour éviter le conflit de type de module.
 RUN cp /app/model-manager/server.js /app/model-manager/server.cjs
+
+# Les modules de la couche base (src/db/*.cjs) sont déjà en .cjs : require() ne
+# résout pas les .js dans un package "type": "module".
 
 # Configuration
 ENV NODE_ENV=production
@@ -28,6 +46,17 @@ ENV CONTROLLER_PORT=13579
 ENV LLAMA_PORT=12434
 ENV METRICS_HOST_URL=http://host.docker.internal:13621
 ENV DOCKER_INTERNAL=true
+
+# Base de données (conteneur lia-postgres sur le réseau privé lia-network).
+# Aucun port n'est publié sur l'hôte : postgres n'est joignable que du réseau.
+ENV POSTGRES_HOST=lia-postgres
+ENV POSTGRES_PORT=5432
+ENV POSTGRES_DB=lia
+ENV POSTGRES_USER=lia
+ENV POSTGRES_PASSWORD=lia_local_dev
+# Attente de la base au boot. Le conteneur reste joignable pendant ce délai :
+# le chat fonctionne, seul l'historique est indisponible.
+ENV POSTGRES_WAIT_MS=60000
 
 EXPOSE 3005
 EXPOSE 13579

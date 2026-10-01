@@ -1,0 +1,51 @@
+/* ====================================================================
+ * Toasts systeme (pile en bas a droite).
+ * --------------------------------------------------------------------
+ * Regles extraites de src/App.css. Le socle commun (variables, .app-shell,
+ * .card, .btn, .table-*) reste dans App.css : seules les classes propres a
+ * cette page ont ete deplacees ici.
+ */
+
+/* Position fixe : indépendant de la grille et du défilement de .app-content,
+   donc visible quel que soit l'onglet. En bas à droite, hors de la zone de
+   lecture, pour ne pas masquer le contenu.
+   Ces règles vivent dans App.css et non chat.css : les toasts concernent
+   toute l'application, alors que chat.css n'est chargé que par la page chat. */
+
+/* =========================================================================
+   Messages système (toasts)
+   ========================================================================= */
+
+.toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(400px, calc(100vw - 36px));
+  pointer-events: none;
+}
+
+.toast-error { border-left-color: var(--danger); }
+
+.toast-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.toast-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.toast-close:hover { color: var(--text); background: rgba(148, 163, 184, 0.14); }
+
+@media (max-width: 480px) {
+  .toast-stack { right: 10px; left: 10px; bottom: 10px; max-width: none; }
+}

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import "./performance.css";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 

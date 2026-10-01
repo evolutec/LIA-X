@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import './Loader.css';
 
 function Loader({ show, progress = 0, label = '' }) {
   const [tick, setTick] = useState(0);

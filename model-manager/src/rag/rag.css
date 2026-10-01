@@ -1,0 +1,222 @@
+/* ====================================================================
+ *  Panneau RAG (RagPanel) : folders, documents, progression d'indexation
+ *  et regles globales .rag-panel. Rendu par la page Documents.
+ *  --------------------------------------------------------------------
+ *  Extrait de l'ancien chat/chat.css, qui contenait le chat, la page
+ * Documents et le panneau RAG dans un seul fichier. Chaque page importe
+ * desormais son propre CSS ; le socle commun reste dans src/App.css.
+ */
+/* ========================================================================
+ * En-tete du panneau RAG
+ * ------------------------------------------------------------------------
+ */
+.rag-panel-head button,
+  .rag-folder-delete,
+  .rag-file-item button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: .8rem;
+  padding: 3px 6px;
+  border-radius: 6px;
+}
+.rag-panel-head button:hover,
+  .rag-folder-delete:hover,
+  .rag-file-item button:hover {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+/* ========================================================================
+ * Sections (folders, documents)
+ * ------------------------------------------------------------------------
+ */
+.rag-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.rag-section-title {
+  margin: 0;
+  font-size: .72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-muted);
+}
+/* ========================================================================
+ * Progression d'indexation
+ * ------------------------------------------------------------------------
+ */
+.rag-progress {
+  margin: 0;
+  font-size: .78rem;
+  color: var(--accent);
+}
+/* ========================================================================
+ * Erreurs
+ * ------------------------------------------------------------------------
+ */
+.rag-error {
+  margin: 0;
+  padding: 7px 9px;
+  font-size: .78rem;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  border-radius: 7px;
+}
+/* ========================================================================
+ * Folders
+ * ------------------------------------------------------------------------
+ */
+.rag-folder-list,
+  .rag-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.rag-folder-item,
+  .rag-file-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 7px;
+  padding: 2px 4px;
+}
+.rag-folder-item:hover,
+  .rag-file-item:hover {
+  background: #94a3b814;
+}
+.rag-folder-label {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  font-size: .83rem;
+}
+.rag-folder-name,
+  .rag-file-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rag-folder-count,
+  .rag-file-count,
+  .rag-file-state {
+  flex: 0 0 auto;
+  font-size: .7rem;
+  color: var(--text-muted);
+}
+/* ========================================================================
+ * Documents et leur etat
+ * ------------------------------------------------------------------------
+ */
+.rag-file-state {
+  margin-left: 6px;
+  color: var(--accent);
+}
+.rag-file-item.is-pending .rag-file-name {
+  color: var(--accent);
+}
+/* ========================================================================
+ * Documents regroupes par folder
+ * ------------------------------------------------------------------------
+ * L'ingestion vise toujours une folder : sans ce decoupage, on ne
+ * savait pas a quel ensemble appartenait un document.
+ * ======================================================================== */
+.rag-file-group {
+  margin-bottom: 10px;
+}
+.rag-file-group:last-child {
+  margin-bottom: 0;
+}
+.rag-file-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0 4px 2px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 5px;
+}
+.rag-file-group-name {
+  font-size: .8rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rag-file-group-count {
+  flex: 0 0 auto;
+  font-size: .72rem;
+  color: var(--text-muted);
+}
+/* ========================================================================
+ * Selecteur d'espace de travail
+ * ------------------------------------------------------------------------
+ * L'espace se selectionne ici mais se cree dans l'onglet Chat : un menu
+ * deroulant suffit, la liste de ses chats n'a pas sa place dans une page
+ * dediee aux documents.
+ * ======================================================================== */
+.rag-workspace-picker .rag-inline {
+  gap: 8px;
+}
+.rag-workspace-picker select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 9px;
+  font: inherit;
+  font-size: .86rem;
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+/* ========================================================================
+ * Barre de progression
+ * ------------------------------------------------------------------------
+ */
+.rag-progress-bar {
+  flex: 0 0 70px;
+  height: 4px;
+  border-radius: 999px;
+  background: #94a3b840;
+  overflow: hidden;
+}
+.rag-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width .4s ease;
+}
+/* ========================================================================
+ * Elements en ligne
+ * ------------------------------------------------------------------------
+ */
+.rag-inline {
+  display: flex;
+  gap: 6px;
+}
+/* ========================================================================
+ * Regles globales du panneau
+ * ------------------------------------------------------------------------
+ */
+.rag-panel button:not(.rag-panel-head button):not(.rag-folder-delete):not(.rag-file-item button) {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 5px 11px;
+  font: inherit;
+  font-size: .8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}

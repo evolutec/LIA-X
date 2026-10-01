@@ -1,0 +1,163 @@
+/* ====================================================================
+ * Page « Performance » : CPU, GPU, memoire, jauges et graphique.
+ * --------------------------------------------------------------------
+ * Regles extraites de src/App.css. Le socle commun (variables, .app-shell,
+ * .card, .btn, .table-*) reste dans App.css : seules les classes propres a
+ * cette page ont ete deplacees ici.
+ */
+
+.performance-source {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.performance-hero-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 26px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 340px;
+}
+
+.performance-hero-card.gpu-card {
+  background: linear-gradient(135deg, rgba(20, 12, 38, 0.96), rgba(44, 12, 62, 0.96));
+}
+
+.performance-hero-label {
+  color: #7dd3fc;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  margin-bottom: 8px;
+}
+
+.performance-chip {
+  align-self: center;
+  background: rgba(15, 23, 42, 0.95);
+  color: #dbeafe;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.gauge-ring {
+  position: relative;
+  width: 220px;
+  height: 220px;
+  margin: 0 auto;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, rgba(96, 165, 250, 0.15), transparent 35%),
+    radial-gradient(circle at 70% 70%, rgba(20, 184, 166, 0.12), transparent 28%),
+    rgba(8, 17, 31, 0.95);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+
+.gauge-ring-fill {
+  position: absolute;
+  inset: 12px;
+  border-radius: 50%;
+  background: rgba(3, 14, 29, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.05);
+}
+
+.gauge-ring-inner span {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #ecfeff;
+}
+
+.performance-meta-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.performance-metric span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  margin-bottom: 6px;
+}
+
+.core-usage-list {
+  display: grid;
+  gap: 10px;
+}
+
+.core-usage-track {
+  background: rgba(148, 163, 184, 0.1);
+  border-radius: 999px;
+  height: 8px;
+  width: 100%;
+  overflow: hidden;
+}
+
+.gpu-info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.gpu-info-grid span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  margin-bottom: 8px;
+}
+
+.gpu-usage-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.gpu-usage-fill {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.95), rgba(34, 211, 238, 0.85));
+}
+
+.memory-chart {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.memory-chart-svg {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.memory-chart-rules {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: repeat(4, 1fr);
+  pointer-events: none;
+}
+
+.performance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px;
+  margin-top: 24px;
+}
+
+.memory-card {
+  background: linear-gradient(180deg, rgba(16, 185, 129, 0.08), rgba(15, 23, 42, 0.9));
+}
+
+.hardware-card-meta {
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  font-size: 0.9rem;
+}

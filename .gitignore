@@ -33,3 +33,5 @@ runtime/_*.txt
 # ATTENTION : docs/ est necessaire a la compilation de
 # installer\LIA-X.iss (Source: "..\docs\*"). Ne pas l'ignorer, sinon ISCC
 # echoue sur un clone frais ou dans la CI.
+# Donnees de langue OCR : volumineuses, telechargees au premier usage.
+*.traineddata

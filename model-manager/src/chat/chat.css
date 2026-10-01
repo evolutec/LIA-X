@@ -1,0 +1,1112 @@
+/* ====================================================================
+ *  Chat : mise en page a deux colonnes, sidebar d'historique, messages,
+ *  composer, selecteur de modele et sources RAG affichees sous le message.
+ *  --------------------------------------------------------------------
+ *  Extrait de l'ancien chat/chat.css, qui contenait le chat, la page
+ * Documents et le panneau RAG dans un seul fichier. Chaque page importe
+ * desormais son propre CSS ; le socle commun reste dans src/App.css.
+ */
+/* ========================================================================
+ * Barre RAG du chat (bouton + badge de folders)
+ * ------------------------------------------------------------------------
+ */
+.chat-rag-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.chat-rag-toggle:hover,
+  .chat-rag-toggle.is-on {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.chat-rag-badge {
+  font-size: .72rem;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+/* ========================================================================
+ * Panneau RAG : etat vide et erreurs
+ * ------------------------------------------------------------------------
+ */
+.rag-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 12px 14px;
+  max-height: 380px;
+  overflow-y: auto;
+}
+.rag-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.rag-panel-head h3 {
+  margin: 0;
+  font-size: .95rem;
+}
+.rag-empty,
+  .rag-hint {
+  margin: 0;
+  font-size: .75rem;
+  color: var(--text-muted);
+}
+.rag-file-state.is-error {
+  color: var(--danger);
+}
+.rag-file-item.is-error .rag-file-name {
+  color: var(--danger);
+}
+.rag-panel button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+/* ========================================================================
+ * Sources RAG affichees sous un message
+ * ------------------------------------------------------------------------
+ */
+.chat-sources summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: .8rem;
+}
+.chat-sources ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.chat-sources li {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) auto;
+  gap: 3px 10px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--accent);
+  background: #94a3b80f;
+  border-radius: 0 7px 7px 0;
+}
+.chat-source-title {
+  font-weight: 600;
+  font-size: .8rem;
+}
+.chat-source-similarity {
+  font-size: .72rem;
+  color: var(--accent);
+}
+.chat-sources li p {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: .78rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* ========================================================================
+ * Grille a deux colonnes et_hauteur de la page
+ * ------------------------------------------------------------------------
+ */
+.chat-layout {
+  display: grid;
+  grid-template-columns: 264px minmax(0,1fr);
+  gap: 16px;
+  align-items: stretch;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.chat-layout.is-sidebar-collapsed {
+  grid-template-columns: 52px minmax(0,1fr);
+}
+/* ========================================================================
+ * Messages de la barre laterale
+ * ------------------------------------------------------------------------
+ */
+.chat-sidebar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
+}
+.chat-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 4px;
+}
+.chat-workspace.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-bg);
+}
+.chat-workspace-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 2px 2px 4px;
+}
+.chat-workspace-name-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: .8rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-workspace-name-muted {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.chat-workspace-count {
+  flex: 0 0 auto;
+  font-size: .68rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.chat-workspace-thread {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: calc(100% - 14px);
+  margin: 2px 0 0 14px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: .8rem;
+  text-align: left;
+  color: var(--text-muted);
+  background: none;
+  border: 1px dashed var(--border-strong, var(--border));
+  border-radius: 8px;
+  cursor: pointer;
+}
+.chat-workspace-thread:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.chat-workspace-thread:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+.chat-workspace-thread-caret {
+  font-size: .78rem;
+  line-height: 1;
+}
+.chat-workspace .chat-history-list {
+  flex: 0 0 auto;
+  max-height: none;
+  overflow: visible;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+  margin-left: 6px;
+}
+.chat-workspace-empty {
+  padding: 2px 0 2px 14px;
+  font-style: italic;
+}
+.chat-workspace-name-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: .82rem;
+  padding: 5px 8px;
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+}
+.chat-workspace-name-input:focus {
+  outline: none;
+}
+
+/* ========================================================================
+ * Sidebar d'historique (repliable)
+ * ------------------------------------------------------------------------
+ */
+.chat-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 10px;
+  overflow: hidden;
+}
+.chat-sidebar.is-collapsed {
+  align-items: stretch;
+  padding: 10px 6px;
+}
+.chat-sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chat-sidebar-toggle {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: .74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  cursor: pointer;
+  padding: 4px 2px;
+  border-radius: 6px;
+}
+.chat-sidebar-toggle:hover {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+.chat-sidebar.is-collapsed .chat-sidebar-toggle {
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 0;
+}
+.chat-sidebar-caret {
+  display: inline-block;
+  font-size: .95rem;
+  line-height: 1;
+}
+.chat-sidebar.is-collapsed .chat-sidebar-caret {
+  transform: rotate(180deg);
+}
+.chat-sidebar-heading {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-sidebar.is-collapsed .chat-sidebar-heading {
+  writing-mode: vertical-rl;
+  max-height: 130px;
+  letter-spacing: .08em;
+}
+.chat-sidebar-new {
+  flex: 0 0 auto;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 9px;
+  font-size: .76rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chat-sidebar-new:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--bg);
+}
+.chat-sidebar-new:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+.chat-sidebar-subtitle {
+  margin: 0;
+  font-size: .74rem;
+  color: var(--text-muted);
+}
+.chat-sidebar .chat-history-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+/* ========================================================================
+ * Selecteur de modele
+ * ------------------------------------------------------------------------
+ */
+.chat-model-select {
+  position: relative;
+  display: inline-block;
+}
+.chat-model-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: .82rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.chat-model-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.chat-model-button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+.chat-model-button-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-model-caret {
+  font-size: .6rem;
+  color: var(--text-muted);
+}
+.chat-model-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 100%;
+  max-width: 340px;
+  max-height: 280px;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: 10px;
+  box-shadow: 0 10px 30px #02061799;
+}
+.chat-model-empty {
+  padding: 10px;
+  font-size: .8rem;
+  color: var(--text-muted);
+}
+.chat-model-option {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  color: var(--text);
+  font: inherit;
+  font-size: .84rem;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-model-option:hover {
+  background: var(--accent-bg);
+}
+.chat-model-option.is-selected {
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+.chat-model-option-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-model-option-meta {
+  flex: 0 0 auto;
+  font-size: .72rem;
+  color: var(--text-muted);
+}
+/* ========================================================================
+ * Page, en-tete et etat vide
+ * ------------------------------------------------------------------------
+ */
+.chat-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.chat-header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.chat-header-title h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+.chat-runtime-badge {
+  font-size: .8rem;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.chat-runtime-badge.is-error {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-color: var(--danger);
+}
+.chat-header-actions button,
+  .chat-message-actions button,
+  .chat-composer-send {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: .82rem;
+  cursor: pointer;
+  transition: border-color .15s ease,background .15s ease;
+}
+.chat-header-actions button:hover:not(:disabled),
+  .chat-message-actions button:hover {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.chat-header-actions button:disabled,
+  .chat-composer-send:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+.chat-composer-send {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.chat-composer-send.is-stop {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.chat-empty {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+}
+.chat-empty-title {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+.chat-empty-text,
+  .chat-text,
+  .chat-message-pending {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.chat-runtime-error,
+  .chat-message-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: .88rem;
+}
+/* ========================================================================
+ * Zone de defilement des messages
+ * ------------------------------------------------------------------------
+ */
+.chat-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 6px;
+}
+/* ========================================================================
+ * Messages (auteur, flux, actions)
+ * ------------------------------------------------------------------------
+ */
+.chat-message {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 12px 14px;
+}
+.chat-message-user {
+  background: var(--accent-bg);
+  border-color: var(--accent-line);
+}
+.chat-message.is-error {
+  border-color: var(--danger);
+}
+.chat-message-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  font-size: .78rem;
+}
+.chat-message-author {
+  font-weight: 600;
+  color: var(--accent);
+}
+.chat-message-streaming {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.chat-message-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.chat-message-actions button {
+  padding: 3px 8px;
+  font-size: .74rem;
+}
+/* ========================================================================
+ * Avertissements
+ * ------------------------------------------------------------------------
+ */
+.chat-warning {
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: .85rem;
+}
+/* ========================================================================
+ * Liste d'historique
+ * ------------------------------------------------------------------------
+ */
+.chat-history-title {
+  margin: 0 0 8px;
+  font-size: .74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-muted);
+}
+.chat-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.chat-history-item {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  border-radius: 8px;
+}
+.chat-history-item.is-active {
+  background: var(--accent-bg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.chat-history-open {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 8px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.chat-history-open:hover:not(:disabled) {
+  background: var(--accent-bg);
+}
+.chat-history-open:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+.chat-history-name {
+  font-size: .86rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-history-meta {
+  font-size: .72rem;
+  color: var(--text-muted);
+}
+.chat-history-delete {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-right: 4px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: .8rem;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.chat-history-delete:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+.chat-history-delete:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+/* ========================================================================
+ * Curseur de streaming
+ * ------------------------------------------------------------------------
+ */
+.chat-caret {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: chat-blink 1s steps(2,start) infinite;
+}
+@keyframes chat-blink {
+  50% {
+    opacity: 0;
+  }
+}
+/* Corps du message : la colonne principale (auteur + contenu). */
+.chat-message-body {
+  min-width: 0;
+}
+/* Groupe « Sans espace » en bas de la barre d'historique. */
+.chat-workspace-orphans {
+  opacity: .85;
+}
+/* ========================================================================
+ * Zone de raisonnement
+ * ------------------------------------------------------------------------
+ */
+
+.chat-reasoning {
+  margin-bottom: 10px;
+  padding: 9px 11px;
+  border-left: 3px solid var(--text-muted);
+  background: #94a3b80f;
+  border-radius: 0 8px 8px 0;
+}
+.chat-reasoning-title {
+  margin: 0 0 5px;
+  font-size: .74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-muted);
+}
+.chat-reasoning-text {
+  margin: 0;
+  font-size: .85rem;
+  line-height: 1.6;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* ========================================================================
+ * Rendu Markdown
+ * ------------------------------------------------------------------------
+ */
+.chat-markdown {
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.chat-markdown>:first-child {
+  margin-top: 0;
+}
+.chat-markdown>:last-child {
+  margin-bottom: 0;
+}
+.chat-markdown p {
+  margin: 0 0 10px;
+}
+.chat-markdown ul,
+  .chat-markdown ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+.chat-markdown li {
+  margin: 3px 0;
+}
+.chat-markdown h1,
+  .chat-markdown h2,
+  .chat-markdown h3,
+  .chat-markdown h4,
+  .chat-markdown h5,
+  .chat-markdown h6 {
+  margin: 16px 0 8px;
+  line-height: 1.3;
+}
+.chat-markdown h1 {
+  font-size: 1.3rem;
+}
+.chat-markdown h2 {
+  font-size: 1.15rem;
+}
+.chat-markdown h3 {
+  font-size: 1.05rem;
+}
+.chat-markdown code {
+  font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size: .88em;
+  background: #94a3b81f;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.chat-markdown pre {
+  margin: 0 0 10px;
+  padding: 12px;
+  overflow-x: auto;
+  background: #02061799;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.chat-markdown pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: .85rem;
+  line-height: 1.55;
+}
+.chat-markdown blockquote {
+  margin: 0 0 10px;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--accent);
+  color: var(--text-muted);
+}
+.chat-markdown a {
+  color: var(--accent);
+}
+.chat-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 10px;
+  font-size: .9rem;
+}
+.chat-markdown th,
+  .chat-markdown td {
+  border: 1px solid var(--border);
+  padding: 6px 9px;
+  text-align: left;
+}
+.chat-markdown th {
+  background: #94a3b81a;
+}
+.chat-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+/* ========================================================================
+ * Réveil du modèle
+ * ------------------------------------------------------------------------
+ * Le premier token peut tarder quand les poids du modèle ont été évacués de
+ * la mémoire : llama-server les relit alors depuis le disque. Sans ce bandeau,
+ * la zone de réponse reste vide et l'interface paraît figée — l'utilisateur
+ * appuie sur « Arrêter », ce qui abandonne la requête alors que le chargement
+ * continue côté serveur.
+ * ======================================================================== */
+.chat-wake {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.chat-wake-spinner {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: chat-wake-spin 0.9s linear infinite;
+}
+@keyframes chat-wake-spin {
+  to { transform: rotate(360deg); }
+}
+.chat-wake-hint {
+  opacity: 0.85;
+}
+/* Respecte le réglage système : moins d'animation, pas de rotation permanente. */
+@media (prefers-reduced-motion: reduce) {
+  .chat-wake-spinner {
+    animation: none;
+  }
+}
+
+/* ========================================================================
+ * Pied de page et zone de saisie
+ * ------------------------------------------------------------------------
+ */
+.chat-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.chat-hint {
+  margin: 0;
+  font-size: .76rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+.chat-composer {
+  display: flex;
+  /* Colonne, et non ligne : la rangee micro + saisie + envoi occupe toute la
+     largeur, et les retours transitoires (dictee, erreur) passent en dessous.
+     En ligne, la rangee devenait un simple item flex qui se reduisait a sa
+     largeur intrinseque : la saisie se retrouvait etroite avec une barre de
+     defilement interne. */
+  flex-direction: column;
+  gap: 10px;
+}
+.chat-composer-input {
+  flex: 1 1 auto;
+  /* Indispensable sur un textarea dans un flex : sans cela la largeur
+     intrinseque du controle (attribut cols) empeche l'elasticite et la saisie
+     deborde au lieu de remplir l'espace disponible. */
+  min-width: 0;
+  resize: none;
+  min-height: 44px;
+  max-height: 220px;
+  padding: 11px 13px;
+  font: inherit;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.chat-composer-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+.chat-composer-input:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+.chat-composer-send {
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 20px;
+}
+.chat-rag-toggle.is-on {
+  border-color: var(--accent);
+}
+@media (max-width: 720px) {
+  /* Sur petit ecran, le bouton d envoi passe sur une seconde ligne plutot que
+     de comprimer la saisie : on garde micro + saisie sur la premiere ligne. */
+  .chat-composer-row {
+    flex-wrap: wrap;
+  }
+  .chat-composer-send {
+    flex: 1 0 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-caret {
+    animation: none;
+  }
+}
+
+/* ── Micro de dictee ─────────────────────────────────────────────────────── */
+
+.chat-composer-row {
+    display: flex;
+    align-items: flex-end;
+    gap: .5rem;
+    /* Occupe toute la largeur disponible : c est cette regle qui empeche la
+       rangee de se reduire a la largeur de son contenu le plus etroit. */
+    width: 100%;
+    min-width: 0;
+}
+
+.chat-mic {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* Meme hauteur que la saisie et le bouton d envoi : les trois controles
+       partagent la meme ligne de base. */
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--surface);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+
+.chat-mic:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--accent-line);
+}
+
+.chat-mic:disabled {
+    opacity: .4;
+    cursor: not-allowed;
+}
+
+/* Enregistrement en cours : halo pulse pour signaler que le micro est ouvert. */
+.chat-mic.is-listening {
+    color: var(--danger);
+    border-color: var(--danger);
+    background: var(--danger-bg);
+    animation: chat-mic-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes chat-mic-pulse {
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(248, 113, 113, .45);
+    }
+
+    50% {
+        box-shadow: 0 0 0 7px rgba(248, 113, 113, 0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .chat-mic.is-listening {
+        animation: none;
+    }
+}
+
+.chat-mic:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.chat-message-speak {
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+}
+
+/* Ce que le navigateur a reconnu mais pas encore valide : affiche sous la
+   saisie, jamais dans le textarea, pour ne pas declencher l envoi. */
+.chat-composer-interim {
+    margin: .45rem 0 0;
+    font-size: .84rem;
+    font-style: italic;
+    color: var(--text-muted);
+}
+
+.chat-composer-error {
+    margin: .45rem 0 0;
+    font-size: .8rem;
+    color: var(--danger);
+}
+/* Echec de la synthese vocale : affiche sous l en-tete du message, pour que le
+   clic muet sur Ecouter ne reste pas sans explication. */
+.chat-message-speak-error {
+    margin: .3rem 0 0;
+    font-size: .78rem;
+    color: var(--danger);
+}
+/* ── Mode dialogue vocal ─────────────────────────────────────────────────── */
+
+.chat-voice-mode {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    flex-wrap: wrap;
+}
+
+.chat-voice-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    padding: 5px 11px;
+    font: inherit;
+    font-size: .8rem;
+    color: var(--text-muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+    transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+
+.chat-voice-toggle:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--accent-line);
+}
+
+.chat-voice-toggle:disabled {
+    opacity: .4;
+    cursor: not-allowed;
+}
+
+/* Mode actif : le bouton devient l indicateur que le micro est ouvert en
+   permanence, et se distingue nettement du micro ponctuel du composeur. */
+.chat-voice-mode.is-active .chat-voice-toggle {
+    color: var(--accent);
+    background: var(--accent-bg);
+    border-color: var(--accent);
+}
+
+.chat-voice-hint {
+    font-size: .78rem;
+    font-style: italic;
+    color: var(--text-muted);
+}
+
+.chat-voice-error {
+    font-size: .78rem;
+    color: var(--danger);
+}

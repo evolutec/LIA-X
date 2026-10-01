@@ -9,6 +9,15 @@ const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+
+const db = require('./src/db/pool.cjs');
+const { applySchema, waitForDatabase } = require('./src/db/migrate.cjs');
+const conversationsRepo = require('./src/db/conversations.cjs');
+const ragService = require('./src/rag/service.cjs');
+const ragRepository = require('./src/rag/repository.cjs');
+const ragLimits = require('./src/rag/limits.cjs');
+const extractors = require('./src/rag/extractors.cjs');
+const ragQueue = require('./src/rag/ingestQueue.cjs');
 const execFileAsync = promisify(execFile);
 const Agent = require('agentkeepalive');
 
@@ -504,7 +513,26 @@ let STATUS_CACHE = null;
 let STATUS_CACHE_TTL = 0;
 let STATUS_INFLIGHT = null;
 let STATUS_INFLIGHT_ID = 0;
-const STATUS_CACHE_MAX_AGE = 2000;
+// Durée de validité du cache /status.
+//
+// Elle doit être SUPÉRIEURE à la latence réelle d'un GET /status côté
+// contrôleur, sinon le cache n'est jamais réutilisé : un appel prend 0,7 à
+// 2,5 s (jusqu'à plusieurs secondes en pic), donc un TTL de 2 s expirait
+// systématiquement avant l'appel suivant et le cache ne servait à rien.
+// Une recherche RAG enchaîne alors une dizaine de GET /status sur le contrôleur
+// mono-thread, tous payants.
+//
+// 10 s est au-dessus de la latence observée, ce qui fait tomber une rafale de
+// lectures à un seul appel réel, tout en bornant la péremption du cache.
+//
+// Sûr vis-à-vis de l'app : toute opération qui change l'état
+// (/start, /stop, /restart) invalide explicitement le cache dans
+// controllerRequest(), et les routes de chargement/selection/dechargement
+// font de même. Un cache long ne peut donc pas masquer un changement
+// déclenché par l'application. Seule une extinction survenue en dehors
+// (crash, --sleep-idle) reste invisible au plus 10 s, et la requête
+// suivante relance alors /start via ensureRuntimeReady().
+const STATUS_CACHE_MAX_AGE = 10000;
 
 const LOG_HISTORY = [];
 const LOG_HISTORY_MAX = 240;
@@ -570,7 +598,18 @@ function invalidateStatusCache() {
 }
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+
+// Taille maximale du corps JSON, partagée par le parseur global et la route
+// d'ingestion. Doit être calculée avant app.use(...) ci-dessous.
+// Dimensionnement : le plus gros fichier autorisé (64 Mo) augmenté du
+// gonflement base64 (~33 %) et de l'encapsulation JSON.
+const RAG_MAX_BODY = `${Math.ceil(ragLimits.MAX_REQUEST_BYTES / (1024 * 1024))}mb`;
+
+// Le parseur JSON global est volontairement généreux. Une limite basse ici
+// rejetterait le corps AVANT que les routes RAG puissent appliquer la leur, car
+// ce middleware est monté avant elles. Chaque route reste libre de définir sa
+// propre limite via express.json({ limit }).
+app.use(express.json({ limit: RAG_MAX_BODY }));
 app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.set('Pragma', 'no-cache');
@@ -613,7 +652,17 @@ const DOCKER_INTERNAL = String(process.env.DOCKER_INTERNAL || 'false').toLowerCa
 // en cas d'absence de variable d'env, fetchHostMetrics() etait rejete et
 // l'UI perdait toutes les metriques materiel.
 const METRICS_HOST_URL = process.env.METRICS_HOST_URL || (DOCKER_INTERNAL ? 'http://host.docker.internal:13621' : 'http://127.0.0.1:13621');
-const CONTROLLER_START_TIMEOUT_MS = Number(process.env.CONTROLLER_START_TIMEOUT_MS || '300000');
+// Délai d'attente maximal d'un POST /start vers le contrôleur.
+//
+// Ce délai doit être SUPÉRIEUR au plafond d'attente de démarrage du contrôleur
+// (900 s), sinon le conteneur abandonne en premier et renvoie un 502 alors que
+// le contrôleur, lui, attend toujours. Le modèle finit alors par démarrer côté
+// llama-server, mais l'UI affiche « non chargé » : c'est le symptôme observé
+// après un changement de contexte via le slider.
+//
+// 960 s laisse au contrôleur la place de conclure (succès ou son propre
+// timeout), pour que la réponse HTTP reflète toujours la réalité.
+const CONTROLLER_START_TIMEOUT_MS = Number(process.env.CONTROLLER_START_TIMEOUT_MS || '960000');
 const OLLAMA_REGISTRY_BASE_URL = 'https://registry.ollama.ai';
 const GGUF_METADATA_CACHE = new Map();
 
@@ -1143,6 +1192,16 @@ async function buildModelStartRequest(identifier, requestedContext = null, reque
     payload.gpu_layers = details.gpu_layers;
   }
 
+  // Modèle épinglé : sleep_idle_seconds = -1 omet complètement le drapeau
+  // --sleep-idle-seconds côté contrôleur, donc llama-server ne décharge jamais
+  // et le modèle reste intégralement en VRAM. Le contrôleur écrit aussi cette
+  // valeur dans le runtime state : sa séquence de restauration relancera donc
+  // le modèle dans les mêmes conditions après un redémarrage.
+  const pinned = await listPinnedModels();
+  if (pinned.has(model.filename)) {
+    payload.sleep_idle_seconds = -1;
+  }
+
   return {
     model,
     details,
@@ -1163,6 +1222,587 @@ function normalizeRequestedGpuLayers(rawValue) {
   const rounded = Math.floor(value);
   return rounded >= 0 ? rounded : null;
 }
+
+// ---------------------------------------------------------------------------
+// API conversations — persistance PostgreSQL
+//
+// Chaque route renvoie 503 si la base est injoignable : l'interface sait alors
+// distinguer « pas encore de base » d'une vraie erreur, et le chat reste
+// utilisable en mémoire.
+// ---------------------------------------------------------------------------
+
+function requireDb(res) {
+  if (db.isDbAvailable()) return true;
+  res.status(503).json({
+    detail: 'Base de données indisponible. L’historique est conservé en mémoire pour cette session.',
+    database_error: db.getLastError(),
+  });
+  return false;
+}
+
+app.get('/api/db/health', async (req, res) => {
+  const health = await db.checkConnection();
+  res.json({
+    available: health.available,
+    error: health.error,
+    // Indique à l'UI si elle doit afficher le bandeau « historique non conservé ».
+    persistence: health.available,
+  });
+});
+
+app.get('/api/conversations', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const rows = await conversationsRepo.listConversations(limit);
+    res.json({ conversations: rows, persistence: true });
+  } catch (error) {
+    err(res, 500, `Impossible de lire les conversations : ${error.message}`);
+  }
+});
+
+app.post('/api/conversations', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { title, model } = req.body || {};
+    const conversation = await conversationsRepo.createConversation({ title, model });
+    res.status(201).json({ conversation, persistence: true });
+  } catch (error) {
+    err(res, 500, `Impossible de créer la conversation : ${error.message}`);
+  }
+});
+
+app.get('/api/conversations/:id', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const conversation = await conversationsRepo.getConversationWithMessages(req.params.id);
+    if (!conversation) return res.status(404).json({ detail: 'Conversation introuvable' });
+    res.json({ conversation, persistence: true });
+  } catch (error) {
+    // Un identifiant mal formé fait échouer le cast UUID : 400, pas 500.
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant de conversation invalide' });
+    err(res, 500, `Impossible de lire la conversation : ${error.message}`);
+  }
+});
+
+app.patch('/api/conversations/:id', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { title, model } = req.body || {};
+    if (title === undefined && model === undefined) {
+      return res.status(400).json({ detail: 'Aucun champ à mettre à jour' });
+    }
+    if (title !== undefined && (typeof title !== 'string' || !title.trim())) {
+      return res.status(400).json({ detail: 'Titre invalide' });
+    }
+    if (model !== undefined && typeof model !== 'string') {
+      return res.status(400).json({ detail: 'Modèle invalide' });
+    }
+    // Le nom de modèle n'est pas une donnée sensible : c'est un identifiant
+    // choisi dans une liste fermée par l'UI. On le persiste malgré tout
+    // paramétré, comme tout le reste.
+    const updated = title === undefined
+      ? (await conversationsRepo.setConversationModel(req.params.id, model || null))
+      : (await conversationsRepo.renameConversation(req.params.id, title.trim().slice(0, 200)));
+    if (!updated) return res.status(404).json({ detail: 'Conversation introuvable' });
+    res.json({ conversation: updated, persistence: true });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant de conversation invalide' });
+    err(res, 500, `Impossible de renommer la conversation : ${error.message}`);
+  }
+});
+
+app.delete('/api/conversations/:id', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const deleted = await conversationsRepo.deleteConversation(req.params.id);
+    if (!deleted) return res.status(404).json({ detail: 'Conversation introuvable' });
+    res.json({ deleted: true, persistence: true });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant de conversation invalide' });
+    err(res, 500, `Impossible de supprimer la conversation : ${error.message}`);
+  }
+});
+
+app.post('/api/conversations/:id/messages', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { role, content, reasoning, model, error: messageError } = req.body || {};
+    if (!['user', 'assistant', 'system'].includes(role)) {
+      return res.status(400).json({ detail: 'Rôle invalide (user, assistant ou system attendu)' });
+    }
+    if (typeof content !== 'string') {
+      return res.status(400).json({ detail: 'Contenu invalide' });
+    }
+    const message = await conversationsRepo.addMessage(req.params.id, {
+      role,
+      content,
+      reasoning: typeof reasoning === 'string' ? reasoning : null,
+      model: typeof model === 'string' ? model : null,
+      error: typeof messageError === 'string' ? messageError : null,
+    });
+    res.status(201).json({ message, persistence: true });
+  } catch (error) {
+    // 23503 = violation de clé étrangère : la conversation n'existe pas.
+    if (error.code === '23503') return res.status(404).json({ detail: 'Conversation introuvable' });
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant de conversation invalide' });
+    err(res, 500, `Impossible d’enregistrer le message : ${error.message}`);
+  }
+});
+
+app.delete('/api/messages/:id', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const deleted = await conversationsRepo.deleteMessage(req.params.id);
+    if (!deleted) return res.status(404).json({ detail: 'Message introuvable' });
+    res.json({ deleted: true, persistence: true });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant de message invalide' });
+    err(res, 500, `Impossible de supprimer le message : ${error.message}`);
+  }
+});
+
+
+// ---------------------------------------------------------------------------
+// API RAG — ingestion asynchrone et recherche vectorielle
+// ---------------------------------------------------------------------------
+
+// L'ingestion passe par JSON en base64 plutôt que par multipart : cela évite une
+// dépendance (multer) et une surface d'attaque inutile sur un endpoint local.
+// La limite RAG_MAX_BODY est définie plus haut, car le parseur global en dépend.
+
+function handleRagError(res, error) {
+  const message = String(error?.message || error);
+  // Corps JSON au-delà de la limite : c'est un fichier trop gros, pas une panne.
+  if (error.type === 'entity.too.large' || error.status === 413) {
+    return res.status(413).json({
+      detail: `Fichier trop volumineux pour le transport (maximum ${ragService.formatBytes(ragLimits.MAX_FILE_BYTES)} par fichier).`,
+    });
+  }
+  // Erreurs métier attendues : on renvoie 400 avec un message utilisable.
+  if (/introuvable| vide| illisible| trop volumineux| maximum | incohérent| non pris en charge| invalide| sans couche texte| mot de passe| aucun texte| exploitable| fragments/i.test(message)) {
+    return res.status(400).json({ detail: message });
+  }
+  // Modèle d'embeddings indisponible ou dimensions inattendues : problème de
+  // configuration, pas de saisie.
+  if (/dimension|embedding|Timeout|timeout/i.test(message)) {
+    return res.status(503).json({ detail: `Modèle d’embeddings indisponible : ${message}` });
+  }
+  return err(res, 500, message);
+}
+
+app.get('/api/rag/status', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const folders = await ragRepository.listFolders();
+    res.json({
+      available: true,
+      embeddingDimensions: ragService.EXPECTED_DIMENSIONS,
+      maxFileBytes: ragLimits.MAX_FILE_BYTES,
+      maxDocumentChars: ragLimits.MAX_DOCUMENT_CHARS,
+      maxChunks: ragLimits.MAX_CHUNKS_PER_DOCUMENT,
+      // L'interface s'en sert pour le accept="..." du champ fichier : la liste
+      // reste ainsi alignée sur ce que le serveur sait réellement extraire.
+      supportedExtensions: extractors.SUPPORTED_EXTENSIONS,
+      // Un PDF scanné n'a pas de couche texte ; l'OCR n'est appliqué qu'aux
+      // images. L'interface doit pouvoir l'expliquer avant l'échec.
+      ocrExtensions: extractors.IMAGE_EXTENSIONS,
+      folders,
+      totalChunks: await ragRepository.countChunks(null),
+    });
+  } catch (error) {
+    handleRagError(res, error);
+  }
+});
+
+app.get('/api/rag/folders', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json({ folders: await ragRepository.listFolders() });
+  } catch (error) {
+    handleRagError(res, error);
+  }
+});
+
+/**
+ * Contenu d'un dossier : sous-dossiers et fichiers.
+ *
+ * Sans `folder`, la requête renvoie la racine (dossiers de premier niveau) et
+ * une liste de fichiers vide. C'est ce que l'explorateur affiche à l'ouverture.
+ */
+app.get('/api/rag/folders/contents', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { folders, files } = await ragRepository.listFolderContents(
+      req.query.folder || null,
+    );
+    // Le fil d'Ariane n'a de sens que pour un dossier réel : à la racine il est
+    // vide, et le frontend affiche alors simplement « Mes fichiers ».
+    const ancestors = req.query.folder
+      ? await ragRepository.listFolderAncestors(req.query.folder)
+      : [];
+    res.json({ folders, files, ancestors });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+/** Espaces de travail auxquels un dossier est rattaché (menu contextuel). */
+app.get('/api/rag/folders/:id/workspaces', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const folder = await ragRepository.getFolder(req.params.id);
+    if (!folder) return res.status(404).json({ detail: 'Dossier introuvable' });
+    res.json({ workspaces: await ragRepository.listFolderWorkspaces(req.params.id) });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+app.post('/api/rag/folders', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { name, description, parentId } = req.body || {};
+    if (typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ detail: 'Nom de dossier requis' });
+    }
+    const trimmed = name.trim().slice(0, 200);
+
+    // Le parent doit exister : un parent fantôme créerait un dossier invisible
+    // dans l'explorateur, que rien ne pourrait retrouver.
+    if (parentId) {
+      const parent = await ragRepository.getFolder(parentId);
+      if (!parent) return res.status(400).json({ detail: 'Dossier parent introuvable' });
+    }
+    // Unicité vérifiée dans l'application : le nom n'est unique que parmi les
+    // frères, ce qu'une contrainte SQL globale n'exprimerait pas.
+    if (await ragRepository.isDuplicateName({ name: trimmed, parentId })) {
+      return res.status(409).json({ detail: 'Un dossier portant ce nom existe déjà ici' });
+    }
+
+    const folder = await ragRepository.createFolder({
+      name: trimmed,
+      description: typeof description === 'string' ? description.slice(0, 1000) : null,
+      parentId: parentId || null,
+    });
+    res.status(201).json({ folder });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ detail: 'Un dossier portant ce nom existe déjà ici' });
+    }
+    handleRagError(res, error);
+  }
+});
+
+/** Renomme et/ou déplace un dossier. */
+app.patch('/api/rag/folders/:id', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { name, parentId } = req.body || {};
+    const folder = await ragRepository.getFolder(req.params.id);
+    if (!folder) return res.status(404).json({ detail: 'Dossier introuvable' });
+
+    if (typeof name === 'string' && name.trim()) {
+      const trimmed = name.trim().slice(0, 200);
+      const targetParent = parentId === undefined ? folder.parent_id : (parentId || null);
+
+      if (await ragRepository.isDuplicateName({
+        name: trimmed, parentId: targetParent, excludeId: folder.id,
+      })) {
+        return res.status(409).json({ detail: 'Un dossier portant ce nom existe déjà ici' });
+      }
+      await ragRepository.renameFolder(folder.id, trimmed);
+    }
+
+    if (parentId !== undefined) {
+      const target = parentId || null;
+      if (target) {
+        const parent = await ragRepository.getFolder(target);
+        if (!parent) return res.status(400).json({ detail: 'Dossier parent introuvable' });
+        // Déplacer un dossier dans lui-même ou dans l'un de ses descendants
+        // créerait une boucle infinie dans l'explorateur.
+        if (await ragRepository.wouldCreateCycle(folder.id, target)) {
+          return res.status(400).json({ detail: 'Un dossier ne peut pas contenir lui-même' });
+        }
+      }
+      await ragRepository.moveFolder(folder.id, target);
+    }
+
+    res.json({ folder: await ragRepository.getFolder(folder.id) });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    if (error.code === '23505') {
+      return res.status(409).json({ detail: 'Un dossier portant ce nom existe déjà ici' });
+    }
+    handleRagError(res, error);
+  }
+});
+
+app.delete('/api/rag/folders/:id', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const deleted = await ragRepository.deleteFolder(req.params.id);
+    if (!deleted) return res.status(404).json({ detail: 'Folder introuvable' });
+    res.json({ deleted: true });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+app.get('/api/rag/files', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const files = await ragRepository.listDocuments(req.query.folder || null);
+    res.json({ files });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+// L'ingestion est asynchrone : la route enregistre le fichier et répond
+// immédiatement (202). Indexer un file de 20 Mo demande plusieurs minutes
+// de calcul de vecteurs ; le faire pendant la requête bloquerait le navigateur
+// et finirait par expirer. La progression se lit sur /api/rag/files.
+app.post('/api/rag/files', express.json({ limit: RAG_MAX_BODY }), async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { folderId, content, contentBase64, fileName, title } = req.body || {};
+    if (typeof folderId !== 'string' || !folderId) {
+      return res.status(400).json({ detail: 'folderId requis' });
+    }
+    // Le dossier doit exister : sinon le travail échouerait en arrière-plan
+    // sans que l'utilisateur puisse corriger quoi que ce soit.
+    const folder = await ragRepository.getFolder(folderId);
+    if (!folder) {
+      return res.status(400).json({ detail: 'Folder introuvable' });
+    }
+
+    // Tout le reste se passe dans la file : enqueueDocument lève encore pour les
+    // erreurs immédiates (format non supporté, fichier trop gros), ce qui est
+    // justement ce que l'utilisateur doit voir tout de suite.
+    const file = await ragQueue.enqueueDocument({
+      folderId, content, contentBase64, fileName, title,
+    });
+
+    res.status(202).json({ file, queue: ragQueue.getQueueState() });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant de folder invalide' });
+    handleRagError(res, error);
+  }
+});
+
+/** Demande l'annulation de l'indexation en cours. */
+app.post('/api/rag/cancel', async (req, res) => {
+  if (!requireDb(res)) return;
+  res.json({ cancelled: ragQueue.cancelCurrent() });
+});
+
+/** État de la file : travaille en cours et files non terminés. */
+app.get('/api/rag/queue', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json({
+      ...ragQueue.getQueueState(),
+      files: await ragRepository.listUnfinishedDocuments(),
+    });
+  } catch (error) {
+    handleRagError(res, error);
+  }
+});
+
+
+// ---------------------------------------------------------------------------
+// Espaces de travail
+//
+// Un espace regroupe des conversations et des dossiers de files. Les
+// files se rattachent ici, une fois pour toutes les conversations de
+// l'espace : c'est la différence avec le modèle précédent, où il fallait
+// cocher les mêmes dossiers dans chaque chat.
+// ---------------------------------------------------------------------------
+
+app.get('/api/workspaces', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json({ workspaces: await ragRepository.listWorkspaces() });
+  } catch (error) {
+    handleRagError(res, error);
+  }
+});
+
+app.post('/api/workspaces', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { name, description } = req.body || {};
+    if (typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ detail: 'Nom d’espace de travail requis' });
+    }
+    const workspace = await ragRepository.createWorkspace({
+      name: name.trim().slice(0, 200),
+      description: typeof description === 'string' ? description.slice(0, 1000) : null,
+    });
+    res.status(201).json({ workspace });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ detail: 'Un espace de travail porte déjà ce nom' });
+    }
+    handleRagError(res, error);
+  }
+});
+
+app.get('/api/workspaces/:id', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const workspace = await ragRepository.getWorkspace(req.params.id);
+    if (!workspace) return res.status(404).json({ detail: 'Espace de travail introuvable' });
+    res.json({
+      workspace,
+      folders: await ragRepository.getWorkspaceFolders(req.params.id),
+      conversations: await ragRepository.listConversationsByWorkspace(req.params.id),
+    });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+app.delete('/api/workspaces/:id', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const deleted = await ragRepository.deleteWorkspace(req.params.id);
+    if (!deleted) return res.status(404).json({ detail: 'Espace de travail introuvable' });
+    res.json({ deleted: true });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+/** Folders rattachées à un espace. */
+app.put('/api/workspaces/:id/folders', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const workspace = await ragRepository.getWorkspace(req.params.id);
+    if (!workspace) return res.status(404).json({ detail: 'Espace de travail introuvable' });
+
+    const { folderIds } = req.body || {};
+    if (!Array.isArray(folderIds)) {
+      return res.status(400).json({ detail: 'folderIds doit être un tableau' });
+    }
+    const known = await ragRepository.listFolders();
+    const knownIds = new Set(known.map((folder) => folder.id));
+    const valid = folderIds.filter((id) => knownIds.has(id));
+    res.json({ folderIds: await ragRepository.setWorkspaceFolders(req.params.id, valid) });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+/** Rattache (ou détache) une conversation d'un espace. */
+app.put('/api/conversations/:id/workspace', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const conversation = await conversationsRepo.getConversation(req.params.id);
+    if (!conversation) return res.status(404).json({ detail: 'Conversation introuvable' });
+
+    const { workspaceId } = req.body || {};
+    if (workspaceId) {
+      const workspace = await ragRepository.getWorkspace(workspaceId);
+      if (!workspace) return res.status(400).json({ detail: 'Espace de travail introuvable' });
+    }
+    res.json({ conversation: await ragRepository.setConversationWorkspace(req.params.id, workspaceId) });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+/** Folders effectivement utilisées par une conversation.
+ *
+ *  Résolution = union des dossiers de son espace et de sa sélection propre.
+ *  La sélection directe reste possible pour un chat ponctuel, et l'union évite
+ *  qu'une conversation perde ses files au moment où on la rattache à un
+ *  espace.
+ */
+app.get('/api/conversations/:id/folders', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const conversation = await conversationsRepo.getConversation(req.params.id);
+    if (!conversation) return res.status(404).json({ detail: 'Conversation introuvable' });
+
+    const direct = await ragRepository.getConversationFolders(req.params.id);
+    const fromWorkspace = conversation.workspace_id
+      ? (await ragRepository.getWorkspaceFolders(conversation.workspace_id)).map((c) => c.id)
+      : [];
+    res.json({ folderIds: [...new Set([...direct, ...fromWorkspace])] });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+/** Remplace la sélection directe d'une conversation. */
+app.put('/api/conversations/:id/folders', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const conversation = await conversationsRepo.getConversation(req.params.id);
+    if (!conversation) return res.status(404).json({ detail: 'Conversation introuvable' });
+
+    const { folderIds } = req.body || {};
+    if (!Array.isArray(folderIds)) {
+      return res.status(400).json({ detail: 'folderIds doit être un tableau' });
+    }
+    // Un dossier supprimé entre-temps ne doit pas bloquer toute la
+    // sélection : on ne conserve que celles qui existent encore.
+    const known = await ragRepository.listFolders();
+    const knownIds = new Set(known.map((folder) => folder.id));
+    const valid = folderIds.filter((id) => knownIds.has(id));
+
+    const saved = await ragRepository.setConversationFolders(req.params.id, valid);
+    res.json({ folderIds: saved });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+app.delete('/api/rag/files/:id', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const deleted = await ragRepository.deleteDocument(req.params.id);
+    if (!deleted) return res.status(404).json({ detail: 'File introuvable' });
+    res.json({ deleted: true });
+  } catch (error) {
+    if (error.code === '22P02') return res.status(400).json({ detail: 'Identifiant invalide' });
+    handleRagError(res, error);
+  }
+});
+
+app.post('/api/rag/search', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { query: question, folderIds, limit, minSimilarity } = req.body || {};
+    if (typeof question !== 'string' || !question.trim()) {
+      return res.status(400).json({ detail: 'Question requise' });
+    }
+    const folders = Array.isArray(folderIds) ? folderIds.filter((id) => typeof id === 'string') : [];
+    const passages = await ragService.search(question, {
+      folderIds: folders,
+      limit,
+      minSimilarity,
+    });
+    res.json({
+      passages,
+      context: ragService.buildContextBlock(passages),
+    });
+  } catch (error) {
+    handleRagError(res, error);
+  }
+});
 
 app.use(express.static(path.join(__dirname, 'dist')));
 
@@ -1212,6 +1852,30 @@ function isRetryableControllerError(error) {
     || message.includes('this operation was aborted');
 }
 
+/**
+ * Trace d'une tentative d'appel au contrôleur.
+ *
+ * Objectif : distinguer les trois sources de lenteur qui se ressemblent
+ * depuis l'extérieur — un chargement de modèle long, un délai dépassé, ou
+ * des retries en cascade. Sans la durée par tentative, une attente de
+ * plusieurs minutes observée en API ne permet aucune conclusion.
+ *
+ * Activé par CONTROLLER_TRACE (défaut : actif). La variable d'environnement
+ * permet de le couper en production sans redéployer.
+ */
+const CONTROLLER_TRACE = !String(process.env.CONTROLLER_TRACE || '1').match(/^(0|false|off)$/i);
+
+function traceControllerAttempt(event, endpoint, attempt, maxRetries, extra = {}) {
+  if (!CONTROLLER_TRACE) return;
+  const elapsed = extra.elapsedMs !== undefined ? ` elapsed=${extra.elapsedMs}ms` : '';
+  const line = `[ctrl-trace] ${event} ${endpoint} attempt=${attempt + 1}/${maxRetries + 1}${elapsed}`
+    + (extra.detail ? ` detail=${extra.detail}` : '');
+  // console.log : visible dans `docker logs model-loader`.
+  console.log(line);
+  // pushLogEntry : visible dans /api/models/status, donc depuis l'interface.
+  pushLogEntry('controller-trace', endpoint, event === 'ok' ? 'info' : 'warn', line);
+}
+
 async function controllerRequest(endpoint, options = {}) {
   logRequest('CONTROLLER', endpoint, options.body ? JSON.parse(options.body) : null);
   // Vérifier état Circuit Breaker
@@ -1240,6 +1904,12 @@ async function controllerRequest(endpoint, options = {}) {
     // Compatibilité NodeJS < 18: AbortController manuel
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), effectiveTimeout);
+    // Horodatage de la tentative : c'est la durée par tentative qui manque
+    // pour expliquer une attente de plusieurs minutes côté API.
+    const attemptStartedAt = Date.now();
+    traceControllerAttempt('start', endpoint, attempt, maxRetries, {
+      detail: `timeout=${effectiveTimeout}ms`,
+    });
 
     try {
       const response = await fetch(controllerUrl.href, {
@@ -1258,8 +1928,8 @@ async function controllerRequest(endpoint, options = {}) {
         payload = text ? JSON.parse(text) : null;
       } catch (parseError) {
         // Gérer le cas où le backend .NET retourne un Hashtable non sérialisable
-        // Détecter l'erreur spécifique System.Collections.Hashtable
-        if (text.includes('System.Collections.Hashtable') && text.includes('Keys must be strings')) {
+        // Détecter l'erreur spécifique System.Folders.Hashtable
+        if (text.includes('System.Folders.Hashtable') && text.includes('Keys must be strings')) {
           payload = {
             detail: 'Erreur de sérialisation coté backend: Le contrôleur .NET a retourné un dictionnaire avec des clés non-string. Ceci est une erreur du runtime hôte.'
           };
@@ -1273,6 +1943,10 @@ async function controllerRequest(endpoint, options = {}) {
       if (!response.ok) {
         const detail = typeof payload === 'object' && payload?.detail ? payload.detail : payload || response.statusText;
         const retryableHttp = response.status >= 500 && response.status < 600;
+        traceControllerAttempt('http-error', endpoint, attempt, maxRetries, {
+          elapsedMs: Date.now() - attemptStartedAt,
+          detail: `http=${response.status} retryable=${retryableHttp} body=${String(detail).slice(0, 100)}`,
+        });
         if (retryableHttp && attempt < maxRetries) {
           const waitMs = retryBaseDelayMs * (attempt + 1);
           pushLogEntry('controller', endpoint, 'warn', `Retry ${attempt + 1}/${maxRetries} après HTTP ${response.status}: ${detail}`);
@@ -1287,6 +1961,10 @@ async function controllerRequest(endpoint, options = {}) {
 
       logRequest('CONTROLLER-RESPONSE', endpoint, { status: response.status, payload, attempt: attempt + 1 });
       pushLogEntry('controller', endpoint, 'info', `Controller response ${response.status}`);
+      traceControllerAttempt('ok', endpoint, attempt, maxRetries, {
+        elapsedMs: Date.now() - attemptStartedAt,
+        detail: `http=${response.status}`,
+      });
 
       // Réinitialiser Circuit Breaker en cas de succès
       CIRCUIT_BREAKER.failures = 0;
@@ -1300,6 +1978,15 @@ async function controllerRequest(endpoint, options = {}) {
       return payload;
     } catch (error) {
       lastError = error;
+      // Un AbortError vient soit du timeout, soit d'une annulation externe. On
+      // les distingue : le timeout est le symptôme clé d'un contrôleur bloqué,
+      // une annulation ne doit pas se lire comme une panne du runtime.
+      const aborted = error?.name === 'AbortError';
+      const wasTimeout = aborted && !controller.signal.reason;
+      traceControllerAttempt(wasTimeout ? 'timeout' : 'error', endpoint, attempt, maxRetries, {
+        elapsedMs: Date.now() - attemptStartedAt,
+        detail: `${error?.name || 'Error'}: ${String(error?.message || error).slice(0, 120)}`,
+      });
       if (attempt < maxRetries && isRetryableControllerError(error)) {
         const waitMs = retryBaseDelayMs * (attempt + 1);
         pushLogEntry('controller', endpoint, 'warn', `Retry ${attempt + 1}/${maxRetries} après erreur réseau: ${error?.message || error}`);
@@ -2370,7 +3057,17 @@ async function ensureRuntimeReady(preferredModel, options = {}) {
   const runtimeStatus = await getRuntimeStatus();
   const activeModel = runtimeStatus?.active_model || runtimeStatus?.active_filename;
 
-  if (preferredModel && preferredModel !== PROXY_MODEL_ID && preferredModel !== activeModel) {
+  // Cas particulier embeddings : /v1/embeddings n'est servi QUE par une
+  // instance lancée avec --embedding. Si le modèle demandé est déjà actif mais
+  // ne tourne pas dans ce mode, il faut quand même rappeler le contrôleur avec
+  // embedding=true, faute de quoi llama-server répond 501. On force donc un
+  // passage par /start dès que l'option embedding est demandée.
+  const needsEmbeddingRestart = Boolean(options.embedding)
+    && preferredModel
+    && preferredModel === activeModel
+    && runtimeStatus?.running;
+
+  if (preferredModel && preferredModel !== PROXY_MODEL_ID && (preferredModel !== activeModel || needsEmbeddingRestart)) {
     const startRequest = await buildModelStartRequest(preferredModel);
     if (options.embedding) {
       startRequest.payload.embedding = true;
@@ -3357,6 +4054,51 @@ app.get('/metrics/host', async (req, res) => {
   }
 });
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Synthèse vocale (relais vers le contrôleur).
+//
+// Le contrôleur est le seul processus sous Windows : c est lui qui parle avec
+// SAPI. On relaie simplement son WAV jusqu au navigateur.
+//
+// Pourquoi ne pas synthétiser dans le navigateur : speechSynthesis sort du
+// système, donc le navigateur ne dispose pas du signal de référence qui
+// permettrait d annuler l écho. En passant par un <audio>, ce signal existe, et
+// l annulation d écho peut enfin fonctionner. C est la condition du duplex.
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/voice/tts', async (req, res) => {
+  try {
+    const text = String(req.body?.text || '').trim();
+    if (!text) return err(res, 400, 'texte manquant');
+
+    // L interface expose un multiplicateur (0,5 à 2) ; SAPI attend une échelle
+    // entière de -10 à 10. On convertit ici pour que le frontend ignore SAPI.
+    const rateMultiplier = Number.isFinite(Number(req.body?.rate))
+      ? Number(req.body.rate)
+      : 1;
+    const sapiRate = Math.max(-10, Math.min(10, Math.round((rateMultiplier - 1) * 10)));
+
+    const upstream = await fetch(`${CONTROLLER_URL}/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, rate: sapiRate }),
+    });
+
+    if (!upstream.ok) {
+      const detail = await upstream.text().catch(() => '');
+      return err(res, 502, `TTS indisponible : ${detail.slice(0, 200)}`);
+    }
+
+    const wav = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Content-Length', String(wav.length));
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(wav);
+  } catch (error) {
+    logError('/api/voice/tts', error);
+    err(res, 502, error.message);
+  }
+});
 app.get('/health', async (req, res) => {
   // P1 : /health est le healthcheck Docker (toutes les 15 s, timeout 10 s).
   // Il NE DOIT PAS appeler getRuntimeStatus() (controller, ~0,5-3 s, file
@@ -4046,6 +4788,67 @@ app.delete('/api/models/download/:model', async (req, res) => {
   }
 });
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modèles épinglés : résidence permanente en VRAM.
+//
+// Un modèle épinglé est démarré SANS --sleep-idle-seconds : llama-server ne
+// le décharge jamais, il reste entièrement chargé et répond sans latence de
+// rechargement. L'état est en base, il survit donc au redémarrage du
+// contrôleur comme du conteneur.
+//
+// On identifie un modèle par son nom de fichier : c'est la seule clé stable
+// entre le disque, le runtime state du contrôleur et cette table.
+// ─────────────────────────────────────────────────────────────────────────────
+async function listPinnedModels() {
+  if (!db.isDbAvailable()) return new Set();
+  try {
+    const result = await db.query('SELECT filename FROM pinned_models');
+    return new Set(result.rows.map((row) => row.filename));
+  } catch (error) {
+    console.warn('[pin] lecture impossible :', error.message);
+    return new Set();
+  }
+}
+
+app.get('/api/models/pinned', async (req, res) => {
+  try {
+    const pinned = await listPinnedModels();
+    res.json({ pinned: Array.from(pinned) });
+  } catch (error) {
+    logError('/api/models/pinned', error);
+    err(res, 500, error.message);
+  }
+});
+
+app.post('/api/models/pin', async (req, res) => {
+  try {
+    const filename = String(req.body?.filename || '').trim();
+    if (!filename) return err(res, 400, 'filename manquant');
+    if (!db.isDbAvailable()) return err(res, 503, 'Base de données indisponible.');
+    await db.query(
+      'INSERT INTO pinned_models (filename) VALUES ($1) ON CONFLICT (filename) DO NOTHING',
+      [filename],
+    );
+    res.json({ filename, pinned: true });
+  } catch (error) {
+    logError('/api/models/pin', error);
+    err(res, 500, error.message);
+  }
+});
+
+app.delete('/api/models/pin', async (req, res) => {
+  try {
+    const filename = String(req.body?.filename || req.query?.filename || '').trim();
+    if (!filename) return err(res, 400, 'filename manquant');
+    if (!db.isDbAvailable()) return err(res, 503, 'Base de données indisponible.');
+    await db.query('DELETE FROM pinned_models WHERE filename = $1', [filename]);
+    res.json({ filename, pinned: false });
+  } catch (error) {
+    logError('/api/models/pin', error);
+    err(res, 500, error.message);
+  }
+});
 app.post('/api/models/load', async (req, res) => {
   try {
     const startRequest = await buildModelStartRequest(req.body?.model, req.body?.context, req.body?.gpu_layers);
@@ -4428,6 +5231,43 @@ app.get('*', (req, res) => {
 });
 
 
-app.listen(PORT, '0.0.0.0', () => {
+const httpServer = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Model Loader] UI: http://0.0.0.0:${PORT} -> controller: ${CONTROLLER_URL}`);
 });
+
+// Reconnaissance vocale du mode dialogue. Isolee dans un try/catch : une
+// erreur ici (modele absent, dependance manquante) ne doit pas empecher le
+// chat et le reste de l application de fonctionner.
+try {
+  require('./src/voice/voiceServer.cjs').attachVoiceServer(httpServer);
+} catch (error) {
+  console.warn('[voice] serveur vocal indisponible :', error.message);
+}
+
+// ---------------------------------------------------------------------------
+// Initialisation de la base de données
+//
+// Lancée APRÈS app.listen : le conteneur doit être joignable même si PostgreSQL
+// ne démarre pas ou met du temps. Le chat reste utilisable sans historique.
+// ---------------------------------------------------------------------------
+(async () => {
+  const ready = await waitForDatabase(Number(process.env.POSTGRES_WAIT_MS || 60000));
+  if (!ready) {
+    console.warn('[db] historique indisponible pour cette session (chat conservé en mémoire)');
+    return;
+  }
+  const result = await applySchema();
+  if (!result.applied) {
+    console.warn('[db] schéma non appliqué :', result.reason);
+  }
+})();
+
+// Le worker OCR est un pool de threads qui survit à l'arrêt du serveur : sans
+// cette libération explicite, `docker stop` attend le timeout au lieu de couper
+// tout de suite.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, async () => {
+    await extractors.releaseOcrWorker().catch(() => {});
+    process.exit(0);
+  });
+}

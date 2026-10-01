@@ -247,7 +247,18 @@ if (-not $SkipBuild) {
     } else {
         Push-Location -LiteralPath $modelManagerDir
         try {
-            npm install | Out-Null
+            # npm ci installe exactement ce que package-lock.json decrit, et
+            # echoue si le lock est incoherent avec package.json. C'est le
+            # comportement voulu sur une machine vierge : npm install pourrait
+            # resoudre une version majeure differente, et decouvrir une
+            # incompatibilite (tesseract.js, pdf-parse) au moment ou
+            # l'utilisateur a le moins de marge pour la contourner.
+            # Repli sur npm install si npm ci n'est pas disponible.
+            npm ci --no-audit --no-fund 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Info 'npm ci a échoué, repli sur npm install...'
+                npm install --no-audit --no-fund | Out-Null
+            }
             $env:VITE_API_BASE_URL = ''
             npm run build | Out-Null
             Write-Ok "Build model-manager terminé."

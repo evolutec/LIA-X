@@ -1,0 +1,712 @@
+/* ======================================================================
+ *  Explorateur de fichiers
+ *  ---------------------------------------------------------------------
+ *  Grille à deux colonnes : l'arborescence à gauche, le contenu du dossier
+ *  sélectionné à droite. Le tableau reprend les colonnes de la maquette
+ *  (Nom, Type, Taille, Modifié le) avec tri sur l'en-tête.
+ *
+ *  Toutes les couleurs viennent des tokens de App.css : aucune valeur en
+ *  dur, pour que le thème sombre reste le seul à définir les couleurs.
+ * ====================================================================== */
+
+.explorer {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Colonne de gauche : arborescence
+ * ------------------------------------------------------------------------ */
+.explorer-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 12px 10px;
+}
+/* En-tête de la colonne : titre et bouton de création côte à côte. */
+.explorer-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-right: 4px;
+}
+.explorer-side-add {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  font: inherit;
+  font-size: 1.05rem;
+  line-height: 1;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.explorer-side-add:hover {
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-color: var(--accent-line);
+}
+
+/* Champ de recherche : le fond occupe toute la largeur de la colonne. */
+.explorer-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.explorer-search:focus-within {
+  border-color: var(--accent);
+}
+.explorer-search-icon {
+  flex: 0 0 auto;
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+.explorer-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  font: inherit;
+  font-size: 0.82rem;
+  color: var(--text);
+  background: none;
+  border: 0;
+  outline: none;
+}
+/* Le Clear natif de type="search" fait doublon avec notre bouton. */
+.explorer-search input::-webkit-search-cancel-button {
+  display: none;
+}
+.explorer-search-clear {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.explorer-search-clear:hover {
+  color: var(--text);
+}
+.explorer-side-empty {
+  margin: 8px 0 0;
+  padding: 0 8px;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+.explorer-side-title {
+  margin: 0;
+  padding-left: 8px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.explorer-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.explorer-tree.is-nested {
+  margin-top: 2px;
+}
+.explorer-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 8px;
+  padding-right: 8px;
+}
+.explorer-tree-row:hover {
+  background: rgba(148, 163, 184, 0.08);
+}
+.explorer-tree-row.is-active {
+  background: var(--accent-bg);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+.explorer-tree-twisty {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.explorer-tree-twisty:disabled {
+  cursor: default;
+}
+.explorer-tree-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 4px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.86rem;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.explorer-tree-row.is-active .explorer-tree-item {
+  color: var(--accent);
+  font-weight: 500;
+}
+.explorer-tree-icon {
+  flex: 0 0 auto;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+.explorer-tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -----------------------------------------------------------------------
+ * Colonne principale
+ * ------------------------------------------------------------------------ */
+.explorer-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  min-width: 0;
+}
+/* « Mes Dossiers » est un <button>, donc sans cette réinitialisation il
+   hérite du fond blanc et de la bordure du navigateur au lieu de
+   l'apparence de la colonne. */
+.explorer-tree-root {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.explorer-tree-root.is-active .explorer-tree-item {
+  color: var(--accent);
+  font-weight: 500;
+}
+/* Champ de renommage dans la colonne : occupe la place du nom qu'il
+   remplace, sans décaler la ligne. */
+.explorer-tree-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 2px 4px;
+  padding: 3px 7px;
+  font: inherit;
+  font-size: 0.84rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+}
+.explorer-tree-rename:focus {
+  outline: none;
+}
+
+.explorer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.explorer-head-text {
+  min-width: 0;
+}
+.explorer-title {
+  margin: 0 0 2px;
+  font-size: 1.3rem;
+  font-weight: 600;
+}
+.explorer-subtitle {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.explorer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.explorer-import {
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--bg);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* -----------------------------------------------------------------------
+ * Tableau
+ * ------------------------------------------------------------------------ */
+.explorer-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.explorer-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.explorer-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.explorer-table thead th button {
+  font: inherit;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.explorer-table thead th button:hover {
+  color: var(--accent);
+}
+.explorer-table tbody td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.explorer-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.explorer-table tbody tr:hover td {
+  background: rgba(148, 163, 184, 0.06);
+}
+.explorer-table tbody tr.is-selected td {
+  background: var(--accent-bg);
+}
+.explorer-table tbody tr.is-error .explorer-name-text {
+  color: var(--danger);
+}
+
+.explorer-col-select {
+  width: 36px;
+  padding-right: 0 !important;
+}
+.explorer-col-name {
+  width: auto;
+  min-width: 0;
+}
+.explorer-col-type {
+  width: 150px;
+  color: var(--text-muted);
+}
+.explorer-col-size {
+  width: 90px;
+  text-align: right;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.explorer-col-date {
+  width: 150px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.explorer-col-menu {
+  width: 44px;
+  text-align: right;
+}
+.explorer-table input[type='checkbox'] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.explorer-name-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+/* -----------------------------------------------------------------------
+ * Pied : résumé de la sélection
+ * ------------------------------------------------------------------------ */
+.explorer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  font-size: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.explorer-selection {
+  color: var(--accent);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.explorer-total {
+  margin-left: auto;
+  color: var(--text-muted);
+}
+.explorer-footer button {
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 4px 10px;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.explorer-footer button:hover {
+  color: var(--text);
+}
+
+/* -----------------------------------------------------------------------
+ * Modale de création de dossier
+ * ------------------------------------------------------------------------ */
+.explorer-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(3, 7, 18, 0.7);
+  backdrop-filter: blur(2px);
+}
+.explorer-modal {
+  width: 100%;
+  max-width: 380px;
+  padding: 18px 20px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+}
+.explorer-modal-title {
+  margin: 0 0 4px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.explorer-modal-sub {
+  margin: 0 0 14px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.explorer-modal-input {
+  width: 100%;
+  padding: 9px 12px;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.explorer-modal-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+.explorer-modal-error {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  color: var(--danger);
+}
+.explorer-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+.explorer-modal-actions button {
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 0.84rem;
+  color: var(--text);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.explorer-modal-actions button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: rgba(148, 163, 184, 0.1);
+}
+.explorer-modal-actions button.is-primary {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 500;
+}
+.explorer-modal-actions button.is-primary:hover:not(:disabled) {
+  background: var(--accent-dark);
+  border-color: var(--accent-dark);
+}
+.explorer-modal-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* -----------------------------------------------------------------------
+ * Menu contextuel
+ * ------------------------------------------------------------------------ */
+.explorer-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 210px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.explorer-menu-title {
+  margin: 0 0 4px;
+  padding: 4px 8px 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.explorer-menu-group {
+  margin: 8px 0 2px;
+  padding: 0 8px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.explorer-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 0.82rem;
+  color: var(--text);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.explorer-menu button:hover {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.explorer-menu button.is-danger {
+  color: var(--danger);
+}
+.explorer-menu button.is-danger:hover {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+.explorer-menu-check {
+  flex: 0 0 auto;
+  width: 14px;
+  font-size: 0.85rem;
+}
+.explorer-menu-empty {
+  margin: 0;
+  padding: 5px 8px;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+/* Réservé aux lecteurs d'écran : le libellé de colonne « Actions » ne doit
+   pas être annoncé à voix haute. */
+.explorer-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Écrans étroits : l'arborescence passe au-dessus du tableau
+ * ------------------------------------------------------------------------ */
+@media (max-width: 900px) {
+  .explorer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .explorer-side {
+    max-height: 190px;
+  }
+  .explorer-col-type,
+  .explorer-col-date {
+    display: none;
+  }
+}
+.explorer-row-icon {
+  flex: 0 0 auto;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+.explorer-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.explorer-badge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  font-size: 0.68rem;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-radius: 999px;
+}
+.explorer-badge.is-error {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+.explorer-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+}
+.explorer-row-action {
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.explorer-row-action:hover {
+  color: var(--text);
+  background: rgba(148, 163, 184, 0.12);
+  border-color: var(--border);
+}
+.explorer-empty {
+  padding: 28px 12px !important;
+  text-align: center;
+  color: var(--text-muted);
+}
+.explorer-import:hover:not(:disabled) {
+  background: var(--accent-dark);
+  border-color: var(--accent-dark);
+}
+.explorer-import:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* Le sélecteur natif est masqué : le bouton « Importer » le déclenche. */
+.explorer-file-input {
+  display: none;
+}
+
+.explorer-notice {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 0.8rem;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+}
+.explorer-error {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 0.8rem;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+}
+/* Pilule indiquant qu'un dossier est rattaché à au moins un espace. */
+.explorer-tree-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.explorer-side-hint {
+  margin: auto 0 0;
+  padding: 8px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+}
