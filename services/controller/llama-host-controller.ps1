@@ -1757,8 +1757,24 @@ function Start-LlamaProcess([hashtable]$body, [switch]$NoWait) {
         return Get-State
     }
 
-    $sizeGb        = if ($record.file -and $record.file.Length) { [double]$record.file.Length / 1GB } else { 0 }
-    $maxWaitSec    = [int][Math]::Min(300, [Math]::Max(90, 45 + ($sizeGb * 15)))
+    $sizeGb      = if ($record.file -and $record.file.Length) { [double]$record.file.Length / 1GB } else { 0 }
+
+    # Le delai doit tenir compte de la TAILLE DE CONTEXTE, pas seulement du
+    # poids du fichier : le cache KV a allouer est proportionnel a --ctx-size,
+    # et c est lui qui domine le temps de demarrage des que le contexte grandit.
+    #
+    # Mesure sur cette machine (Arc 140V 16 Go, Qwopus 5,24 Go) :
+    #   ctx=8192   -> ~45 s
+    #   ctx=109568 -> ~195 s
+    #
+    # L ancien calcul (45 + taille*15) plafonnait a 300 s QUEL QUE SOIT le
+    # contexte. Un rechargement apres changement de contexte etait donc tue en
+    # pleine montee, /start renvoyait "Timeout attente llama-server", et le
+    # conteneur repondait 502 alors que le serveur redemarrait ensuite : le
+    # symptome "le modele est charge mais l UI dit le contraire".
+    $ctxTokens   = if ($context -and [int]$context -gt 8192) { [int]$context } else { 8192 }
+    $ctxExtraSec = [double]($ctxTokens - 8192) * 0.0015
+    $maxWaitSec  = [int][Math]::Min(900, [Math]::Max(120, (45 + ($sizeGb * 15) + $ctxExtraSec)))
     $attempts      = [int][Math]::Ceiling(($maxWaitSec * 1000) / 600)
     Write-ProcessMonitorLog "[ProcessWarmup] pid=$($process.Id) port=$port model=$($record.model) sizeGb=$([Math]::Round($sizeGb,2)) maxWaitSec=$maxWaitSec"
     $serverReady = $false
