@@ -10,7 +10,13 @@ async function callApi(path, options = {}) {
   try {
     const response = await fetch(`${apiBase}${path}`, {
       method: options.method || 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        // Token API (même origine, injecté par le serveur).
+        ...(typeof window !== 'undefined' && window.__LIA_TOKEN__
+          ? { 'X-LIA-Token': window.__LIA_TOKEN__ }
+          : {}),
+      },
       cache: 'no-store',
       ...options,
     });

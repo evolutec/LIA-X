@@ -3,32 +3,68 @@
 ; Inno Setup 7 script — conforme aux scripts scripts/lia.ps1 + modules/docker.ps1
 ; ==============================================================================
 
+; La version peut etre imposee a la compilation par le workflow de release :
+;   ISCC LIA-X.iss /DAppVersion=2.1.0
+; Sans ce parametre, on retombe sur la valeur de secours ci-dessous. La
+; version ne doit donc JAMAIS etre bumped "a la main" en oubliant le tag.
+#ifndef AppVersion
+  #define AppVersion "2.0.0"
+#endif
+
 #define AppName "LIA-X"
-#define AppVersion "2.0.0"
 #define AppPublisher "LIA-X"
+#define AppSupportUrl "https://github.com/evolutec/LIA-X"
+#define AppUpdatesUrl "https://github.com/evolutec/LIA-X/releases"
 #define DefaultInstallDir "{autopf}\LIA-X"
 #define DefaultModelsDir "{userdocs}\LIA-X\Models"
 
+; Identifiant applicatif (GUID logique) et cle de desinstallation associee.
+; Ces deux chaines etaient dupliquees en dur dans le [Code] (InitializeWizard
+; et NextButtonClick) : toute divergence faisait disparaitre la page
+; Maintenance et casser la bascule vers le desinstalleur. Source unique ici.
+#define LiaAppId "{LIA-X-2026-09-17}"
+#define LiaUninstallRegKey "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LiaUninstallRegKey"
+
 [Setup]
-AppId={{LIA-X-2026-09-17}
+AppId={{#LiaAppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
+AppSupportUrl={#AppSupportUrl}
+AppUpdatesUrl={#AppUpdatesUrl}
 DefaultDirName={#DefaultInstallDir}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=dist
 OutputBaseFilename=LIA-X-Setup
-Compression=lzma2
+Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=classic
 SetupLogging=yes
-MinVersion=6.1sp1
+; Windows 10 minimum. Docker Desktop (obligatoire, WSL2), llama.cpp x64,
+; NSSM win64 et les conteneurs ne fonctionnent pas sur Windows 7/8.1 :
+; MinVersion=6.1sp1 laissait installer un produit incapable de tourner.
+MinVersion=10.0
+ArchitecturesAllowed=x64compatible
+; On conserve `x64` (et NON `x64os`) : les deux installent dans Program Files,
+; mais `x64os` fait un installeur 64 bits, qui ecrit la cle de desinstallation
+; dans la ruche HKLM native. `x64` (installeur 32 bits) l'ecrit dans
+; WOW6432Node — la ou se trouvent deja les installations existantes.
+; Passer a `x64os` ferait perdre la detection d'installation a toutes les
+; versions deja deployees (page Maintenance invisible, mode Reparer/Supprimer
+; casse, ancienne installation orpheline). Le warning « x64 is deprecated »
+; d'Inno Setup 7 est donc deliberement accepte.
+ArchitecturesInstallIn64BitMode=x64
 CloseApplications=yes
-CloseApplicationsFilter=*.exe
+; * .exe ferme TOUT (navigateur, explorateur...) : tres intrusif et source
+; d'annulation. On ne ferme que les processus vraimentLocker par LIA-X.
+CloseApplicationsFilter=llama-server.exe;docker.exe;Docker Desktop.exe;com.docker.backend.exe;node.exe;pwsh.exe;powershell.exe;LIA-X.exe
 RestartApplications=no
 VersionInfoVersion={#AppVersion}
 VersionInfoCompany={#AppPublisher}
+VersionInfoDescription={#AppName} Installer
+VersionInfoProductName={#AppName}
+VersionInfoProductVersion={#AppVersion}
 SetupIconFile=logo.ico
 WizardImageFile=wizard.bmp
 WizardSmallImageFile=wizard-small.bmp
@@ -98,7 +134,7 @@ Name: "{app}\logs\controller"; Permissions: users-modify
 Name: "{app}\logs\runtime"; Permissions: users-modify
 ; Les modèles GGUF ne sont PAS stockés dans {app} : ils vivent dans
 ; {userdocs}\LIA-X\Models (= C:\Users\<utilisateur>\Documents\LIA-X\Models),
-; créé par l'installateur et utilisé par le conteneur model-loader.
+; créé par l'installateur et utilisé par le conteneur lia-x.
 ; Le dossier {userdocs}\LIA-X\Models est cree par [Code] (ForceDirectories) et postinstall.ps1.
 
 [InstallDelete]
@@ -386,12 +422,18 @@ end;
 
 { ── Conteneurs applicatifs (paramètres identiques à scripts/lia.ps1) ───────── }
 
-procedure RunModelLoaderContainer(const InstallDir, ModelsDir: String);
+procedure RunLiaXContainer(const InstallDir, ModelsDir: String);
 var
   ResultCode: Integer;
   Args: String;
 begin
-  Args := 'run -d --name model-loader --network lia-network -p 3005:3005' +
+  // Migration : purge de l'ANCIEN conteneur `model-loader` (renommé en `lia-x`).
+  // Sans ceci, un upgrade depuis une version antérieure laisserait l'ancien
+  // conteneur en route, qui CONTINUERAIT de publier le port 3005. Le nouveau
+  // `lia-x` ne pourrait alors pas démarrer (« port already allocated »).
+  Exec(DockerPath, 'rm -f model-loader', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(DockerPath, 'rmi lia-model-loader:latest', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Args := 'run -d --name lia-x --network lia-network -p 3005:3005' +
     ' --add-host host.docker.internal:host-gateway' +
     ' -e LLAMA_HOST_CONTROL_URL=http://host.docker.internal:13579' +
     ' -e LLAMA_SERVER_BASE_URL=http://host.docker.internal:12434' +
@@ -407,12 +449,12 @@ begin
     ' --restart unless-stopped' +
     ' --health-cmd "curl -fsS http://127.0.0.1:3005/health > /dev/null || exit 1"' +
     ' --health-interval 15s --health-timeout 10s --health-retries 2' +
-    ' lia-model-loader:latest';
+    ' lia-x:latest';
   Exec(DockerPath, Args, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ResultCode = 0 then
-    Log('  model-loader démarré sur http://localhost:3005')
+    Log('  lia-x démarré sur http://localhost:3005')
   else
-    Log('  ERREUR : démarrage de model-loader impossible.');
+    Log('  ERREUR : démarrage de lia-x impossible.');
 end;
 
 procedure RunPostgresContainer;
@@ -444,13 +486,13 @@ procedure BuildModelLoaderImage(const InstallDir: String);
 var
   ResultCode: Integer;
 begin
-  Log('  Construction de l''image lia-model-loader:latest ...');
-  Exec(DockerPath, 'build -t lia-model-loader:latest -f "' + InstallDir + '\Dockerfiles\Dockerfile.model-loader" "' + InstallDir + '"',
+  Log('  Construction de l''image lia-x:latest ...');
+  Exec(DockerPath, 'build -t lia-x:latest -f "' + InstallDir + '\Dockerfiles\Dockerfile.lia-x" "' + InstallDir + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ResultCode = 0 then
-    Log('  Image lia-model-loader:latest prête.')
+    Log('  Image lia-x:latest prête.')
   else
-    Log('  ERREUR : build de lia-model-loader impossible.');
+    Log('  ERREUR : build de lia-x impossible.');
 end;
 
 procedure RunAnythingLLMContainer;
@@ -465,13 +507,13 @@ begin
     ' --add-host host.docker.internal:host-gateway' +
     ' -e STORAGE_DIR=/app/server/storage' +
     ' -e LLM_PROVIDER=generic-openai' +
-    ' -e GENERIC_OPEN_AI_BASE_PATH=http://model-loader:3005/v1' +
+    ' -e GENERIC_OPEN_AI_BASE_PATH=http://lia-x:3005/v1' +
     ' -e GENERIC_OPEN_AI_MODEL_PREF=lia-local' +
     ' -e GENERIC_OPEN_AI_API_KEY=not-used' +
     ' -e GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=8192' +
     ' -e EMBEDDING_ENGINE=native' +
-    ' -e NO_PROXY=model-loader,localhost,127.0.0.1,host.docker.internal' +
-    ' -e no_proxy=model-loader,localhost,127.0.0.1,host.docker.internal' +
+    ' -e NO_PROXY=lia-x,localhost,127.0.0.1,host.docker.internal' +
+    ' -e no_proxy=lia-x,localhost,127.0.0.1,host.docker.internal' +
     ' -v anythingllm-storage:/app/server/storage' +
     ' --restart unless-stopped ' + ImageName;
   Exec(DockerPath, Args, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -495,8 +537,8 @@ begin
     ' -e WEBUI_SECRET_KEY=lia-local-secret' +
     ' -e ENABLE_OLLAMA_API=false' +
     ' -e ENABLE_OPENAI_API=true' +
-    ' -e OPENAI_API_BASE_URL=http://model-loader:3005/v1' +
-    ' -e OPENAI_API_BASE_URLS=http://model-loader:3005/v1' +
+    ' -e OPENAI_API_BASE_URL=http://lia-x:3005/v1' +
+    ' -e OPENAI_API_BASE_URLS=http://lia-x:3005/v1' +
     ' -e OPENAI_API_KEYS=not-used' +
     ' -e OPENAI_API_KEY=not-used' +
     ' -v open-webui-data:/app/backend/data' +
@@ -537,10 +579,10 @@ begin
     ' -e JWT_REFRESH_SECRET=5a8c2e6b9d3f5a7c1e4b8d2f6a9c3e7b5d1a4f8c2e6b9d3f5a7c1e4b8d2f6a9c' +
     ' -e ALLOW_EMAIL_LOGIN=true -e ALLOW_REGISTRATION=true -e ALLOW_SOCIAL_LOGIN=false' +
     ' -e OPENAI_API_KEY=not-used' +
-    ' -e OPENAI_BASE_URL=http://model-loader:3005/v1' +
-    ' -e OPENAI_API_BASE_URL=http://model-loader:3005/v1' +
-    ' -e OPENAI_API_BASE_URLS=http://model-loader:3005/v1' +
-    ' -e OPENAI_REVERSE_PROXY=http://model-loader:3005/v1' +
+    ' -e OPENAI_BASE_URL=http://lia-x:3005/v1' +
+    ' -e OPENAI_API_BASE_URL=http://lia-x:3005/v1' +
+    ' -e OPENAI_API_BASE_URLS=http://lia-x:3005/v1' +
+    ' -e OPENAI_REVERSE_PROXY=http://lia-x:3005/v1' +
     ' -e OPENAI_MODELS_FETCH=true -e OPENAI_MODELS=lia-local' +
     ' -e AUTO_FETCH_MODELS=true' +
     ' -e CUSTOM_MODELS=[{"user":"system","name":"lia-local","displayName":"LIA Local LLM","modelName":"lia-local","icon":"llama"}]' +
@@ -781,7 +823,7 @@ begin
   if InstallInfoPath = '' then
   begin
     if RegQueryStringValue(HKLM,
-      'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{LIA-X-2026-09-17}_is1',
+      '{#LiaUninstallRegKey}',
       'Inno Setup: App Path', InstallInfoPath) then
       InstallInfoPath := InstallInfoPath + '\.install-paths.json'
     else
@@ -926,7 +968,7 @@ begin
     begin
       Uninst := '';
       if RegQueryStringValue(HKLM,
-           'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{LIA-X-2026-09-17}_is1',
+           '{#LiaUninstallRegKey}',
            'UninstallString', Uninst) and (Uninst <> '') then
       begin
         LiaClosingForUninstall := True;
@@ -1017,7 +1059,7 @@ begin
     RemoveContainer('open-webui');
     RemoveContainer('anythingllm');
     RemoveContainer('anything-llm');
-    RemoveContainer('model-loader');
+    RemoveContainer('lia-x');
     RemoveContainer('lia-postgres');
     StartMenuFolder := ExpandConstant('{commonprograms}\LIA-X');
     DeleteFile(StartMenuFolder + '\LIA-X Model Manager.url');
@@ -1057,7 +1099,7 @@ begin
     RemoveContainer('open-webui');
     RemoveContainer('anythingllm');
     RemoveContainer('anything-llm');
-    RemoveContainer('model-loader');
+    RemoveContainer('lia-x');
     RemoveContainer('lia-postgres');
   end;
 
@@ -1152,7 +1194,7 @@ begin
   { Vérifie l'état réel : démarre uniquement si nécessaire }
   EnsureLiaServicesStarted(NssmPath, Pwsh);
 
-  LogStep('Étape 4/6 : Réseau Docker et model-loader');
+  LogStep('Étape 4/6 : Réseau Docker et lia-x');
   EnsureNetwork('lia-network');
   if DockerDaemonOk then
   begin
@@ -1170,12 +1212,12 @@ begin
       bascule sur SAPI, qui reste disponible. Rien n'est donc bloquant. }
     FetchKokoroVoiceModel(ModelsDir);
     { PostgreSQL + pgvector : historique des conversations et base du RAG.
-      Démarré AVANT le model-loader, qui attend la base au boot mais reste
+      Démarré AVANT le lia-x, qui attend la base au boot mais reste
       joignable si elle met du temps. }
     RemoveContainer('lia-postgres');
     RunPostgresContainer;
-    RemoveContainer('model-loader');
-    RunModelLoaderContainer(InstallDir, ModelsDir);
+    RemoveContainer('lia-x');
+    RunLiaXContainer(InstallDir, ModelsDir);
   end
   else
     Log('  ERREUR : Docker indisponible, conteneurs non installés.');
@@ -1207,7 +1249,32 @@ begin
     - Bureau \LIA-X Model Manager (si tâche desktopicon cochée) }
   Log('  Raccourcis Menu Démarrer et Bureau créés par l''installateur.');
 
-  LogStep('Vérification de la stack (tests de fumée)');
+  { postinstall.ps1 est appele ici, et NON via [Run] + drapeau postinstall.
+    Ce drapeau ajoute une case a cocher « Executer powershell.exe » sur la page
+    de fin ; or ce script fait partie de l'installation (build du frontend,
+    Docker, conteneurs) — il doit toujours s'executer, pas a la demande.
+    CurStepChanged(ssPostInstall) s'execute au meme moment que la section
+    Run (juste apres les etapes 1/6 a 6/6) : l'ordre est donc inchange.
+
+    ORDRE : ce bloc est volontairement AVANT les tests de fumee. Le script
+    construit le frontend, demarre Docker et (re)cree les conteneurs : lancer
+    les tests avant meant qu'ils echouaient systematiquement sur une
+    installation neuve, alors que la seule cause etait « pas encore
+    installe ». }
+  LogStep('Post-installation (frontend, Docker, conteneurs)');
+  Exec(Pwsh, '-NoProfile -ExecutionPolicy Bypass -File "' + InstallDir +
+    '\installer\scripts\postinstall.ps1" -InstallDir "' + InstallDir +
+    '" -ModelsDir "' + ModelsDir + '" -ControllerPort 13579 -LlamaPort 12434 -LoaderPort 3005',
+    InstallDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ResultCode = 0 then
+    Log('  Post-installation terminee.')
+  else
+  begin
+    Log('  ATTENTION : la post-installation a signale une erreur (code ' + IntToStr(ResultCode) + ').');
+    Log('  Consultez : ' + InstallDir + '\logs\');
+  end;
+
+  LogStep('Verification de la stack (tests de fumee)');
   if FileExists(SmokeScript) and DockerDaemonOk then
   begin
     Log('  Attente de la disponibilité des services (20 s)...');
@@ -1222,7 +1289,7 @@ begin
     Log('  [SKIP] tests de fumée non exécutés.');
 
   LogStep('Installation terminée !');
-  Log('  Model Loader -> http://localhost:3005');
+  Log('  LIA-X -> http://localhost:3005');
   if chkAnythingLLM.Checked then
     Log('  AnythingLLM  -> http://localhost:3006');
   if chkOpenWebUI.Checked then
@@ -1238,23 +1305,9 @@ begin
 
   if MaintenanceMode <> 'remove' then
   begin
-    { postinstall.ps1 est appele ici, et NON via [Run] + drapeau postinstall.
-      Ce drapeau ajoute une case a cocher « Executer powershell.exe » sur la page
-      de fin ; or ce script fait partie de l'installation (build du frontend,
-      Docker, conteneurs) — il doit toujours s'executer, pas a la demande.
-      CurStepChanged(ssPostInstall) s'execute au meme moment que la section
-      Run (juste apres les etapes 1/6 a 6/6) : l'ordre est donc inchange. }
-    LogStep('Post-installation (frontend, Docker, conteneurs)');
-    Exec(Pwsh, '-NoProfile -ExecutionPolicy Bypass -File "' + InstallDir +
-      '\installer\scripts\postinstall.ps1" -InstallDir "' + InstallDir +
-      '" -ModelsDir "' + ModelsDir + '" -ControllerPort 13579 -LlamaPort 12434 -LoaderPort 3005',
-      InstallDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    if ResultCode = 0 then
-      Log('  Post-installation terminee.')
-    else
-      Log('  ATTENTION : la post-installation a signale une erreur (code ' + IntToStr(ResultCode) + ').');
-
-    { Ouverture des onglets : model-loader + interfaces selectionnees.
+    { Ouverture des onglets : lia-x + interfaces selectionnees.
+      postinstall.ps1 a DEJA ete execute plus haut (il doit l'etre avant les
+      tests de fumee) : les interfaces sont pretes quand le navigateur s'ouvre.
       Jamais en mode remove : on vient de tout supprimer. }
     ShellExec('open', 'http://localhost:3005', '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
     if chkAnythingLLM.Checked then

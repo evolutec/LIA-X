@@ -95,7 +95,13 @@ export default function useSpeechOutput({ rate = 1 } = {}) {
   const fetchChunk = useCallback(async (text) => {
     const response = await fetch('/api/voice/tts', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        // Token API (même origine, injecté par le serveur).
+        ...(typeof window !== 'undefined' && window.__LIA_TOKEN__
+          ? { 'X-LIA-Token': window.__LIA_TOKEN__ }
+          : {}),
+      },
       body: JSON.stringify({ text, rate: rateRef.current }),
     });
     if (!response.ok) {

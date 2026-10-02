@@ -1,0 +1,104 @@
+name: CI
+
+# Le workflow de release ne s'execute QUE sur tag : aucune modification n'etait
+# verifiee avant la publication. Les 4 correctifs d'embeddings de cette session
+# ont du etre valides a la main, un par un, parce que rien ne les couvrait.
+# Ce workflow ferme cette lacune sur chaque push et chaque PR.
+#
+# Volontairement EXCLU : la compilation Inno (≈ 40 min) reste dans release.yml,
+# car elle ne depend que de l'iss et bloquerait chaque PR trop longtemps.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntaxe JavaScript
+        # Attrape le premier niveau de l'erreur le plus cher : une faute de
+        # frappe dans server.js (5100 lignes) ne doit pas attendre la release.
+        run: |
+          $files = @(Get-ChildItem -Recurse -File -Include *.js,*.cjs `
+            | Where-Object { $_.FullName -notmatch '\\(node_modules|dist|\.kilo|\.git)\\' })
+          if ($files.Count -eq 0) { throw 'Aucun fichier JS trouve' }
+          foreach ($f in $files) {
+            node --check $f.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Syntaxe invalide : $($f.FullName)" }
+          }
+          "$($files.Count) fichiers JS/CJS valides"
+
+      - name: Tests unitaires RAG
+        # test-rag.cjs ne requiert ni base ni reseau : il tourne tel quel.
+        run: node scripts/test-rag.cjs
+        working-directory: model-manager
+
+      - name: Dependances
+        working-directory: model-manager
+        run: npm ci --no-audit --no-fund
+
+      - name: Build du frontend
+        # Verifie tout le JSX et la compilation Vite. C'est le seul endroit ou
+        # une erreur de syntaxe dans un composant est detectee aujourd'hui.
+        working-directory: model-manager
+        env:
+          VITE_API_BASE_URL: ''
+        run: npm run build
+
+      - name: Syntaxe PowerShell
+        # Le parseur AST est plus strict que l'execution : il remonte aussi les
+        # erreurs de quoting qui n'échoueraient qu'a l'execution.
+        run: |
+          $files = @(Get-ChildItem -Recurse -File -Include *.ps1 `
+            | Where-Object { $_.FullName -notmatch '\\(node_modules|dist|\.kilo|\.git)\\' })
+          $errors = 0
+          foreach ($f in $files) {
+            $tokens = $null; $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errs)
+            if ($errs.Count -gt 0) {
+              $errors++
+              foreach ($e in $errs) { "ERREUR $($f.Name) L$($e.Extent.StartLineNumber): $($e.Message)" }
+            }
+          }
+          if ($errors -gt 0) { throw "$errors fichier(s) PowerShell invalide(s)" }
+          "$($files.Count) fichiers PowerShell valides"
+
+      - name: Secrets dans le code
+        # Garde-fou : aucune cle ni mot de passe en dur dans le depot.
+        run: |
+          $hits = @(Get-ChildItem -Recurse -File -Include *.js,*.cjs,*.jsx,*.ps1,*.iss `
+            | Where-Object { $_.FullName -notmatch '\\(node_modules|dist|\.kilo|\.git|backup)\\' } `
+            | Select-String -Pattern '(?i)(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)')
+          if ($hits.Count -gt 0) {
+            $hits | ForEach-Object { "$($_.Filename):$($_.LineNumber)" }
+            throw 'Secret detecte dans le code'
+          }
+          'Aucun secret detecte'
+
+      - name: Derive documentaire
+        # Le port 3002 a survécu au passage à 3005 et traînait dans la doc ET
+        # dans l'UI. Ce contrôle empêche la régression.
+        run: |
+          $hits = @(Get-ChildItem -Recurse -File -Include *.md,*.jsx,*.js `
+            | Where-Object { $_.FullName -notmatch '\\(node_modules|dist|\.kilo|\.git)\\' } `
+            | Select-String -Pattern ':3002')
+          if ($hits.Count -gt 0) {
+            $hits | ForEach-Object { "$($_.Filename):$($_.LineNumber): $($_.Line.Trim())" }
+            throw 'Reference obsolete au port 3002 (le service ecoute sur 3005)'
+          }
+          'Aucune reference au port 3002'
+

@@ -157,11 +157,15 @@ CREATE TABLE IF NOT EXISTS conversation_folders (
 CREATE INDEX IF NOT EXISTS conversation_folders_folder_idx
   ON conversation_folders (folder_id);
 
--- Dimensions du modèle d'embeddings actif (nomic-embed-text-v2-moe = 768).
--- pgvector stocke une dimension fixe par colonne : si l'utilisateur change de
--- modèle d'embeddings, il faudra ALTER TABLE ... ALTER COLUMN embedding TYPE
--- vector(N), et réindexer. Un garde-fou applicatif vérifie la cohérence avant
--- chaque recherche.
+-- Dimension du modèle d'embeddings au premier démarrage (nomic-embed-text-v2-moe
+-- produit 768 valeurs). pgvector fige la dimension dans le TYPE de la colonne :
+-- ce 768 n'est qu'une valeur initiale. Changer de modèle (qwen3-embedding-0.6b
+-- = 1024, etc.) est désormais pris en charge automatiquement : à la première
+-- ingestion, l'application lit la dimension réelle du vecteur produit, compare
+-- avec la colonne, et exécute ALTER TABLE ... TYPE vector(N) si elles diffèrent
+-- (cf. ensureVectorDimensions / migrateEmbeddingDimension). Les fragments de
+-- l'ancienne dimension sont purgés : leurs similarités ne sont plus calculables.
+-- Aucune intervention manuelle n'est donc requise de la part de l'utilisateur.
 CREATE TABLE IF NOT EXISTS chunks (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   file_id   UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE,

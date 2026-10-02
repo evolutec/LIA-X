@@ -2,7 +2,7 @@
 # tests/smoke.ps1 — Tests de fumée LIA-X
 # Usage : pwsh -File tests\smoke.ps1
 # Valide, après chaque installation/reinstallation, que la chaîne complète
-# fonctionne : controller → model-loader → llama-server → inférence.
+# fonctionne : controller → lia-x → llama-server → inférence.
 # Code de sortie 0 = tout OK, 1 = au moins un échec.
 # ─────────────────────────────────────────────────────────────────────────────
 $ErrorActionPreference = 'Continue'
@@ -81,8 +81,8 @@ if (Test-Path $debugLog) {
     Write-Host '  [SKIP] controller-debug.log introuvable'
 }
 
-# ── 4. Model-loader (Docker) ─────────────────────────────────────────────────
-Write-Host "`n[4/7] Model-loader 3005"
+# ── 4. LIA-X (Docker) ─────────────────────────────────────────────────
+Write-Host "`n[4/7] LIA-X 3005"
 $health = Invoke-JsonOrText 'http://127.0.0.1:3005/health' 15
 Assert-Condition 'GET /health repond' ($health.ok -and $health.status -eq 200) $health.body
 if ($health.ok) {
@@ -91,9 +91,9 @@ if ($health.ok) {
 }
 $containerOk = $false
 docker ps --format '{{.Names}}|{{.Status}}' 2>$null | ForEach-Object {
-    if ($_ -match '^model-loader\|Up .*\(healthy\)') { $containerOk = $true }
+    if ($_ -match '^lia-x\|Up .*\(healthy\)') { $containerOk = $true }
 }
-Assert-Condition 'Container model-loader healthy' $containerOk 'container absent ou unhealthy'
+Assert-Condition 'Container lia-x healthy' $containerOk 'container absent ou unhealthy'
 
 # ── 5. Proxy OpenAI-compatible ───────────────────────────────────────────────
 Write-Host "`n[5/7] Proxy OpenAI-compatible"

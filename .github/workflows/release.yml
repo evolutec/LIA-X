@@ -20,11 +20,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Determiner la version
+        # La version de l'installateur doit venir du TAG, sinon
+        # LIA-X.iss reste fige sur sa valeur de secours et Parametres >
+        # Applications affiche une version fausse. Sur push de tag on lit
+        # github.ref_name (v2.1.0 -> 2.1.0) ; en dispatch manuel, l'entree.
+        run: |
+          $tag = if (github.event_name -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          if (-not $tag) { throw 'Tag introuvable : precise le tag en dispatch manuel.' }
+          $version = $tag -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+') { throw "Version invalide depuis le tag '$tag' : $version" }
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAG_REF=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "Version de l'installateur : $version"
+
       - name: Installer Inno Setup
         # choco installe la derniere version majeure (7.x). Le chemin est
         # decouvert dynamiquement : INNO_SETUP_PATH etait fige sur la 6 (x86),
         # et Compil32.exe a disparu a partir d'Inno Setup 6.3 au profit de
         # ISCC.exe — l'ancien workflow echouait donc systematiquement.
+        # LIA-X.iss utilise ArchitecturesAllowed=x64compatible (Inno 6.3+).
         run: |
           choco install innosetup -y --no-progress
           $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Inno Setup*","$env:ProgramFiles\Inno Setup*" `
@@ -47,8 +62,9 @@ jobs:
       - name: Compiler l'installateur
         # LIA-X.iss ecrit dans dist\ (OutputDir), relatif au .iss : on compile
         # depuis installer\ et l'EXE atterrit donc dans installer\dist\.
+        # /DAppVersion injecte la version du tag (voir LIA-X.iss, #ifndef).
         working-directory: installer
-        run: '& $env:ISCC_PATH LIA-X.iss'
+        run: '& $env:ISCC_PATH LIA-X.iss /DAppVersion=$env:APP_VERSION'
 
       - name: Verifier la sortie
         run: |
@@ -57,6 +73,22 @@ jobs:
           $mb = [math]::Round((Get-Item $exe).Length / 1MB, 2)
           "LIA-X-Setup.exe : $mb Mo"
           if ($mb -lt 1) { throw "Installateur suspect ($mb Mo) : la compression a-t-elle echoue ?" }
+          # La version doit etre celle du tag, sinon les metadonnees Windows
+          # et Parametres > Applications afficheront autre chose.
+          $vi = (Get-Item $exe).VersionInfo
+          "ProductVersion FileVersion : $($vi.ProductVersion) / $($vi.FileVersion)"
+          if ($vi.ProductVersion -notlike "$env:APP_VERSION*") {
+            throw "Version de l'installateur ($($vi.ProductVersion)) differente du tag ($env:APP_VERSION)."
+          }
+
+      - name: Generer la somme de controle
+        # Sans SHA256, l'utilisateur ne peut pas verifier l'integrite du
+        # telechargement — d'autant que l'EXE n'est signe par personne.
+        run: |
+          $dir = Join-Path $env:GITHUB_WORKSPACE 'installer\dist'
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dir 'LIA-X-Setup.exe')).Hash
+          "SHA256 (LIA-X-Setup.exe) = $hash" | Set-Content -Path (Join-Path $dir 'SHA256SUMS.txt') -Encoding ascii
+          Get-Content -LiteralPath (Join-Path $dir 'SHA256SUMS.txt')
 
       - name: Publier l'artefact
         uses: actions/upload-artifact@v4
@@ -68,9 +100,14 @@ jobs:
       - name: Creer la GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          # Sur workflow_dispatch, le tag vient de l'entree du formulaire.
-          tag_name: ${{ inputs.tag }}
-          files: installer/dist/LIA-X-Setup.exe
+          # Sur push de tag, github.ref_name EST le tag : l'utiliser plutot
+          # que inputs.tag (vide), sinon softprops echoue si le tag existe.
+          tag_name: ${{ env.TAG_REF }}
+          name: LIA-X ${{ env.APP_VERSION }}
+          files: |
+            installer/dist/LIA-X-Setup.exe
+            installer/dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

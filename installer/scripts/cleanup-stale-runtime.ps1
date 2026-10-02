@@ -37,7 +37,7 @@ if (-not $llama) { Log 'Aucune instance llama-server orpheline.' }
 # 3) Assainir l'état runtime (host-runtime-state.json) : retirer les instances
 #    « fantômes » dont le GGUF n'existe plus dans le dossier de modèles créé par
 #    l'installateur, et purger le modèle principal devenu orphelin.
-#    Sans ça, le model-loader affichait des modèles « chargés » au premier
+#    Sans ça, le lia-x affichait des modèles « chargés » au premier
 #    lancement alors qu'aucun fichier GGUF n'est présent sur le disque.
 $statePath = Join-Path $InstallDir 'runtime\host-runtime-state.json'
 if (-not $ModelsDir) { $ModelsDir = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'LIA-X\Models' }

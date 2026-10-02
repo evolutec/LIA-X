@@ -1215,10 +1215,37 @@ input[type="text"]:focus {
 
 .model-table th,
 .model-table td {
-  padding: 14px 16px;
+  /* 14px 16px : le padding horizontal de 16px s'appliquait aussi aux six
+     colonnes de contrôles (chargé / épinglé / principal / embedding /
+     supprimer / infos), qui ne contiennent qu'un interrupteur de ~44 px. Sur
+     treize colonnes, ces 32 px de marge par colonne totalisaient plus
+     de 200 px de débordement et poussaient « Supprimer » hors de l'écran. */
+  padding: 12px 10px;
   text-align: left;
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
   vertical-align: middle;
+}
+
+/* Colonnes de contrôle : on resserre encore, l'alignement visuel reste porté
+   par l'interrupteur lui-même. */
+.model-table th:last-child,
+.model-table td:last-child,
+.model-table th:nth-last-child(2),
+.model-table td:nth-last-child(2),
+.model-table th:nth-last-child(3),
+.model-table td:nth-last-child(3),
+.model-table th:nth-last-child(4),
+.model-table td:nth-last-child(4),
+.model-table th:nth-last-child(5),
+.model-table td:nth-last-child(5) {
+  padding-left: 6px;
+  padding-right: 6px;
+  text-align: center;
+}
+
+/* « 593.1 MB » ne doit jamais se répartir sur deux lignes. */
+.model-table td.col-size {
+  white-space: nowrap;
 }
 
 @media (max-width: 860px) {
@@ -1339,7 +1366,14 @@ input[type="text"]:focus {
 .table-model-name {
   max-width: 360px;
   font-weight: 700;
-  word-break: break-word;
+  /* `word-break: break-word` coupait le nom caractère par caractère
+     ("emb / ed / din / gg / mm...") dès que la colonne se rétrécissait. Le
+     nom d'un modèle ne contient pas d'espace : on garde donc les coupures
+     NATURELLES (tiret, point, _) et on n'autorise la coupe en fin de ligne
+     que si le mot reste trop long pour la colonne. */
+  word-break: normal;
+  overflow-wrap: break-word;
+  hyphens: none;
 }
 
 .context-reload-row {

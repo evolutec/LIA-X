@@ -6,7 +6,7 @@
     -ModelsDir           : dossier des modèles GGUF
     -ControllerPort      : port du contrôleur (défaut 13579)
     -LlamaPort           : port llama-server par défaut (défaut 12434)
-    -LoaderPort          : port du Model Loader (défaut 3005)
+    -LoaderPort          : port du LIA-X (défaut 3005)
     -SkipBuild           : si présent, ne fait pas npm install/build
     -SkipServiceInstall  : si présent, n'installe pas les services Windows
 #>
@@ -115,19 +115,57 @@ try {
 } catch {}
 
 if (-not $dockerOk) {
-    Write-Host '    Docker Desktop ne semble pas démarré ou absent.' -ForegroundColor Yellow
-    Write-Host '    LIA-X nécessite Docker Desktop pour les interfaces (Open WebUI / AnythingLLM / LibreChat).' -ForegroundColor.Yellow
-    Write-Host '    Téléchargement : https://www.docker.com/products/docker-desktop/' -ForegroundColor Cyan
-    $response = Read-Host 'Voulez-vous ouvrir la page de téléchargement de Docker Desktop maintenant ? (O/N)'
-    if ($response -eq 'O' -or $response -eq 'o') {
-        Start-Process 'https://www.docker.com/products/docker-desktop/'
-        Write-Host '    Veuillez installer Docker Desktop, puis redémarrer votre ordinateur.' -ForegroundColor.Yellow
-        Write-Host '    Après installation, relancez ce script avec l''option -SkipDockerCheck.' -ForegroundColor.Yellow
-        throw 'Docker Desktop requis. Installation reportée.'
-    }
+    Write-Host '    Docker Desktop ne semble pas demarre ou absent.' -ForegroundColor Yellow
+    Write-Host '    LIA-X necessite Docker Desktop (LIA-X, Open WebUI, AnythingLLM, LibreChat).' -ForegroundColor Yellow
+    Write-Host '    Telechargement : https://www.docker.com/products/docker-desktop/' -ForegroundColor Cyan
+    Write-Host '    Installez Docker Desktop, redemarrez Windows, puis relancez LIA-X-Setup.exe.' -ForegroundColor Yellow
+    throw 'Docker Desktop requis : les interfaces ne peuvent pas fonctionner sans lui.'
+    
+    
+    
+    
+    
+    
+    
+        
+        
+        
+        
+    # Le throw ci-dessus est volontaire : l'installateur Inno appelle ce script
+    # via Exec(pwsh, ..., SW_HIDE, ewWaitUntilTerminated), SANS stdin. Aucun
+    # Read-Host n'est donc possible ici (il figerait l'assistant indefiniment).
+    # On signale, on indique la marche a suivre, puis on sort en erreur.
 }
 
 # ------------------------------------------------------------------------------
+# 2c. Migration des conteneurs d'interfaces : ancien hostname « model-loader »
+# ------------------------------------------------------------------------------
+# Le conteneur LIA-X a été renommé de « model-loader » en « lia-x ». Les
+# conteneurs d'interfaces (AnythingLLM, Open WebUI, LibreChat) Pointeraient
+# alors vers http://model-loader:3005. Leur configuration a bien été mise à
+# jour dans le code de l'installateur, MAIS un conteneur DÉJÀ CRÉÉ conserve
+# les variables d'environnement figées au moment de sa création : sans
+# recréation, il perd définitivement le lien vers LIA-X.
+#
+# On répare donc ici, sans attendre que l'utilisateur coche les cases de
+# l'assistant : le diagnostic est visible, la correction automatique.
+$legacyRefs = @()
+foreach ($iface in @('anythingllm', 'openwebui', 'librechat')) {
+    $env_ = @(docker inspect $iface --format '{{range .Config.Env}}{{println .}}{{end}}' 2>$null)
+    if ($LASTEXITCODE -ne 0) { continue }
+    if ($env_ | Where-Object { $_ -match 'model-loader' }) {
+        $legacyRefs += $iface
+    }
+}
+
+if ($legacyRefs.Count -gt 0) {
+    Write-Host "    Conteneur(s) d'interface pointant encore vers l'ancien nom 'model-loader' :" -ForegroundColor Yellow
+    $legacyRefs | ForEach-Object { Write-Host "      - $_" -ForegroundColor Yellow }
+    Write-Host "    Leur configuration sera corrigee au prochain demarrage de ces interfaces." -ForegroundColor Yellow
+    Write-Host "    Pour appliquer immediatement : ouvrez LIA-X puis re-selectionnez l'interface, OU lancez :" -ForegroundColor Cyan
+    Write-Host "      .\LIA-X-Setup.exe  (mode Reparer)" -ForegroundColor Cyan
+}
+
 # ------------------------------------------------------------------------------
 # 3. runtime/host-runtime-config.json
 # ------------------------------------------------------------------------------
@@ -243,30 +281,60 @@ if (-not $SkipBuild) {
     Write-Info 'Build du frontend model-manager...'
     $modelManagerDir = Join-Path $rootDir 'model-manager'
     if (-not (Test-Path -LiteralPath (Join-Path $modelManagerDir 'package.json'))) {
-        Write-Fail "package.json introuvable dans $modelManagerDir"
-    } else {
-        Push-Location -LiteralPath $modelManagerDir
-        try {
-            # npm ci installe exactement ce que package-lock.json decrit, et
-            # echoue si le lock est incoherent avec package.json. C'est le
-            # comportement voulu sur une machine vierge : npm install pourrait
-            # resoudre une version majeure differente, et decouvrir une
-            # incompatibilite (tesseract.js, pdf-parse) au moment ou
-            # l'utilisateur a le moins de marge pour la contourner.
-            # Repli sur npm install si npm ci n'est pas disponible.
-            npm ci --no-audit --no-fund 2>&1 | Out-Null
+        throw "package.json introuvable dans $modelManagerDir : le build du frontend est impossible."
+    }
+
+    # Node.js est une dependance REELLE de l'installation : le frontend est
+    # construit ici, sur la machine de l'utilisateur. Sans node/npm, l'UI
+    # n'existe simplement pas et l'installateur annonçait pourtant un succes.
+    # On verifie donc explicitement, et on echoue franchement si absent.
+    $npmCmd = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npmCmd) { $npmCmd = Get-Command npm -ErrorAction SilentlyContinue }
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $npmCmd -or -not $nodeCmd) {
+        Write-Host '    Node.js / npm introuvables dans le PATH.' -ForegroundColor Yellow
+        Write-Host '    LIA-X a besoin de Node.js 20+ pour construire son interface au premier demarrage.' -ForegroundColor Yellow
+        Write-Host '    Telechargement : https://nodejs.org/fr/download' -ForegroundColor Cyan
+        throw 'Node.js 20+ requis pour le build du frontend. Relancez l installation apres avoir installe Node.js.'
+    }
+    Write-Ok ("Node.js detecte : " + (& $nodeCmd.Source --version))
+
+    Push-Location -LiteralPath $modelManagerDir
+    try {
+        # npm ci installe exactement ce que package-lock.json decrit, et
+        # echoue si le lock est incoherent avec package.json. C'est le
+        # comportement voulu sur une machine vierge : npm install pourrait
+        # resoudre une version majeure differente, et decouvrir une
+        # incompatibilite (tesseract.js, pdf-parse) au moment ou
+        # l'utilisateur a le moins de marge pour la contourner.
+        # Repli sur npm install si npm ci n'est pas disponible.
+        # Pas de `2>&1` : sous $ErrorActionPreference = 'Stop', la fusion du
+        # flux stderr d'une commande native peut lever NativeCommandError et
+        # court-circuiter la verification de $LASTEXITCODE. La sortie reste
+        # affichee dans la fenetre de l'installateur.
+        & $npmCmd.Source ci --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) {
+            Write-Info 'npm ci a echoue, repli sur npm install...'
+            & $npmCmd.Source install --no-audit --no-fund
             if ($LASTEXITCODE -ne 0) {
-                Write-Info 'npm ci a échoué, repli sur npm install...'
-                npm install --no-audit --no-fund | Out-Null
+                throw 'npm install a echoue (reseau indisponible ou lock incoherent).'
             }
-            $env:VITE_API_BASE_URL = ''
-            npm run build | Out-Null
-            Write-Ok "Build model-manager terminé."
-        } catch {
-            Write-Fail "Échec du build model-manager : $($_.Exception.Message)"
-        } finally {
-            Pop-Location
         }
+        $env:VITE_API_BASE_URL = ''
+        & $npmCmd.Source run build
+        if ($LASTEXITCODE -ne 0) {
+            throw "vite build a echoue (code $LASTEXITCODE)."
+        }
+        # Le build peut "reussir" sans produire d'index : on verifie l'artefact.
+        if (-not (Test-Path -LiteralPath (Join-Path $modelManagerDir 'dist\index.html'))) {
+            throw "Le build n'a pas produit model-manager\dist\index.html."
+        }
+        Write-Ok 'Build model-manager termine.'
+    } catch {
+        Write-Fail "Echec du build model-manager : $($_.Exception.Message)"
+        throw
+    } finally {
+        Pop-Location
     }
 } else {
     Write-Info 'Build model-manager ignoré (-SkipBuild).'
@@ -481,8 +549,31 @@ function Wait-Port($port, $label, $timeoutSec = 120) {
     return $false
 }
 
+# Secrets applicatifs : generes a l'installation, jamais codes en dur.
+# Un secret fige dans le depot est un secret PUBLIC (le depot est sur GitHub) :
+# il signe les sessions LibreChat et chiffre les donnees Open WebUI. Chaque
+# poste doit donc posseder les siens. Ils sont persistes dans
+# {app}\runtime\secrets.json pour rester STABLES entre deux executions : les
+# regenerer a chaque post-installation invaliderait les sessions ouvertes et
+# les identifiants deja enregistres par l'utilisateur.
+$secretsPath = Join-Path $rootDir 'runtime\secrets.json'
+$secrets = $null
+if (Test-Path -LiteralPath $secretsPath) {
+    try { $secrets = Get-Content -LiteralPath $secretsPath -Raw | ConvertFrom-Json } catch { $secrets = $null }
+}
+if (-not $secrets -or -not $secrets.librechat_jwt_secret -or -not $secrets.librechat_jwt_refresh -or -not $secrets.webui_secret) {
+    $secrets = @{
+        librechat_jwt_secret  = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
+        librechat_jwt_refresh = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
+        webui_secret          = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
+    }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $secretsPath) -Force | Out-Null
+    [System.IO.File]::WriteAllText($secretsPath, ($secrets | ConvertTo-Json -Depth 3), [System.Text.Encoding]::UTF8)
+    Write-Ok "Secrets applicatifs generes : $secretsPath"
+}
+
 # LibreChat — aligne sur LIA-X.iss RunLibreChatContainer : mongo + 3007:3080,
-# reseau lia-network, host-gateway vers le proxy http://model-loader:3005/v1
+# reseau lia-network, host-gateway vers le proxy http://lia-x:3005/v1
 if ($InstallLibreChat) {
     Write-Host '    Démarrage de LibreChat...' -ForegroundColor Cyan
     try {
@@ -494,14 +585,14 @@ if ($InstallLibreChat) {
         docker run -d --name librechat --network lia-network -p 3007:3080 --add-host host.docker.internal:host-gateway `
             -e CONFIG_PATH=/app/librechat.yaml `
             -e MONGO_URI=mongodb://librechat-mongo:27017/LibreChat `
-            -e JWT_SECRET=7b9d6f2a3c8e5b1d4f7a9c3e8b2d5f1a7c9e3b6d2f8a5c1e4b7d9f3a8c2e5b1d `
-            -e JWT_REFRESH_SECRET=5a8c2e6b9d3f5a7c1e4b8d2f6a9c3e7b5d1a4f8c2e6b9d3f5a7c1e4b8d2f6a9c `
+            -e JWT_SECRET=$($secrets.librechat_jwt_secret) `
+            -e JWT_REFRESH_SECRET=$($secrets.librechat_jwt_refresh) `
             -e ALLOW_EMAIL_LOGIN=true -e ALLOW_REGISTRATION=true -e ALLOW_SOCIAL_LOGIN=false `
             -e OPENAI_API_KEY=not-used `
-            -e OPENAI_BASE_URL=http://model-loader:3005/v1 `
-            -e OPENAI_API_BASE_URL=http://model-loader:3005/v1 `
-            -e OPENAI_API_BASE_URLS=http://model-loader:3005/v1 `
-            -e OPENAI_REVERSE_PROXY=http://model-loader:3005/v1 `
+            -e OPENAI_BASE_URL=http://lia-x:3005/v1 `
+            -e OPENAI_API_BASE_URL=http://lia-x:3005/v1 `
+            -e OPENAI_API_BASE_URLS=http://lia-x:3005/v1 `
+            -e OPENAI_REVERSE_PROXY=http://lia-x:3005/v1 `
             -e OPENAI_MODELS_FETCH=true -e OPENAI_MODELS=lia-local `
             -e AUTO_FETCH_MODELS=true `
             -e ENABLE_OPENAI=true -e OPENAI_PROXY_ENABLED=true `
@@ -522,10 +613,10 @@ if ($InstallOpenWebUI) {
         if ($LASTEXITCODE -ne 0) { docker network create lia-network | Out-Null }
         docker rm -f openwebui 2>$null | Out-Null
         docker run -d --name openwebui --network lia-network -p 3008:8080 --add-host host.docker.internal:host-gateway `
-            -e WEBUI_AUTH=False -e WEBUI_SECRET_KEY=lia-local-secret `
+            -e WEBUI_AUTH=False -e WEBUI_SECRET_KEY=$($secrets.webui_secret) `
             -e ENABLE_OLLAMA_API=false -e ENABLE_OPENAI_API=true `
-            -e OPENAI_API_BASE_URL=http://model-loader:3005/v1 `
-            -e OPENAI_API_BASE_URLS=http://model-loader:3005/v1 `
+            -e OPENAI_API_BASE_URL=http://lia-x:3005/v1 `
+            -e OPENAI_API_BASE_URLS=http://lia-x:3005/v1 `
             -e OPENAI_API_KEYS=not-used -e OPENAI_API_KEY=not-used `
             -v open-webui-data:/app/backend/data --restart unless-stopped `
             ghcr.io/open-webui/open-webui:main | Out-Null
@@ -544,7 +635,7 @@ if ($InstallAnythingLLM) {
         docker rm -f anythingllm 2>$null | Out-Null
         docker run -d --name anythingllm --network lia-network -p 3006:3001 --add-host host.docker.internal:host-gateway `
             -e STORAGE_DIR=/app/server/storage -e LLM_PROVIDER=generic-openai `
-            -e GENERIC_OPEN_AI_BASE_PATH=http://model-loader:3005/v1 `
+            -e GENERIC_OPEN_AI_BASE_PATH=http://lia-x:3005/v1 `
             -e GENERIC_OPEN_AI_MODEL_PREF=lia-local -e GENERIC_OPEN_AI_API_KEY=not-used `
             -e GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=8192 -e EMBEDDING_ENGINE=native `
             -v anythingllm-storage:/app/server/storage --restart unless-stopped `
@@ -562,7 +653,7 @@ if ($InstallAnythingLLM) {
 #
 # L ouverture des onglets est faite par l installateur (LIA-X.iss, fin de
 # CurStepChanged), qui connait les cases a cocher de la page Interfaces. Ce
-# script ne recoit pas ces choix : il ouvrait donc TOUJOURS le Model Loader
+# script ne recoit pas ces choix : il ouvrait donc TOUJOURS le LIA-X
 # (deux fenetres : une depuis ici, une depuis l ISS), et ouvrait LibreChat /
 # Open WebUI / AnythingLLM meme si l utilisateur ne les avait pas selectionnes.
 #
@@ -574,14 +665,34 @@ Write-Info "Post-installation terminee (ouverture des onglets geree par l instal
 # 8. Marquage installation
 # ------------------------------------------------------------------------------
 $installInfoPath = Join-Path $rootDir '.install-paths.json'
-$installInfo = @{
-    install_dir      = $rootDir
-    models_dir       = $modelsTargetDir
-    controller_port  = $ControllerPort
-    llama_port       = $LlamaPort
-    loader_port      = $LoaderPort
-    installed_at     = (Get-Date -Format 'o')
-} | ConvertTo-Json -Depth 3
+
+# FUSION, pas ecrasement : l'installateur (LIA-X.iss, section 6) ecrit
+# CE FICHIER une premiere fois, en y ajoutant les cases cochees en page
+# Interfaces (librechat / open_webui / anything_llm). Ce script tourne
+# ENSUITE : un simple WriteAllText effacait donc systematiquement ces choix,
+# puisque le dernier ecrivain gagne. On relit l'existant, on met a jour les
+# seules cles dont CE script est proprietaire, et on reecrit.
+$existing = @{}
+if (Test-Path -LiteralPath $installInfoPath) {
+    try {
+        $raw = Get-Content -LiteralPath $installInfoPath -Raw -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace($raw)) {
+            $parsed = $raw | ConvertFrom-Json
+            if ($parsed) {
+                foreach ($p in $parsed.PSObject.Properties) { $existing[$p.Name] = $p.Value }
+            }
+        }
+    } catch {
+        Write-Host "    .install-paths.json illisible, il sera reecrit : $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+$existing['install_dir']     = $rootDir
+$existing['models_dir']      = $modelsTargetDir
+$existing['controller_port'] = $ControllerPort
+$existing['llama_port']      = $LlamaPort
+$existing['loader_port']     = $LoaderPort
+$existing['installed_at']    = (Get-Date -Format 'o')
+$installInfo = $existing | ConvertTo-Json -Depth 3
 [System.IO.File]::WriteAllText($installInfoPath, $installInfo, [System.Text.Encoding]::UTF8)
 Write-Ok "Informations d'installation enregistrées."
 
@@ -589,6 +700,6 @@ Write-Host ''
 Write-Host 'Post-installation LIA-X terminée.' -ForegroundColor Green
 Write-Host "  Installation : $rootDir"
 Write-Host "  Modèles      : $modelsTargetDir"
-Write-Host "  Model Loader : http://localhost:$LoaderPort"
+Write-Host "  LIA-X : http://localhost:$LoaderPort"
 Write-Host '  Services Windows enregistrés (démarrage différé au prochain boot).'
 Write-Host ''

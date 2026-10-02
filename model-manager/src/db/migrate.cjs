@@ -1,4 +1,4 @@
-// Application du schéma au démarrage du conteneur model-loader.
+// Application du schéma au démarrage du conteneur lia-x.
 //
 // Le schéma est idempotent (CREATE ... IF NOT EXISTS) et versionné : la table
 // schema_migrations trace les versions déjà appliquées pour qu'un futur
@@ -567,7 +567,7 @@ async function applySchema() {
 }
 
 /**
- * Attend que PostgreSQL réponde. Le conteneur postgres et le model-loader
+ * Attend que PostgreSQL réponde. Le conteneur postgres et le lia-x
  * démarrant en parallèle, la base n'est pas forcément prête au premier boot.
  */
 async function waitForDatabase(timeoutMs = 60000, intervalMs = 2000) {

@@ -127,7 +127,7 @@ GET http://127.0.0.1:13621/metrics/host
 1. **LIA Controller** (port 13579) - Contrôleur principal
 2. **LIA GPU Metrics** (port 13621) - Métriques système
 3. **llama-server** (port 12434) - Runtime IA
-4. **Model Loader** (port 3005) - Interface de gestion
+4. **LIA-X** (port 3005) - Interface de gestion
 
 ## Outils de diagnostic
 

@@ -49,7 +49,7 @@ const Documentation = () => {
             <div className="doc-section">
               <h3 className="doc-subheading">Installation manuelle</h3>
               <pre className="doc-code"><code># 1. Construire les images Docker
-docker build -t lia-model-loader -f Dockerfiles/Dockerfile.model-loader .
+docker build -t lia-x -f Dockerfiles/Dockerfile.lia-x .
 docker build -t anythingllm -f Dockerfiles/Dockerfile.anythingllm .
 docker build -t openwebui -f Dockerfiles/Dockerfile.openwebui .
 docker build -t librechat -f Dockerfiles/Dockerfile.librechat .
@@ -97,7 +97,7 @@ docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-
                 </thead>
                 <tbody>
                   <tr>
-                    <td className="doc-table-cell"><strong>Model Loader</strong></td>
+                    <td className="doc-table-cell"><strong>LIA-X</strong></td>
                     <td className="doc-table-cell">http://localhost:3005</td>
                     <td className="doc-table-cell">Import GGUF, métadonnées, catalogue, proxy OpenAI</td>
                   </tr>
@@ -154,7 +154,7 @@ docker run -d --name librechat --network lia-network -p 3007:3080 ghcr.io/danny-
 
             <div className="doc-section">
               <h3 className="doc-subheading">Service Host Launcher</h3>
-              <p className="doc-note">Le service Host Launcher permet d'ouvrir le dossier des modèles dans l'Explorateur Windows depuis l'interface Model Loader :</p>
+              <p className="doc-note">Le service Host Launcher permet d'ouvrir le dossier des modèles dans l'Explorateur Windows depuis l'interface LIA-X :</p>
               <ul className="doc-list">
                 <li>Service léger sur le port <code>13580</code></li>
                 <li>Ouvre l'Explorateur dans la session interactive de l'utilisateur, même si le contrôleur tourne en service Windows (session 0)</li>
@@ -218,7 +218,7 @@ print(resp.choices[0].message.content)`}</code></pre>
 
             <div className="doc-section">
               <h3 className="doc-subheading">Contrôleur hôte (port 13579)</h3>
-              <p className="doc-note">Gestion des instances <code>llama-server</code> et du cycle de vie des modèles. Usage interne — passez par le Model Loader pour un usage normal.</p>
+              <p className="doc-note">Gestion des instances <code>llama-server</code> et du cycle de vie des modèles. Usage interne — passez par le LIA-X pour un usage normal.</p>
 
               <table className="doc-table">
                 <thead>
@@ -349,7 +349,7 @@ print(resp.choices[0].message.content)`}</code></pre>
             </div>
 
             <div className="doc-section">
-              <h3 className="doc-subheading">Model Loader (port 3005)</h3>
+              <h3 className="doc-subheading">LIA-X (port 3005)</h3>
               <p className="doc-note">Serveur Node.js avec proxy OpenAI-compatible et API de gestion des modèles.</p>
 
               <h4 className="doc-subheading">API de gestion des modèles</h4>
@@ -365,7 +365,7 @@ print(resp.choices[0].message.content)`}</code></pre>
                   <tr>
                     <td className="doc-table-cell"><code>GET /health</code></td>
                     <td className="doc-table-cell">GET</td>
-                    <td className="doc-table-cell">Vérifie que le serveur Model Loader est disponible</td>
+                    <td className="doc-table-cell">Vérifie que le serveur LIA-X est disponible</td>
                   </tr>
                   <tr>
                     <td className="doc-table-cell"><code>GET /api/version</code></td>
@@ -503,7 +503,7 @@ print(resp.choices[0].message.content)`}</code></pre>
               <h3 className="doc-subheading">Ports</h3>
               <p className="doc-note">Les ports sont définis dans <code>config.json</code> :</p>
               <ul className="doc-list">
-                <li><code>loaderPort = 3005</code> - Model Loader</li>
+                <li><code>loaderPort = 3005</code> - LIA-X</li>
                 <li><code>anythingPort = 3006</code> - AnythingLLM</li>
                 <li><code>openWebUiPort = 3008</code> - Open WebUI</li>
                 <li><code>libreChatPort = 3007</code> - LibreChat</li>
@@ -520,7 +520,7 @@ print(resp.choices[0].message.content)`}</code></pre>
 
             <div className="doc-section">
               <h3 className="doc-subheading">Modèles</h3>
-              <p>Les modèles GGUF sont stockés dans le dossier <code>models/</code> et doivent être importés via l'interface Model Loader ou placés manuellement dans ce dossier.</p>
+              <p>Les modèles GGUF sont stockés dans le dossier <code>models/</code> et doivent être importés via l'interface LIA-X ou placés manuellement dans ce dossier.</p>
             </div>
           </div>
         );
@@ -599,7 +599,7 @@ print(resp.choices[0].message.content)`}</code></pre>
               <h3 className="doc-subheading">lia-local ne répond pas</h3>
               <ol className="doc-list">
                 <li>Vérifier la santé du contrôleur : <code>http://127.0.0.1:13579/status</code></li>
-                <li>Vérifier la santé du Model Loader : <code>http://127.0.0.1:3005/api/models/status</code></li>
+                <li>Vérifier la santé du LIA-X : <code>http://127.0.0.1:3005/api/models/status</code></li>
                 <li>Redémarrer le contrôleur via l'interface ou en relançant <code>services/controller/llama-host-controller.ps1</code></li>
               </ol>
             </div>
@@ -612,13 +612,13 @@ docker logs -f librechat-mongo</code></pre>
             </div>
 
             <div className="doc-section">
-              <h3 className="doc-subheading">Frontend Docker ne voit pas model-loader</h3>
-              <p>Vérifier que <code>model-loader</code> est connecté à <code>lia-network</code> et que les ports sont bien mappés.</p>
+              <h3 className="doc-subheading">Frontend Docker ne voit pas lia-x</h3>
+              <p>Vérifier que <code>lia-x</code> est connecté à <code>lia-network</code> et que les ports sont bien mappés.</p>
             </div>
 
             <div className="doc-section">
               <h3 className="doc-subheading">Modèle <code>.gguf</code> non trouvé</h3>
-              <p>Déposer le fichier dans <code>models/</code> et relancer le chargement via l'interface Model Loader.</p>
+              <p>Déposer le fichier dans <code>models/</code> et relancer le chargement via l'interface LIA-X.</p>
             </div>
 
             <div className="doc-section">
@@ -637,7 +637,7 @@ docker logs -f librechat-mongo</code></pre>
               <ul className="doc-list">
                 <li><code>logs/controller/</code> - Contrôleur hôte</li>
                 <li><code>logs/runtime/</code> - Runtime llama-server</li>
-                <li><code>logs/model-manager/</code> - Model Loader</li>
+                <li><code>logs/model-manager/</code> - LIA-X</li>
               </ul>
             </div>
           </div>
@@ -653,7 +653,7 @@ docker logs -f librechat-mongo</code></pre>
               <h3 className="doc-subheading">Couches principales</h3>
               <ol className="doc-list">
                 <li><strong>Couche Runtime</strong> : Gestion des instances <code>llama-server</code> via un contrôleur PowerShell</li>
-                <li><strong>Couche Proxy</strong> : Model Loader qui expose une API OpenAI-compatible et sert de proxy</li>
+                <li><strong>Couche Proxy</strong> : LIA-X qui expose une API OpenAI-compatible et sert de proxy</li>
                 <li><strong>Couche Frontend</strong> : Interfaces utilisateur Dockerisées (AnythingLLM, Open WebUI, LibreChat)</li>
               </ol>
             </div>
@@ -663,16 +663,16 @@ docker logs -f librechat-mongo</code></pre>
               <p><strong>Flux d'inférence :</strong></p>
               <ol className="doc-list">
                 <li>Utilisateur formule une requête via le frontend</li>
-                <li>Le Model Loader reçoit la requête et valide le modèle actif</li>
+                <li>Le LIA-X reçoit la requête et valide le modèle actif</li>
                 <li>Le Controller Host récupère l'instance active et vérifie la santé</li>
                 <li>llama-server génère la réponse</li>
-                <li>La réponse est formatée et renvoyée via le Model Loader</li>
+                <li>La réponse est formatée et renvoyée via le LIA-X</li>
               </ol>
 
               <p><strong>Flux de chargement de modèle :</strong></p>
               <ol className="doc-list">
-                <li>L'utilisateur importe un fichier GGUF via l'interface Model Loader</li>
-                <li>Le Model Loader vérifie l'espace disque et lit le fichier</li>
+                <li>L'utilisateur importe un fichier GGUF via l'interface LIA-X</li>
+                <li>Le LIA-X vérifie l'espace disque et lit le fichier</li>
                 <li>Le Controller Host crée une instance llama-server</li>
                 <li>llama-server charge le modèle depuis disque</li>
                 <li>L'instance est enregistrée dans le Runtime State</li>

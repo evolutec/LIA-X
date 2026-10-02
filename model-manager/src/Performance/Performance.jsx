@@ -73,11 +73,19 @@ const fetchPerformance = async (isInitial = false) => {
     isFetchingRef.current = true;
     if (isInitial) setLoading(true);
     try {
-      const response = await fetch(`http://127.0.0.1:13621/metrics/host`);
-      
+      // On passe par le PROXY (/metrics/host) et non plus directement par
+      // http://127.0.0.1:13621. Le navigateur n'a ainsi qu'une seule origine à
+      // joindre (le port publié 3005) : l'onglet Performance ne cassait pas si
+      // le service de métriques était absent, redémarré, ou si le port 13621
+      // n'était pas exposé. Le proxy normalise par ailleurs la réponse.
+      const response = await fetch(`/metrics/host`);
+
       let payload;
       try {
-        payload = await response.json();
+        const envelope = await response.json();
+        // Le proxy renvoie { hostMetrics: <charge utile brute> } : on
+        // unwrape pour conserver le format attendu ci-dessous.
+        payload = envelope?.hostMetrics ?? envelope;
       } catch (e) {
         throw new Error("Réponse API invalide");
       }

@@ -1,6 +1,6 @@
 // Pool PostgreSQL — source de vérité pour l'historique des conversations.
 //
-// Le conteneur model-loader est sans état pour tout ce qui concerne les données :
+// Le conteneur lia-x est sans état pour tout ce qui concerne les données :
 // si la base est absente ou injoignable, l'application doit DÉMARRER QUAND MÊME et
 // dégrader proprement (chat utilisable, historique en mémoire). C'est pourquoi
 // ce module ne lève pas au chargement : il expose isDbAvailable() et laisse les

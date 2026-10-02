@@ -1,4 +1,4 @@
-import "./accueil.css";
+import "./modeles.css";
 
 /**
  * Modale « Recommandations runtime » : backend, contexte et gpu_layers

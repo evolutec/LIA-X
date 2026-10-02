@@ -117,12 +117,12 @@ function ContainerLogs() {
     };
   }, []);
 
-  const allowedContainerSources = new Set(['model-loader', 'anythingllm', 'openwebui']);
+  const allowedContainerSources = new Set(['lia-x', 'anythingllm', 'openwebui']);
   const logSourceOptions = [
     { value: 'all', label: 'Tous' },
     { value: 'server', label: 'Server' },
     { value: 'controller', label: 'Controller' },
-    { value: 'model-loader', label: 'model-loader' },
+    { value: 'lia-x', label: 'lia-x' },
     { value: 'anythingllm', label: 'anythingllm' },
     { value: 'openwebui', label: 'openwebui' },
   ];

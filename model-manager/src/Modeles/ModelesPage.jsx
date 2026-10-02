@@ -1,16 +1,16 @@
 import ModelDetailsModal from "./ModelDetailsModal";
 import RecommendedRuntimeModal from "./RecommendedRuntimeModal";
-import "./accueil.css";
+import "./modeles.css";
 
 /**
- * Page d'accueil : hero (modele principal, endpoint), import d'un GGUF et
+ * Page Modèles : hero (modele principal, endpoint), import d'un GGUF et
  * table des modeles (chargement, principal, embedding, contexte, VRAM).
  *
  * Ce composant ne detient aucun etat : tout provient de useModelManager(), ce
  * qui laisse le shell (App.jsx) libre de piloter la navigation sans toucher au
  * contenu de la page.
  */
-export default function AccueilPage(props) {
+export default function ModelesPage(props) {
   const {
     huggingfaceUrl, setHuggingfaceUrl, ollamaName, setOllamaName,
     hfModelName, setHfModelName, modelsHostDir, openingFolder, hostPathCopied,
@@ -45,7 +45,7 @@ export default function AccueilPage(props) {
         <article className="hero-route"><div className="hero-route-kicker">Chargés</div><h3>{loadedModels.length}</h3><p>{loadedModels.length > 0 ? 'Les modèles en mémoire sont exposés via /api/models.' : 'Aucun modèle chargé.'}</p></article>
         <article className="hero-route hero-route-endpoint">
           <div className="hero-route-kicker">🔌 Endpoint API (OpenAI-compatible)</div>
-          <h3><code>{apiBaseUrl}</code></h3>
+          <h3 className="endpoint-url"><code>{apiBaseUrl}</code></h3>
           <p>Connectez vos outils (Open WebUI, AnythingLLM, LibreChat, VS Code…) à cette adresse, avec le modèle <strong>lia-local</strong>. Aucune clé API requise.</p>
           <button type="button" className="btn btn-reload btn-sm" onClick={() => { navigator.clipboard?.writeText(apiBaseUrl); setApiCopied(true); setTimeout(() => setApiCopied(false), 2000); }}>
             {apiCopied ? '✓ Copié !' : '📋 Copier l\'adresse'}
@@ -62,8 +62,31 @@ export default function AccueilPage(props) {
         <label className="field-block download-grid-span"><span className="field-label">Référence Ollama</span><input type="text" value={ollamaName} onChange={(e) => setOllamaName(e.target.value)} placeholder="gemma3n:e4b" /></label>
       </div>
       <div className="download-links">
-        <a href="https://ollama.com/library" target="_blank" rel="noreferrer"><img className="link-icon ollama-icon" src="https://ollama.com/public/assets/c889cc0d-cb83-4c46-a98e-0d0e273151b9/42f6b28d-9117-48cd-ac0d-44baaf5c178e.png" alt="" aria-hidden="true" />Ollama Library</a>
-        <a href="https://huggingface.co/models" target="_blank" rel="noreferrer"><img className="link-icon huggingface-icon" src="https://huggingface.co/front/assets/huggingface_logo-noborder.svg" alt="" aria-hidden="true" />Hugging Face Models</a>
+        {/* Icônes INLINE en SVG, et non <img src="https://…"> vers ollama.com /
+           huggingface.co. Trois raisons :
+             1. LIA-X est 100 % local : afficher une icône ne doit pas dépendre
+                d'Internet, ni casser hors ligne.
+             2. Chaque affichage de page contactait ollama.com et
+                huggingface.co : l'IP de l'utilisateur partait chez eux, pour un
+                simple logo de 22 px.
+             3. L'image Ollama servie est un PNG de 4096×4096 px. Elle n'était
+                bornée que par une règle CSS ; si celle-ci manquait (bundle
+                obsolète, feuille non chargée), l'image s'affichait à sa taille
+                naturelle et cassait toute la mise en page — ce qui est
+                exactement le défaut constaté. Un SVG est resolution-independent
+                : le risque n'existe plus. */}
+        <a href="https://ollama.com/library" target="_blank" rel="noreferrer">
+          <svg className="link-icon" viewBox="0 0 24 24" role="presentation" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M12 2c5.5 0 10 3.6 10 8s-4.5 8-10 8c-1.2 0-2.3-.2-3.4-.5L3 20l1.6-4.1C3.2 14.6 2 12.4 2 10c0-4.4 4.5-8 10-8Zm0 2c-4.4 0-8 2.7-8 6s3.6 6 8 6 8-2.7 8-6-3.6-6-8-6Zm0 2.2c2 0 3.6 1 3.6 2.3S14 14.8 12 14.8s-3.6-1-3.6-2.3S10 8.2 12 8.2Z" />
+          </svg>
+          Ollama Library
+        </a>
+        <a href="https://huggingface.co/models" target="_blank" rel="noreferrer">
+          <svg className="link-icon" viewBox="0 0 24 24" role="presentation" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M12 2.5 14.4 9l6.6 1.1-4.9 4.3 1.4 6.5L12 17.4l-5.5 3.5 1.4-6.5L3 10.1 9.6 9 12 2.5Z" />
+          </svg>
+          Hugging Face Models
+        </a>
       </div>
 
 
@@ -99,8 +122,8 @@ export default function AccueilPage(props) {
           <div className="auto-sync-label">Mise à jour auto</div>
         </div>
       </div>
-      {emptyState ? <div className="empty-state">Aucun modèle local détecté.</div> : <div className="table-wrap"><div className="table-legend">Afficher les fichiers GGUF disponibles sur disque et les modèles chargés en mémoire. Cliquez sur un toggle pour charger / décharger.</div><table className="model-table"><thead><tr>
-        <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('name')}>Nom {sortColumn === 'name' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
+      {emptyState ? <div className="empty-state">Aucun modèle local détecté.</div> : <div className="table-wrap"><div className="table-legend">Afficher les fichiers GGUF disponibles sur disque et les modèles chargés en mémoire. Cliquez sur un toggle pour charger / décharger. <span className="table-legend-hint">Le tableau défile horizontalement.</span></div><table className="model-table"><thead><tr>
+        <th className="col-name-header" style={{ cursor: 'pointer' }} onClick={() => handleSortClick('name')}>Nom {sortColumn === 'name' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
         <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('status')}>État {sortColumn === 'status' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
         <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('diskSize')}>Taille {sortColumn === 'diskSize' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
         <th style={{ cursor: 'pointer' }} onClick={() => handleSortClick('contextLength')}>Context {sortColumn === 'contextLength' ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</th>
@@ -117,7 +140,7 @@ export default function AccueilPage(props) {
                 {row.partialJob?.paused ? '⏸ En pause' : '⬇ Téléchargement'}{row.partialJob?.total_bytes ? ` ${row.partialJob.percent ?? 0} %` : ''}
               </span>
             )}{!row.partial && row.active && <span className="badge badge-success">✓ Principal</span>}{!row.partial && !row.active && row.loaded && <span className="badge badge-loaded">En mémoire</span>}{!row.partial && !row.loaded && <span className="badge badge-neutral">Disponible</span>}{pendingAction?.model === row.name && <span className="badge badge-pending"><span className="spinner spinner-small" /> {pendingAction.type}…</span>}</div></td>
-            <td>{row.partial
+            <td className="col-size">{row.partial
               ? `${formatBytes(row.partialJob?.received_bytes ?? 0)}${row.partialJob?.total_bytes ? ` / ${formatBytes(row.partialJob.total_bytes)}` : ''}`
               : formatBytes(row.diskSize)}</td>
             <td>
@@ -151,8 +174,14 @@ export default function AccueilPage(props) {
                   </div>
                 )}
                 <div className="gpu-summary">
-                  <span className="badge badge-neutral">gpu_layers metadata: {row.gpuLayers ?? '—'}</span>
-                  <span className="badge badge-loaded">gpu_layers recommandé: {recommendedRuntime?.gpu_layers ?? 'auto'}</span>
+                  {/* information naguèrement sur 2 badges larges
+                      (« gpu_layers metadata: 0 » + « gpu_layers recommandé : 999 »),
+                      qui étiraient la cellule et la hauteur de ligne. Compactée
+                      en une ligne, l'info détaillée reste dans l'infobulle et
+                      dans la modale « Infos ». */}
+                  <span className="badge badge-neutral" title={`gpu_layers déclarés par le fichier : ${row.gpuLayers ?? 'aucun'} — recommandé pour ton matériel : ${recommendedRuntime?.gpu_layers ?? 'auto'}`}>
+                    GPU {row.gpuLayers ?? '—'} → {recommendedRuntime?.gpu_layers ?? 'auto'}
+                  </span>
                 </div>
               </div>
             </td>

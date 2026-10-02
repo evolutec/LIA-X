@@ -5,6 +5,19 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
+
+// Version du produit, source de vérité package.json. /api/version la renvoie
+// telle quelle ; elle doit rester cohérente avec la version annoncée par
+// l'installateur (qui la reçoit du tag via /DAppVersion).
+const LIA_X_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+    return String(pkg.version || '0.0.0');
+  } catch {
+    return '0.0.0';
+  }
+})();
 const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { execFile } = require('child_process');
@@ -553,7 +566,7 @@ const STATUS_CACHE_MAX_AGE = 10000;
 const LOG_HISTORY = [];
 const LOG_HISTORY_MAX = 240;
 const DOCKER_SOCKET_PATH = process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock';
-const CONTAINER_LOG_NODES = (process.env.CONTAINER_LOG_NAMES || 'anythingllm,openwebui,open-webui,librechat,model-loader')
+const CONTAINER_LOG_NODES = (process.env.CONTAINER_LOG_NAMES || 'anythingllm,openwebui,open-webui,librechat,lia-x')
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
@@ -633,9 +646,77 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
+// Champs dont la valeur n'est JAMAIS journalisée, même dans un résumé.
+const LOG_SENSITIVE_KEYS = new Set([
+  'content',
+  'contentbase64',
+  'input',
+  'prompt',
+  'text',
+  'messages',
+  'message',
+  'embedding',
+  // /api/rag/search reçoit la question de l'utilisateur dans `query` : sans
+  // ce masque, chaque question posée via le RAG atterrissait dans docker logs
+  // ET dans LOG_HISTORY (exposé par GET /api/models/status).
+  'query',
+  'question',
+  'answer',
+  'response',
+  'password',
+  'token',
+  'secret',
+  'authorization',
+  'apikey',
+  'api_key',
+  'body',
+  'data',
+  'base64',
+  'raw',
+]);
+
+// Résumé de forme d'un corps de requête : on conserve la STRUCTURE (utile au
+// débogage : quelles routes sont appelées, avec quels champs) mais jamais les
+// VALEURS. Un corps de 85 Mo (upload RAG en base64) ne doit ni être sérialisé
+// ni stocké en mémoire.
+function summarizePayload(payload, depth = 0) {
+  if (payload === null || payload === undefined) {
+    return '';
+  }
+  if (typeof payload === 'string') {
+    return `<string ${payload.length} car.>`;
+  }
+  if (typeof payload !== 'object') {
+    return `<${typeof payload}>`;
+  }
+  if (depth > 2) {
+    return Array.isArray(payload) ? `<array ${payload.length}>` : '<objet>';
+  }
+  if (Array.isArray(payload)) {
+    return `<array ${payload.length}>`;
+  }
+  const parts = Object.keys(payload).slice(0, 20).map((key) => {
+    const lower = String(key).toLowerCase();
+    if (LOG_SENSITIVE_KEYS.has(lower)) {
+      return `${key}:<masque>`;
+    }
+    return `${key}:${summarizePayload(payload[key], depth + 1)}`;
+  });
+  if (parts.length === 0) {
+    return '{}';
+  }
+  return `{${parts.join(', ')}}`;
+}
+
+// Les corps de requête ne sont PLUS journalises : ils contenaient le contenu
+// integral des messages de chat et des documents RAG, et ils atterrissaient
+// dans `docker logs` ET dans LOG_HISTORY, expose sans authentification par
+// GET /api/models/status. Ils pouvaient en outre atteindre ~85 Mo par requete
+// (upload RAG en base64) x 240 entrees retenues en RAM.
 function logRequest(method, path, payload) {
-  console.log('[model-manager] incoming', method, path, payload || 'no payload');
-  pushLogEntry('server', path || 'server', 'info', `${method} ${path} ${payload ? JSON.stringify(payload) : ''}`, 'info');
+  const summary = payload === undefined || payload === null ? '' : summarizePayload(payload);
+  console.log('[model-manager] incoming', method, path, summary);
+  pushLogEntry('server', path || 'server', 'info', `${method} ${path} ${summary}`, 'info');
 }
 
 function logError(path, error) {
@@ -647,6 +728,7 @@ app.use((req, res, next) => {
   logRequest(req.method, req.originalUrl, req.body);
   next();
 });
+
 
 const CONTROLLER_URL = (process.env.LLAMA_HOST_CONTROL_URL || 'http://host.docker.internal:13579').replace(/\/$/, '');
 const CONTROLLER_HOST_LAUNCHER_URL = (process.env.CONTROLLER_HOST_LAUNCHER_URL || 'http://host.docker.internal:13580').replace(/\/$/, '');
@@ -660,6 +742,142 @@ const RUNTIME_HARDWARE_PROFILE_PATH = process.env.RUNTIME_HARDWARE_PROFILE_PATH 
 const EMBEDDING_MODEL_STATE_PATH = process.env.EMBEDDING_MODEL_STATE_PATH || path.join(MODEL_STORAGE_DIR, '.lia', 'embedding-model.json');
 const PORT = Number(process.env.MODEL_MANAGER_PORT || 3005);
 const PROXY_MODEL_ID = process.env.PROXY_MODEL_ID || 'lia-local';
+// ═══════════════════════════════════════════════════════════════════════════
+// Sécurité d'accès à l'API
+// ═══════════════════════════════════════════════════════════════════════════
+// Le LIA-X est publié sur 0.0.0.0:3005 et n'avait AUCUNE
+// authentification : n'importe quel processus local pouvait supprimer un GGUF,
+// charger un modèle, lire toutes les conversations ou redémarrer le contrôleur.
+//
+// Renforcement en DEUX couches, toutes deux désactivées par défaut pour ne
+// rien casser :
+//
+//  1. Validation du header Host (anti-DNS-rebinding). Un site web peut faire
+//     résoudre son nom vers 127.0.0.1 ; le navigateur enverrait alors
+//     Host: attaquant.fr vers ce service. Sans CORS le navigateur ne peut pas
+//     LIRE la reponse, mais la requete s'execute quand meme. En n'acceptant que
+//     les Host connus, ce vecteur d'ecriture est ferme.
+//     Activation : LIA_ALLOWED_HOSTS=localhost,127.0.0.1,...
+//
+//  2. Token d'API sur les routes /api/* MUTANTES (POST/PUT/PATCH/DELETE).
+//     Volontairement NON appliqué à /v1/* : Open WebUI, AnythingLLM, LibreChat
+//     et les clients OpenAI talkent à cette surface et ne/~pourraient pas
+//     fournir de token sans configuration supplémentaire dans chaque conteneur.
+//     Activation : LIA_API_TOKEN=1.
+//
+// Le token est AUTO-CONFIGURANT : généré au premier démarrage avec crypto
+// (randomBytes 32 octets), persisté sur le montage partagé /models/.lia/, et
+// injecté dans le HTML de la SPA (même origine uniquement, donc illisible par
+// un site tiers). Aucune modification de l'installateur n'est requise.
+// Supprimer le fichier fait tourner le token.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const API_TOKEN_PATH = path.join(MODEL_STORAGE_DIR, '.lia', 'api-token');
+
+function isTruthyEnv(value) {
+  return !/^(0|false|off|no|)$/i.test(String(value ?? '').trim());
+}
+
+const API_TOKEN_ENFORCED = isTruthyEnv(process.env.LIA_API_TOKEN);
+const ALLOWED_HOSTS = (process.env.LIA_ALLOWED_HOSTS || '')
+  .split(',')
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
+
+function loadOrCreateApiToken() {
+  try {
+    if (fs.existsSync(API_TOKEN_PATH)) {
+      const existing = String(fs.readFileSync(API_TOKEN_PATH, 'utf8') || '').trim();
+      if (existing.length >= 32) {
+        return existing;
+      }
+    }
+  } catch {
+    // fichier illisible : on repart d'un token neuf
+  }
+  const token = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(path.dirname(API_TOKEN_PATH), { recursive: true });
+    fs.writeFileSync(API_TOKEN_PATH, token, { encoding: 'utf8', mode: 0o600 });
+  } catch (error) {
+    console.warn('[model-manager] token API non persisté :', error?.message || error);
+  }
+  return token;
+}
+
+const API_TOKEN = loadOrCreateApiToken();
+
+function timingSafeEquals(a, b) {
+  const bufA = Buffer.from(String(a || ''), 'utf8');
+  const bufB = Buffer.from(String(b || ''), 'utf8');
+  if (bufA.length !== bufB.length || bufA.length === 0) {
+    return false;
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function requestHasApiToken(req) {
+  const header = req.get('x-lia-token') || req.get('x-api-token') || '';
+  if (header) {
+    return timingSafeEquals(header, API_TOKEN);
+  }
+  const queryToken = req.query && typeof req.query === 'object' ? req.query.lia_token : '';
+  return queryToken ? timingSafeEquals(queryToken, API_TOKEN) : false;
+}
+
+// Host autorisés par défaut : loopback + les alias utilisés par les conteneurs
+// et par le navigateur sur le poste. Une liste explicite passée via
+// LIA_ALLOWED_HOSTS remplace entièrement celle-ci.
+const DEFAULT_ALLOWED_HOSTS = [
+  'localhost',
+  '127.0.0.1',
+  '[::1]',
+  '::1',
+  '0.0.0.0',
+  'lia-x',
+  'host.docker.internal',
+];
+
+function hostIsAllowed(hostHeader) {
+  const raw = String(hostHeader || '').trim().toLowerCase();
+  if (!raw) {
+    return true; // HTTP/1.0 sans Host : on ne casse pas ces clients
+  }
+  // On compare sur le nom seul, en ignorant le port.
+  const hostname = raw.startsWith('[') ? raw.slice(0, raw.indexOf(']') + 1) : raw.split(':')[0];
+  const allowList = ALLOWED_HOSTS.length > 0 ? ALLOWED_HOSTS : DEFAULT_ALLOWED_HOSTS;
+  return allowList.includes(hostname);
+}
+
+app.use((req, res, next) => {
+  if (!hostIsAllowed(req.get('host'))) {
+    res.status(421).json({ detail: 'Hôte non autorisé pour le LIA-X.' });
+    return;
+  }
+  next();
+});
+
+// Token exigé sur les /api/* mutantes seulement. Les GET restent ouverts :
+// ils ne modifient rien, et les garder lisibles préserve les usages de
+// supervision (healthchecks, tableaux de bord).
+app.use('/api', (req, res, next) => {
+  if (!API_TOKEN_ENFORCED) {
+    next();
+    return;
+  }
+  const method = String(req.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    next();
+    return;
+  }
+  if (requestHasApiToken(req)) {
+    next();
+    return;
+  }
+  res.status(401).json({
+    detail: 'Token API absent ou invalide. Envoyez l\'en-tête X-LIA-Token.',
+  });
+});
 const ROOCODE_SOURCE_HEADER_NAME = String(process.env.ROOCODE_SOURCE_HEADER_NAME || 'x-roocode-source').trim().toLowerCase();
 const ROOCODE_SOURCE_HEADER_VALUE = String(process.env.ROOCODE_SOURCE_HEADER_VALUE || 'true').trim().toLowerCase();
 const DOCKER_INTERNAL = String(process.env.DOCKER_INTERNAL || 'false').toLowerCase() === 'true';
@@ -738,6 +956,79 @@ const EMBEDDING_MODEL_CANDIDATES = [
   'all-minilm',
   'embed',
 ];
+
+/**
+ * Heuristique « ce FICHIER est-il un modèle d'embeddings ? ».
+ *
+ * ATTENTION : c'est une simple lecture du nom de fichier. Elle ne dit RIEN de
+ * l'instance qui tourne : llama.cpp ne sert POST /v1/embeddings que si le
+ * processus a été lancé avec --embedding (drapeau transmis par le contrôleur,
+ * cf. llama-host-controller.ps1 et le champ `embedding` de chaque instance).
+ *
+ * Conséquence historique : /v1/models annonçait `embedding_capable: true`
+ * pour nomic-embed-text alors que l'instance n'avait pas le drapeau — deux
+ * informations apparemment contradictoires, dont aucune ne permettait de
+ * distinguer « modèle d'embeddings » de « instance en mode embedding ».
+ *
+ * L'état RÉEL est désormais publié séparément via `embedding_active`
+ * (instance.embedding === true, lu sur le runtime du contrôleur).
+ */
+function isEmbeddingDeclaredName(name) {
+  const needle = String(name || '').toLowerCase();
+  if (!needle) {
+    return false;
+  }
+  return EMBEDDING_MODEL_CANDIDATES.some((candidate) => {
+    const candidateLower = candidate.toLowerCase();
+    return needle === candidateLower || needle.startsWith(candidateLower);
+  });
+}
+
+/**
+ * Décide si un FICHIER GGUF est un modèle d'embeddings, en lisant ses
+ * métadonnées plutôt que son nom.
+ *
+ * Ordre de décision :
+ *  1. `{arch}.pooling_type` présent  → embeddings (signal llama.cpp lui-même) ;
+ *  2. architecture d'encodeur connue  → embeddings ;
+ *  3. repli sur le nom                → embeddings (déjà utilisé, peu fiable).
+ *
+ * Le nom seul se trompait dans les deux sens :
+ *  - faux négatif : `qwen3-embedding-0.6b` ne matchait ni `Qwen3-Embedding-4B`
+ *    ni le préfixe `embed` → le modèle était considéré NON embedding, donc
+ *    jamais lancé avec --embedding, donc inutilisable pour /v1/embeddings ;
+ *  - faux positif : tout fichier nommé `embed*` était déclaré embedding.
+ *
+ * Ne leve jamais : toute erreur de lecture doit dégrader vers l'heuristique
+ * nom, pas casser l'API.
+ *
+ * @returns {Promise<{declared: boolean, source: 'metadata'|'name'|'none'}>}
+ */
+async function inspectEmbeddingModel(identifier) {
+  const fallback = { declared: isEmbeddingDeclaredName(identifier), source: 'name' };
+  let model;
+  try {
+    model = await resolveModel(identifier);
+  } catch {
+    return { declared: fallback.declared, source: fallback.declared ? 'name' : 'none' };
+  }
+
+  try {
+    const details = await getModelGgufDetails(model);
+    const architecture = String(details?.architecture || '').toLowerCase();
+    if (details?.pooling_type !== null && details?.pooling_type !== undefined) {
+      return { declared: true, source: 'metadata' };
+    }
+    if (architecture && GGUF_ENCODER_ARCHITECTURES.has(architecture)) {
+      return { declared: true, source: 'metadata' };
+    }
+  } catch {
+    // Fichier illisible / GGUF corrompu : on retombe sur le nom.
+    return { declared: fallback.declared, source: fallback.declared ? 'name' : 'none' };
+  }
+
+  return { declared: fallback.declared, source: fallback.declared ? 'name' : 'none' };
+}
 
 const LLAMA_FILE_TYPE_NAMES = {
   0: 'F32',
@@ -1055,6 +1346,34 @@ function extractGpuLayers(metadataMap) {
   return Number.isFinite(number) ? Math.floor(number) : null;
 }
 
+// Architectures GGUF d'encodeurs : modeles de transformation (bidirectionnels)
+// qui produisent des vecteurs, pas des modeles de langage autocompletifs.
+// C'est le signal le plus fiable pour reconnaitre un modele d'embeddings SANS
+// se fier au nom du fichier (le nom se trompe : cf. qwen3-embedding-0.6b).
+const GGUF_ENCODER_ARCHITECTURES = new Set([
+  'bert',
+  'nomic-bert',
+  'jina-bert-v2',
+  'neo-bert',
+  't5',
+  'mpt',
+]);
+
+// {arch}.pooling_type : 0=none 1=mean 2=cls 3=last 4=rank.
+// C'est ce que llama.cpp regarde pour savoir qu'un modele peut produire des
+// embeddings ; son absence est un signal negatif fort.
+function extractPoolingType(architecture, metadataMap) {
+  if (!architecture) {
+    return null;
+  }
+  const value = metadataMap[`${architecture}.pooling_type`];
+  if (Number.isInteger(value)) {
+    return value;
+  }
+  const number = Number(value);
+  return Number.isInteger(number) ? number : null;
+}
+
 async function parseGgufFile(filePath) {
   const fileHandle = await fs.promises.open(filePath, 'r');
   const reader = new BufferedFileReader(fileHandle);
@@ -1123,6 +1442,7 @@ async function parseGgufFile(filePath) {
     const architecture = typeof metadataMap['general.architecture'] === 'string' ? metadataMap['general.architecture'] : '';
     const contextLength = extractContextLength(architecture, metadataMap);
     const gpuLayers = extractGpuLayers(metadataMap);
+    const poolingType = extractPoolingType(architecture, metadataMap);
     return {
       version,
       tensor_count: tensorCount,
@@ -1130,6 +1450,7 @@ async function parseGgufFile(filePath) {
       architecture,
       context_length: contextLength,
       gpu_layers: gpuLayers,
+      pooling_type: poolingType,
       metadata,
       tensors,
     };
@@ -1428,7 +1749,11 @@ app.get('/api/rag/status', async (req, res) => {
     const folders = await ragRepository.listFolders();
     res.json({
       available: true,
-      embeddingDimensions: ragService.EXPECTED_DIMENSIONS,
+      // Dimension RÉELLE de la colonne pgvector, lue en base : elle suit le
+      // modèle d'embeddings choisi et peut avoir été alignée automatiquement
+      // lors d'une ingestion (cf. ensureVectorDimensions). Annoncer une
+      // constante 768 était faux dès que l'utilisateur changeait de modèle.
+      embeddingDimensions: await ragRepository.getEmbeddingDimension(),
       maxFileBytes: ragLimits.MAX_FILE_BYTES,
       maxDocumentChars: ragLimits.MAX_DOCUMENT_CHARS,
       maxChunks: ragLimits.MAX_CHUNKS_PER_DOCUMENT,
@@ -1834,7 +2159,11 @@ app.post('/api/rag/search', async (req, res) => {
   }
 });
 
-app.use(express.static(path.join(__dirname, 'dist')));
+// `index: false` est INDISPENSABLE : sans lui, express.static sert
+// dist/index.html pour « / » et intercepte la requete AVANT d'atteindre
+// app.get('*'), qui est le handler capable d'injecter le token dans la SPA.
+// Les assets (/assets/*.js, *.css) restent servis normalement.
+app.use(express.static(path.join(__dirname, 'dist'), { index: false }));
 
 function err(res, status, message) {
   logError(res.req?.originalUrl || 'unknown', message);
@@ -1900,7 +2229,7 @@ function traceControllerAttempt(event, endpoint, attempt, maxRetries, extra = {}
   const elapsed = extra.elapsedMs !== undefined ? ` elapsed=${extra.elapsedMs}ms` : '';
   const line = `[ctrl-trace] ${event} ${endpoint} attempt=${attempt + 1}/${maxRetries + 1}${elapsed}`
     + (extra.detail ? ` detail=${extra.detail}` : '');
-  // console.log : visible dans `docker logs model-loader`.
+  // console.log : visible dans `docker logs lia-x`.
   console.log(line);
   // pushLogEntry : visible dans /api/models/status, donc depuis l'interface.
   pushLogEntry('controller-trace', endpoint, event === 'ok' ? 'info' : 'warn', line);
@@ -2255,7 +2584,7 @@ function getRecommendedRuntimeDefaults(hardwareProfile) {
   // c'est le comportement nominal du produit, et non une restriction de plus.
   //
   // Le choix explicite de l'utilisateur reste prioritaire et n'est jamais
-  // bride ici : un contexte superieur se regle depuis l'onglet Accueil.
+  // bride ici : un contexte superieur se regle depuis l'onglet Modèles.
   return {
     backend: 'cpu',
     context: 8192,
@@ -2478,7 +2807,7 @@ function resolveActiveModel(runtime) {
 
   const liveInstances = instances.filter((instance) => isLiveInstance(instance));
   // Les instances d'autres projets (proxy non LIA) ne doivent jamais être
-  // présentées comme « le modèle principal » du model-loader LIA-X.
+  // présentées comme « le modèle principal » du lia-x LIA-X.
   const liveProjectInstances = liveInstances.filter((instance) => isProjectInstance(instance));
 
   const declared = String(runtime?.active_model || '');
@@ -2594,6 +2923,10 @@ function buildLoadedModelList(runtime) {
         context_length: Number.isFinite(Number(instance.context)) ? Number(instance.context) : null,
         expires_at: instance.started_at || null,
         active: activeModel ? instance.model === activeModel : Boolean(instance.active),
+        // Drapeau réel --embedding transmis par le contrôleur au lancement.
+        // C'est le SEUL indicateur fiable : `embedding_declared` (heuristique
+        // sur le nom du fichier) ne dit rien de l'instance qui tourne.
+        embedding: instance.embedding === true,
       };
     })
     .filter((item) => Boolean(item.model));
@@ -2613,6 +2946,10 @@ function buildLoadedModelList(runtime) {
       size_vram_source: null,
       expires_at: runtime?.started_at || null,
       active: true,
+      // Repli sur un runtime sans `instances` : l'état du drapeau est inconnu,
+      // donc on ne l'invente pas (false ≠ « démarré sans --embedding », mais on
+      // n'a aucune preuve du contraire : le client doit recharger le modèle).
+      embedding: runtime?.embedding === true,
     });
   }
 
@@ -2860,78 +3197,19 @@ function computeCpuUsage(currentCpus, previousCpus) {
   });
 }
 
-let LAST_CPU_SNAPSHOT = null;
-
-function getCpuSnapshot() {
-  const cpus = os.cpus();
-  const usage = computeCpuUsage(cpus, LAST_CPU_SNAPSHOT);
-  LAST_CPU_SNAPSHOT = cpus;
-  return cpus.map((cpu, index) => ({
-    id: `cpu-${index}`,
-    type: 'cpu',
-    model: cpu.model,
-    speed_mhz: cpu.speed,
-    usage_percent: usage[index]?.usage_percent,
-    times: cpu.times,
-  }));
-}
-
-async function runCommand(command, args = []) {
-  try {
-    const { stdout } = await execFileAsync(command, args, { timeout: 5000 });
-    return stdout.trim();
-  } catch {
-    return null;
-  }
-}
-
-async function probeGpuInfo() {
-  const gpus = [];
-  const nvidiaOutput = await runCommand('nvidia-smi', ['--query-gpu=name,utilization.gpu,memory.total,memory.used,driver_version', '--format=csv,noheader,nounits']);
-  if (nvidiaOutput) {
-    nvidiaOutput.split(/\r?\n/).forEach((line, index) => {
-      const parts = line.split(',').map((part) => part.trim());
-      if (parts.length >= 5) {
-        gpus.push({
-          id: `gpu-${index}`,
-          type: 'gpu',
-          vendor: 'NVIDIA',
-          model: parts[0],
-          usage_percent: Number(parts[1]) || 0,
-          memory_total_bytes: Number(parts[2]) * 1024 * 1024,
-          memory_used_bytes: Number(parts[3]) * 1024 * 1024,
-          driver: parts[4],
-        });
-      }
-    });
-    return gpus;
-  }
-
-  const lspciOutput = await runCommand('lspci', ['-mm']);
-  if (lspciOutput) {
-    lspciOutput.split(/\r?\n/).forEach((line, index) => {
-      const fields = line.split('"').filter((field) => field !== '' && field !== ' ');
-      if (fields.length >= 4) {
-        const type = fields[1] || '';
-        if (/VGA|3D|Display/i.test(type)) {
-          gpus.push({
-            id: `gpu-${index}`,
-            type: 'gpu',
-            vendor: fields[2] || 'Unknown',
-            model: fields.slice(3).join(' ').trim() || 'Unknown GPU',
-            usage_percent: null,
-            memory_total_bytes: null,
-            memory_used_bytes: null,
-            driver: null,
-          });
-        }
-      }
-    });
-  }
-
-  return gpus;
-}
-
+// ─────────────────────────────────────────────────────────────────────────────
+// Code mort retiré
+// ─────────────────────────────────────────────────────────────────────────────
+// getCpuSnapshot() / LAST_CPU_SNAPSHOT / computeCpuUsage() / probeGpuInfo() /
+// runCommand() n'étaient plus appelés nulle part. probeGpuInfo interrogeait
+// `lspci`, qui n'existe pas sur Windows : ce chemin était mort depuis le
+// portage, et sa présence laissait croire à une détection GPU active alors que
+// la vraie source est hardware-profile.json + getRuntimeGpuFallback.
+// runCommand n'était utilisé que par probeGpuInfo, computeCpuUsage que par
+// getCpuSnapshot : le bloc était donc entièrement auto-contenu.
+// Conservé ici : getRuntimeGpuFallback() (utilisé), plus bas.
+//
+// ─────────────────────────────────────────────────────────────────────────────
 function getRuntimeGpuFallback(runtime) {
   if (!runtime || typeof runtime !== 'object' || !runtime.gpu || typeof runtime.gpu !== 'object') {
     return [];
@@ -3172,8 +3450,18 @@ async function listLocalModels() {
 
 async function resolveEmbeddingModel() {
   const localModels = await listLocalModels();
-  const lowerNames = localModels.map((item) => item.name.toLowerCase());
 
+  // Passe 1 — métadonnées GGUF : signal fiable, détecte les modèles dont le
+  // nom ne dit rien (qwen3-embedding-0.6b, bge-m3, gte-base…).
+  for (const item of localModels) {
+    const inspect = await inspectEmbeddingModel(item.name);
+    if (inspect.source === 'metadata') {
+      return item.name;
+    }
+  }
+
+  // Passe 2 — repli historique sur le nom, dans l'ordre de la liste.
+  const lowerNames = localModels.map((item) => item.name.toLowerCase());
   for (const candidate of EMBEDDING_MODEL_CANDIDATES) {
     const index = lowerNames.findIndex((name) => name === candidate.toLowerCase() || name.startsWith(candidate.toLowerCase()));
     if (index >= 0) {
@@ -3220,6 +3508,30 @@ async function resolveEmbeddingModelInstance(modelName) {
   return match || null;
 }
 
+/**
+ * Etat de l'instance d'embeddings, pour le diagnostic du 501/404 upstream.
+ * Ne leve jamais : un diagnostic ne doit pas masquer l'erreur d'origine.
+ */
+async function describeEmbeddingState(modelName) {
+  const fallback = { model: modelName || null, port: null, loaded: false, embedding: false };
+  try {
+    const preference = await readEmbeddingModelPreference();
+    const target = modelName || preference;
+    if (!target) {
+      return fallback;
+    }
+    const instance = await resolveEmbeddingModelInstance(target);
+    return {
+      model: target,
+      port: instance?.port ?? null,
+      loaded: Boolean(instance),
+      embedding: instance?.embedding === true,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 async function resolveModel(identifier) {
   const models = await listLocalModels();
   const needle = String(identifier || '').trim();
@@ -3245,8 +3557,72 @@ function filenameFromUrl(value) {
   return decodeURIComponent(path.basename(pathname));
 }
 
+/**
+ * Autorise-t-on cette URL pour un téléchargement de modèle ?
+ *
+ * Le endpoint accepte une URL fournie par l'utilisateur : sans contrainte,
+ * c'est un SSRF — le serveur peut être utilisé pour sonder le réseau local ou
+ * les métadonnées cloud (169.254.169.254) depuis la machine de l'utilisateur.
+ *
+ * On impose donc :
+ *  - un protocole http/https (pas de file:, gopher:, ftp:) ;
+ *  - un hôte PUBLIC (on rejette loopback, RFC1918, link-local, .local) ;
+ *  - un port standard ou explicitement autorisé.
+ *
+ * L'extension .gguf reste exigée : ce n'est pas une protection (n'importe quel
+ * chemin peut se terminer par .gguf), c'est une commodité de saisie.
+ */
 function ensureGgufUrl(url) {
-  return /^https?:\/\/.+\.gguf(?:\?.*)?$/i.test(String(url || '').trim());
+  const raw = String(url || '').trim();
+  if (!raw) return false;
+  if (!/\.gguf(?:[?#].*)?$/i.test(raw)) return false;
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return false;
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return false;
+  }
+
+  // Port implicite uniquement : un port exotique sur un hôte public est un
+  // signal d'abus (scan de services tiers via le poste de l'utilisateur).
+  if (parsed.port && !['', '80', '443', '8080', '8443'].includes(parsed.port)) {
+    return false;
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return false;
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) {
+    return false;
+  }
+  // Nom d'hôte SANS point (« printer », « internal-svc ») : il ne peut pas
+  // désigner un hôte public, et Windows le résout via le domaine de recherche
+  // vers un hôte du réseau local. On l'exige donc.
+  if (!host.includes('.') && !host.includes(':')) {
+    return false;
+  }
+  // IPv4 réservées : loopback, lien-local (169.254.x = métadonnées cloud),
+  // RFC1918, CGNAT, multicast, 0.0.0.0.
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    const octets = host.split('.').map(Number);
+    if (octets.some((octet) => octet > 255)) return false;
+    const [a, b] = octets;
+    if (a === 0 || a === 127 || a >= 224) return false;
+    if (a === 10 || (a === 192 && b === 168)) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 169 && b === 254) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false;
+  }
+  // IPv6 : loopback, unspecified, unique-local (fc00::/7), link-local (fe80::/10).
+  if (host === '::1' || host === '::' || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host)) {
+    return false;
+  }
+
+  return true;
 }
 
 function parseOllamaLibraryReference(value) {
@@ -3355,7 +3731,7 @@ async function remoteContentLength(url, headers = {}) {
     const response = await fetchWithTimeout(url, {
       method: 'HEAD',
       redirect: 'follow',
-      headers: { 'User-Agent': 'LIA-Model-Loader/2.0', ...headers },
+      headers: { 'User-Agent': 'LIA-X/2.0', ...headers },
     });
     if (!response.ok) return null;
     const length = Number(parseInt(response.headers.get('content-length') || '0', 10));
@@ -3450,7 +3826,7 @@ async function streamUrlToFile({ url, targetPath, partPath, jobKey, headers = {}
     // pauseDownloadJob, qui l'utilise sans marquer le job comme annulé.
     PAUSE_ABORTS.set(jobKey, attemptController);
 
-    const requestHeaders = { 'User-Agent': 'LIA-Model-Loader/2.0', 'Accept-Encoding': 'identity', ...headers };
+    const requestHeaders = { 'User-Agent': 'LIA-X/2.0', 'Accept-Encoding': 'identity', ...headers };
     if (written > 0) requestHeaders.Range = `bytes=${written}-`;
 
     let response = null;
@@ -3637,7 +4013,7 @@ async function importFromOllamaLibrary(reference, localName) {
   const manifestResponse = await fetchWithTimeout(`${OLLAMA_REGISTRY_BASE_URL}/v2/${parsed.repository}/manifests/${parsed.tag}`, {
     headers: {
       Accept: 'application/vnd.docker.distribution.manifest.v2+json',
-      'User-Agent': 'LIA-Model-Loader/2.0',
+      'User-Agent': 'LIA-X/2.0',
     },
   }, DOWNLOAD_CONNECT_TIMEOUT_MS);
 
@@ -3714,56 +4090,95 @@ async function importFromOllamaLibrary(reference, localName) {
   }
 }
 
-function proxyModelPayload(runtimeStatus) {
+async function proxyModelPayload(runtimeStatus) {
   const activeModel = resolveActiveModel(runtimeStatus);
   const loadedModels = buildLoadedModelList(runtimeStatus);
 
+  // Détection par métadonnées GGUF pour chaque instance chargée. Les détails
+  // GGUF sont mis en cache par chemin+taille+mtime : le coût est nul après le
+  // premier appel, et /v1/models n'est pas un chemin chaud.
+  const declaredByModel = new Map();
+  for (const model of loadedModels) {
+    const identifier = model.filename || model.model;
+    const inspect = await inspectEmbeddingModel(identifier);
+    declaredByModel.set(model.model, inspect);
+  }
+
   return loadedModels
-    .map((model) => ({
-      id: model.model,
-      object: 'model',
-      owned_by: 'lia',
-      permission: [],
-      active_model: activeModel,
-      backend: runtimeStatus?.backend,
-      filename: model.filename,
-      running: model.running,
-      size_vram: model.size_vram,
-      size_vram_source: model.size_vram_source,
-      process_memory_bytes: model.process_memory_bytes,
-      peak_process_memory_bytes: model.peak_process_memory_bytes,
-      gpu_memory_bytes: model.gpu_memory_bytes,
-      gpu_memory_dedicated_bytes: model.gpu_memory_dedicated_bytes,
-      gpu_memory_shared_bytes: model.gpu_memory_shared_bytes,
-      expires_at: model.expires_at,
-      embedding_capable: EMBEDDING_MODEL_CANDIDATES.some((candidate) => {
-        const name = String(model.model || model.filename || '').toLowerCase();
-        return name === candidate.toLowerCase() || name.startsWith(candidate.toLowerCase());
-      }),
-    }))
+    .map((model) => {
+      const inspect = declaredByModel.get(model.model) || { declared: false, source: 'none' };
+      return {
+        id: model.model,
+        object: 'model',
+        owned_by: 'lia',
+        permission: [],
+        active_model: activeModel,
+        backend: runtimeStatus?.backend,
+        filename: model.filename,
+        running: model.running,
+        size_vram: model.size_vram,
+        size_vram_source: model.size_vram_source,
+        process_memory_bytes: model.process_memory_bytes,
+        peak_process_memory_bytes: model.peak_process_memory_bytes,
+        gpu_memory_bytes: model.gpu_memory_bytes,
+        gpu_memory_dedicated_bytes: model.gpu_memory_dedicated_bytes,
+        gpu_memory_shared_bytes: model.gpu_memory_shared_bytes,
+        expires_at: model.expires_at,
+        // embedding_capable : declaration (ce FICHIER est un modele
+        // d'embeddings). Conserve tel quel pour ne pas casser les clients
+        // existants (Open WebUI, AnythingLLM, Cline…).
+        embedding_capable: inspect.declared,
+        // embedding_declared : meme information, nom explicite et non ambigu.
+        embedding_declared: inspect.declared,
+        // embedding_source : comment on l'a determine. 'metadata' = lu dans le
+        // GGUF (fiable) ; 'name' = repli par heuristique de nom (incertain).
+        embedding_source: inspect.source,
+        // embedding_active : etat REEL de l'instance (drapeau --embedding pose
+        // par le controleur au lancement). C'est lui qui dit si
+        // POST /v1/embeddings fonctionnera sur cette instance.
+        embedding_active: model.embedding === true,
+      };
+    })
     .filter((entry, index, array) => array.findIndex((item) => item.id === entry.id) === index);
 }
 
 async function buildFullModelList(runtimeStatus) {
-  const loaded = proxyModelPayload(runtimeStatus);
+  const loaded = await proxyModelPayload(runtimeStatus);
   const loadedIds = new Set(loaded.map((item) => item.id));
   const localModels = await listLocalModels();
 
-  const extras = localModels.map((item) => ({
-    id: item.name,
-    object: 'model',
-    owned_by: 'lia',
-    permission: [],
-    active_model: resolveActiveModel(runtimeStatus),
-    backend: runtimeStatus?.backend,
-    filename: item.filename,
-    running: loadedIds.has(item.name),
-    size_vram: null,
-    expires_at: null,
-    embedding_capable: EMBEDDING_MODEL_CANDIDATES.some((candidate) => {
-      const name = String(item.name || item.filename || '').toLowerCase();
-      return name === candidate.toLowerCase() || name.startsWith(candidate.toLowerCase());
-    }),
+  // Index des instances chargées par identifiant ET par filename : un modèle
+  // local est aussi listé quand il tourne, et c'est la SEULE source pour
+  // connaître son état d'embedding réel.
+  const loadedByName = new Map();
+  for (const entry of loaded) {
+    if (entry.id) loadedByName.set(String(entry.id).toLowerCase(), entry);
+    if (entry.filename) loadedByName.set(String(entry.filename).toLowerCase(), entry);
+  }
+
+  const extras = await Promise.all(localModels.map(async (item) => {
+    const loadedEntry = loadedByName.get(String(item.name).toLowerCase())
+      || loadedByName.get(String(item.filename).toLowerCase());
+    // Métadonnées GGUF d'abord, repli sur le nom (cf. inspectEmbeddingModel).
+    const inspect = await inspectEmbeddingModel(item.name);
+    return {
+      id: item.name,
+      object: 'model',
+      owned_by: 'lia',
+      permission: [],
+      active_model: resolveActiveModel(runtimeStatus),
+      backend: runtimeStatus?.backend,
+      filename: item.filename,
+      running: loadedIds.has(item.name),
+      size_vram: null,
+      expires_at: null,
+      embedding_capable: inspect.declared,
+      embedding_declared: inspect.declared,
+      embedding_source: inspect.source,
+      // Une entrée locale n'a pas d'instance propre : on reprend l'état réel
+      // de l'instance chargée correspondante, sinon false (aucune instance).
+      embedding_active: loadedEntry ? loadedEntry.embedding_active === true : false,
+    };
   }));
 
   const hasLiaLocal = loadedIds.has(PROXY_MODEL_ID);
@@ -3781,6 +4196,10 @@ async function buildFullModelList(runtimeStatus) {
       running: Boolean(runtimeStatus?.running),
       size_vram: null,
       expires_at: runtimeStatus?.started_at || null,
+      // `lia-local` est un alias du modèle actif : il hérite de son état réel.
+      embedding_capable: isEmbeddingDeclaredName(runtimeStatus?.active_model || runtimeStatus?.active_filename),
+      embedding_declared: isEmbeddingDeclaredName(runtimeStatus?.active_model || runtimeStatus?.active_filename),
+      embedding_active: runtimeStatus?.embedding === true,
     });
   }
 
@@ -3833,6 +4252,10 @@ async function buildFullModelList(runtimeStatus) {
       size_vram: null,
       expires_at: null,
       embedding_capable: false,
+      embedding_declared: false,
+      // Fichier encore en cours de téléchargement : aucune instance, donc
+      // l'état d'embedding est nécessairement faux.
+      embedding_active: false,
     });
   }
 
@@ -3894,6 +4317,8 @@ function buildPartialDownloadEntries(loadedModels) {
       expires_at: null,
       context_length: null,
       embedding_capable: false,
+      embedding_declared: false,
+      embedding_active: false,
     });
   }
   return entries;
@@ -3909,7 +4334,7 @@ function translateToDockerHost(url) {
     .replace(/^http:\/\/localhost(:\d+)/i, 'http://host.docker.internal$1');
 }
 
-function getRuntimeBaseUrl(runtimeStatus, requestedModel) {
+function getRuntimeBaseUrl(runtimeStatus, requestedModel, options = {}) {
   if (!runtimeStatus || typeof runtimeStatus !== 'object') {
     return translateToDockerHost(LLAMA_SERVER_BASE_URL);
   }
@@ -3928,6 +4353,21 @@ function getRuntimeBaseUrl(runtimeStatus, requestedModel) {
 
     if (matchedInstance?.server_base_url) {
       return translateToDockerHost(String(matchedInstance.server_base_url).replace(/\/v1\/?$/, '').replace(/\/$/, ''));
+    }
+  }
+
+  // CORRECTIF : /v1/embeddings doit viser l'instance d'embeddings, meme si elle
+  // n'est pas l'instance ACTIVE (le modele de chat reste alors le principal).
+  // Sans cela, une requete d'embeddings sans `model` explicite partait sur le
+  // port du modele de chat, qui n'a pas --embedding → 501.
+  // On ne cible que des instances VRAIMENT en mode embedding : le drapeau
+  // `embedding` vient du controleur, il ne peut pas etre declare par erreur.
+  if (options.embeddingTarget) {
+    const embeddingInstance = instances.find((instance) => (
+      Boolean(instance.running) && instance.embedding === true
+    ));
+    if (embeddingInstance?.server_base_url) {
+      return translateToDockerHost(String(embeddingInstance.server_base_url).replace(/\/v1\/?$/, '').replace(/\/$/, ''));
     }
   }
 
@@ -4025,10 +4465,54 @@ async function proxyOpenAiRequest(req, res, endpoint) {
     const embeddingModelName = isEmbeddingEndpoint
       ? (preferredModel || (await readEmbeddingModelPreference()) || (await resolveEmbeddingModel()))
       : undefined;
-    const isEmbeddingCapable = Boolean(embeddingModelName && EMBEDDING_MODEL_CANDIDATES.some((candidate) => {
-      const name = String(embeddingModelName || '').toLowerCase();
-      return name === candidate.toLowerCase() || name.startsWith(candidate.toLowerCase());
-    }));
+    // Détection par MÉTADONNÉES GGUF (pooling_type / architecture d'encodeur),
+    // avec repli sur le nom. Indispensable : un vrai modèle d'embeddings dont
+    // le nom n'est pas dans la liste (qwen3-embedding-0.6b) doit quand même
+    // recevoir --embedding, sinon /v1/embeddings renvoie 501.
+    const embeddingInspect = isEmbeddingEndpoint && embeddingModelName
+      ? await inspectEmbeddingModel(embeddingModelName)
+      : null;
+    const isEmbeddingCapable = Boolean(embeddingInspect?.declared);
+
+    // AUTO-RÉPARATION : l'instance embeddings tourne mais SANS --embedding.
+    // Le contrôleur a un fast path sur /start (llama-host-controller.ps1 :
+    // « Promoted existing instance as active ») qui promeut une instance déjà
+    // vivante SANS la relancer — le drapeau `embedding` y est ignoré. Sans
+    // l'arrêt explicite ci-dessous, ensureRuntimeReady rapporterait un succès
+    // et llama-server continuerait de répondre 501 sur /v1/embeddings.
+    // On.aligne donc sur ce que fait déjà POST /api/embedding-model.
+    if (isEmbeddingEndpoint && isEmbeddingCapable && embeddingModelName) {
+      const currentInstance = await resolveEmbeddingModelInstance(embeddingModelName);
+      if (currentInstance && currentInstance.embedding !== true) {
+        console.warn('[model-manager] instance embeddings sans --embedding, redemarrage', {
+          model: embeddingModelName,
+          port: currentInstance.port,
+        });
+        try {
+          await controllerRequest('/stop', {
+            method: 'POST',
+            body: JSON.stringify({ model: embeddingModelName }),
+            timeout: 60000,
+            maxRetries: 1,
+          });
+        } catch (stopError) {
+          console.error('[model-manager] arret instance embeddings echoue', stopError?.message || stopError);
+        }
+        try {
+          const restartRequest = await buildModelStartRequest(embeddingModelName);
+          restartRequest.payload.embedding = true;
+          await controllerRequest('/start', {
+            method: 'POST',
+            body: JSON.stringify(restartRequest.payload),
+            timeout: CONTROLLER_START_TIMEOUT_MS,
+            maxRetries: 0,
+          });
+        } catch (startError) {
+          console.error('[model-manager] redemarrage embeddings echoue', startError?.message || startError);
+        }
+      }
+    }
+
     const runtimeStatus = await ensureRuntimeReady(preferredModel || embeddingModelName, {
       embedding: isEmbeddingEndpoint && isEmbeddingCapable,
     });
@@ -4049,11 +4533,34 @@ async function proxyOpenAiRequest(req, res, endpoint) {
       }
     }
 
-    const runtimeUrl = getRuntimeBaseUrl(runtimeStatus, requestedModel);
+    const runtimeUrl = getRuntimeBaseUrl(runtimeStatus, requestedModel, {
+      // Uniquement sur /v1/embeddings, et seulement si le modèle demandé est
+      // bien un modèle d'embeddings (sinon on ne détourne pas le routage).
+      embeddingTarget: isEmbeddingEndpoint && isEmbeddingCapable,
+    });
     const isStreaming = payload.stream === true;
     console.log('[model-manager] proxy request', { endpoint, requestedModel, isRoocodeRequest, runtimeUrl, isStreaming });
 
     const upstream = await proxyToRuntime(runtimeUrl, endpoint, req.method, payload);
+
+    // llama.cpp ne sert POST /v1/embeddings que si le processus a ete lance
+    // avec --embedding. Selon la version, il repond 501 ("not implemented")
+    // ou 404 (route non enregistree). On ne laisse pas passer ces deux codes
+    // bruts : le client (AnythingLLM, Open WebUI, un script) ne peut rien en
+    // faire. On les convertit en 503 + diagnostic actionnable.
+    if (isEmbeddingEndpoint && [404, 501].includes(upstream.statusCode)) {
+      upstream.resume();
+      const state = await describeEmbeddingState(embeddingModelName);
+      console.warn('[model-manager] /v1/embeddings indisponible', {
+        upstream_status: upstream.statusCode,
+        runtime_url: runtimeUrl,
+        ...state,
+      });
+      return err(res, 503,
+        `Le modele d'embeddings ne sert pas /v1/embeddings : l'instance sur le port ${state.port} n'a pas ete lancee avec le drapeau --embedding `
+        + `(upstream ${upstream.statusCode}). ${state.model ? `Modele : ${state.model}. ` : ''}`
+        + 'Rechargez le modele d\'embeddings depuis l\'onglet Modèles (ou via POST /api/embedding-model), ce qui le redemarre avec --embedding.');
+    }
 
     res.status(upstream.statusCode || 502);
     Object.entries(upstream.headers).forEach(([key, value]) => {
@@ -4304,7 +4811,7 @@ app.get('/api/hardware/diagnostic', async (req, res) => {
   }
 });
 
-// Réanalyse matérielle sans réinstallation. Le conteneur model-loader ne peut pas
+// Réanalyse matérielle sans réinstallation. Le conteneur lia-x ne peut pas
 // exécuter PowerShell côté hôte : la demande est déléguée au contrôleur (service
 // Windows), qui relance exactement le même détecteur que l'installateur.
 app.post('/api/hardware/rescan', async (req, res) => {
@@ -4384,12 +4891,25 @@ app.get('/api/version', async (req, res) => {
     const snapshot = await getRuntimeSnapshot();
     const runtime = snapshot.runtime;
     res.json({
-      version: runtime?.backend_label ? `llama.cpp · ${runtime.backend_label}` : 'llama.cpp',
-      device: runtime?.backend_label || 'Runtime indisponible',
-      model_dir: MODEL_STORAGE_DIR,
-      runtime_url: `${getRuntimeBaseUrl(runtime)}/v1`,
-      source: snapshot.source,
-      detail: snapshot.detail || null,
+      // Version du PRODUIT, lue dans package.json. Auparavant ce champ
+      // renvoyait « llama.cpp · Vulkan » : un descripteur de runtime dans un
+      //.endpoint nommé « version », ce qui rendait toute sonde de santé
+      // (comparaison de version, affichage « à jour ») incapable de conclure.
+      name: 'LIA-X',
+      version: LIA_X_VERSION,
+      // Le runtime est désormais un champ À PART : ce n'est pas une version.
+      runtime: {
+        name: 'llama.cpp',
+        // La version du binaire llama.cpp est écrite par detect-hardware.ps1 dans
+        // host-runtime-config.json, PAS dans /status : la lire ici évite de
+        // renvoyer un « build » systématiquement nul.
+        build: (await readRuntimeConfig())?.binary_version || null,
+        device: runtime?.backend_label || 'Runtime indisponible',
+        model_dir: MODEL_STORAGE_DIR,
+        url: `${getRuntimeBaseUrl(runtime)}/v1`,
+        source: snapshot.source,
+        detail: snapshot.detail || null,
+      },
     });
   } catch (error) {
     err(res, 502, error.message);
@@ -4610,6 +5130,11 @@ app.get('/api/embedding-model', async (req, res) => {
     res.json({
       embedding_model: model,
       loaded: !!instance,
+      // Drapeau --embedding reellement pose sur l'instance en cours.
+      // `loaded: true` + `active: false` = le modele tourne mais SANS
+      // --embedding : POST /v1/embeddings renverra 501.
+      active: instance?.embedding === true,
+      declared: isEmbeddingDeclaredName(model),
       port: instance?.port || null,
       server_base_url: instance?.server_base_url || null,
     });
@@ -4703,7 +5228,25 @@ app.get('/api/models/status', async (req, res) => {
         model: item.model,
         device: runtime?.backend_label || 'Runtime indisponible',
         approx_memory_bytes: item.size_vram ?? 0,
+        // Etat reel du drapeau --embedding de l'instance (cf. proxyModelPayload).
+        embedding_active: item.embedding === true,
       })),
+      // Etat de l'instance d'embeddings configuree, en un coup d'oeil :
+      // `model` = choix de l'utilisateur, `active` = le drapeau est reellement
+      // pose sur l'instance en cours. Les deux peuvent diverger.
+      embedding: await (async () => {
+        const preference = await readEmbeddingModelPreference();
+        if (!preference) {
+          return { model: null, loaded: false, active: false };
+        }
+        const instance = await resolveEmbeddingModelInstance(preference);
+        return {
+          model: preference,
+          loaded: Boolean(instance),
+          active: instance?.embedding === true,
+          port: instance?.port || null,
+        };
+      })(),
       logs: logEntries,
       log_entries: logEntries,
       container_log_available: dockerSocketAvailable(),
@@ -5324,7 +5867,11 @@ app.post('/embeddings', async (req, res) => {
   await proxyOpenAiRequest(req, res, '/v1/embeddings');
 });
 
-app.all(['/api/models/*', '/models/*'], async (req, res) => {
+// `/api/models/*` est DÉJÀ traité plus haut (l. ~5652) : Express s'arrête au
+// premier handler qui matche, la seconde déclaration n'était donc atteinte que
+// par `/models/*`. On la retire de la liste pour supprimer l'ambiguïté et le
+// risque de divergence entre deux copies de la même table de routage.
+app.all('/models/*', async (req, res) => {
   const subPath = (req.params[0] || '').replace(/^\/|\/$/g, '');
   const pathMap = {
     'models': '/v1/models',
@@ -5372,12 +5919,31 @@ app.all(['/api/models/*', '/models/*'], async (req, res) => {
   }
 });
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+// ── Injection du token dans la SPA ────────────────────────────────────────
+// index.html est servi en SAME ORIGINE : le token inséré ici n'est lisible que
+// par la page LIA-X elle-même. Un site tiers ne peut pas le lire (le navigateur
+// applique l'origine), et il n'en a pas besoin puisque ses requêtes
+// cross-origin sont bloquées par l'absence de CORS.
+app.get('*', async (req, res, next) => {
+  if (!API_TOKEN_ENFORCED) {
+    res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+    return;
+  }
+  try {
+    const indexPath = path.join(__dirname, 'dist', 'index.html');
+    const html = await fs.promises.readFile(indexPath, 'utf8');
+    const injected = html.replace(
+      /<head>/i,
+      `<head><script>window.__LIA_TOKEN__=${JSON.stringify(API_TOKEN)};</script>`,
+    );
+    res.type('html').send(injected);
+  } catch (error) {
+    next(error);
+  }
 });
 
 const httpServer = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Model Loader] UI: http://0.0.0.0:${PORT} -> controller: ${CONTROLLER_URL}`);
+  console.log(`[LIA-X] UI: http://0.0.0.0:${PORT} -> controller: ${CONTROLLER_URL}`);
 });
 
 // Reconnaissance vocale du mode dialogue. Isolee dans un try/catch : une

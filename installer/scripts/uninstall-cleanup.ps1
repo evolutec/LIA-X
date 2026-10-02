@@ -77,10 +77,15 @@ Stop-LlamaServerProcesses -MaxWaitSec 20
 try {
     $dockerInfo = & docker info 2>$null
     if ($LASTEXITCODE -eq 0) {
-        foreach ($c in @('model-loader', 'lia-postgres', 'anythingllm', 'anything-llm', 'openwebui', 'open-webui', 'librechat', 'librechat-mongo')) {
+        # 'model-loader' est l'ANCIEN nom du conteneur LIA-X (renommé en lia-x).
+        # Il est purge aussi : sur une machine ayant upgrade depuis une version
+        # antérieure, l'ancien conteneur est encore là et garderait le port 3005.
+        foreach ($c in @('lia-x', 'model-loader', 'lia-postgres', 'anythingllm', 'anything-llm', 'openwebui', 'open-webui', 'librechat', 'librechat-mongo')) {
             & docker stop --time 5 $c 2>$null | Out-Null
             & docker rm -f $c 2>$null | Out-Null
         }
+        # Idem pour l'ancienne image : elle ne sert plus mais occupe ~1 Go.
+        & docker rmi lia-model-loader:latest 2>$null | Out-Null
         if ($Full) {
             # -Full supprime aussi l'historique des conversations. Sans ce
             # drapeau, le volume lia-postgres-data est conserve : le

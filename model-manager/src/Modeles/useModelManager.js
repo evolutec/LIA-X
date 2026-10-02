@@ -4,11 +4,11 @@ import { requestNotificationPermission } from "../ModelDownloads/ModelDownloads"
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 
-// Etat et actions de la page d'accueil : chargement/dechargement des modeles,
+// Etat et actions de la page Modèles : chargement/dechargement des modeles,
 // contexte, gpu_layers, telechargements en arriere-plan et diagnostic materiel.
 // Le hook ne rend rien : il expose uniquement des donnees et des callbacks, ce
-// qui garde la vue (AccueilPage.jsx) sans etat et le shell (App.jsx) incapable
-// de modifier le contenu de la page d'accueil.
+// qui garde la vue (ModelesPage.jsx) sans etat et le shell (App.jsx) incapable
+// de modifier le contenu de la page Modèles.
 export function useModelManager() {
   const [huggingfaceUrl, setHuggingfaceUrl] = useState("");
 
@@ -195,7 +195,14 @@ export function useModelManager() {
     const url = `${apiBase}${path}`;
     const init = {
       method: options.method || 'GET',
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      // Token injecté par le serveur dans index.html (même origine). Absent
+      // si LIA_API_TOKEN n'est pas activé : l'en-tête est alors simplement
+      // inutile, et le serveur ne l'exige pas.
+      headers: {
+        'Content-Type': 'application/json',
+        ...(window.__LIA_TOKEN__ ? { 'X-LIA-Token': window.__LIA_TOKEN__ } : {}),
+        ...(options.headers || {}),
+      },
       cache: 'no-store',
       ...options,
     };
@@ -436,6 +443,12 @@ export function useModelManager() {
         runtimeContextLength: null,
         gpuLayers: Number.isFinite(rawGpuLayers) ? rawGpuLayers : null,
         embedding_capable: file.embedding_capable ?? false,
+        // État RÉEL de l'instance (drapeau --embedding posé par le contrôleur)
+        // et provenance de la détection (métadonnées GGUF vs nom de fichier).
+        // Sans ces deux champs, l'UI affichait « Embedding » alors que
+        // /v1/embeddings répondait 501 sur l'instance en cours.
+        embedding_active: file.embedding_active ?? false,
+        embedding_source: file.embedding_source ?? null,
       });
     });
     // Pour chaque modèle chargé, fusionne les infos si déjà dans le dossier, sinon ajoute une ligne "orpheline"
@@ -455,6 +468,8 @@ export function useModelManager() {
           runtimeContextLength: itemContext ?? base.runtimeContextLength ?? null,
           gpuLayers: base.gpuLayers ?? null,
           embedding_capable: item.embedding_capable ?? base.embedding_capable ?? false,
+          embedding_active: item.embedding_active ?? base.embedding_active ?? false,
+          embedding_source: item.embedding_source ?? base.embedding_source ?? null,
         });
       } else {
         fileMap.set(name, {
@@ -470,6 +485,8 @@ export function useModelManager() {
           runtimeContextLength: itemContext ?? null,
           gpuLayers: null,
           embedding_capable: item.embedding_capable ?? false,
+          embedding_active: item.embedding_active ?? false,
+          embedding_source: item.embedding_source ?? null,
         });
       }
     });

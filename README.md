@@ -26,16 +26,23 @@
 ## 🚀 Installation
 
 1. Télécharge `LIA-X-Setup.exe` sur [GitHub Releases](https://github.com/evolutec/LIA-X/releases)
-2. Lance l'installateur en tant qu'administrateur
-3. Suis les instructions à l'écran
+2. Lance-le : Windows demandera l'élévation ( administrateur ), c'est normal —
+   LIA-X installe des services Windows.
+3. Suis les instructions à l'écran (~15 à 35 min : téléchargement du runtime
+   llama.cpp, de Docker et construction des images).
+
+Au démarrage, une page **Réparer / Supprimer / Nouvelle installation** apparaît
+si LIA-X est déjà installé.
+
+> ⚠️ L'installateur n'est **pas signé** : Windows SmartScreen affiche un
+> avertissement « éditeur non reconnu ». Clique sur *Informations complémentaires*
+> → *Exécuter quand même*, et vérifie le SHA256 avec le fichier `SHA256SUMS.txt`
+> publié à côté de l'installateur.
 
 L'installateur détecte ton matériel (GPU, CPU, RAM), choisit le backend le plus
 performant (Vulkan, CUDA, ROCm ou CPU), installe les services Windows, démarre
-Docker et déploie les conteneurs. À la fin, Model Loader s'ouvre dans ton
+Docker et déploie les conteneurs. À la fin, LIA-X s'ouvre dans ton
 navigateur.
-
-Si LIA-X est déjà installé, l'assistant propose **Réparer**, **Supprimer** ou
-**Nouvelle installation**.
 
 ---
 
@@ -43,12 +50,14 @@ Si LIA-X est déjà installé, l'assistant propose **Réparer**, **Supprimer** o
 
 | Élément | Version minimale | Remarque |
 |---------|-----------------|----------|
-| Windows | 11 | Windows 10 non testé |
-| Docker Desktop | Dernière version | Obligatoire pour les interfaces |
+| Windows | 10 (x64) | Windows 11 recommandé ; Windows 7/8.1 refusés par l'installateur |
+| Docker Desktop | Dernière version | **Obligatoire** : sans lui, l'installation s'arrête avec un message explicite |
+| Node.js | 20+ | **Obligatoire** : le frontend est construit sur ta machine pendant l'installation |
 | PowerShell | 7+ (recommandé) | Fonctionne avec 5.1 |
 | RAM | 16 GB minimum | 32 GB recommandés pour des modèles > 7B |
 | GPU | NVIDIA/AMD/Intel | Optionnel mais recommandé pour la vitesse |
 | Espace disque | 20 GB libres | Pour les modèles + Docker |
+| Connexion Internet | Requise | Runtime llama.cpp, images Docker, voix neuronale (~310 Mo) |
 
 ---
 
@@ -80,7 +89,7 @@ LIA-X expose une API compatible OpenAI. Tu peux donc l'utiliser avec :
 
 | Interface | URL | Usage |
 |-----------|-----|-------|
-| **Model Loader** | http://localhost:3005 | Gestion des modèles, import GGUF, statut |
+| **LIA-X** | http://localhost:3005 | Gestion des modèles, import GGUF, statut |
 | **Open WebUI** | http://localhost:3008 | Chat avancé, RAG, plugins (Docker) |
 | **LibreChat** | http://localhost:3007 | Chat multi-modèles (Docker) |
 | **AnythingLLM** | http://localhost:3006 | Chat + workspaces (Docker) |
@@ -100,7 +109,7 @@ LIA-X expose une API compatible OpenAI. Tu peux donc l'utiliser avec :
 ## 🔧 Commandes utiles
 
 ```powershell
-# Vérifier que le Model Loader fonctionne
+# Vérifier que le LIA-X fonctionne
 Start-Process "http://localhost:3005"
 
 # Vérifier le statut du contrôleur
@@ -135,7 +144,7 @@ docker rm $(docker ps -aq)
 
 ### Le dossier des modèles ne s'ouvre pas
 
-- Clique sur le bouton "Ouvrir le dossier" dans Model Loader
+- Clique sur le bouton "Ouvrir le dossier" dans LIA-X
 - Si ça ne marche pas, ouvre manuellement le dossier `%USERPROFILE%\Documents\LIA-X\Models`
 
 ### Désinstaller
@@ -143,6 +152,15 @@ docker rm $(docker ps -aq)
 Lance `LIA-X-Setup.exe` et choisis **Supprimer**, ou passe par
 *Paramètres → Applications → LIA-X → Désinstaller*. Les volumes Docker et tes
 modèles sont conservés ; réinstalle par la suite sans rien perdre.
+
+> Ce qui reste sur le disque après désinstallation, et que le désinstalleur
+> n'efface pas volontairement :
+> - `%USERPROFILE%\Documents\LIA-X\Models` (tes GGUF) ;
+> - le cache de langue OCR (`Models\.tesseract`, ~6 Mo) ;
+> - la voix neuronale Kokoro (`Models\.cache\kokoro`, ~310 Mo).
+>
+> Pour une suppression complète : `Remove-Item "$env:USERPROFILE\Documents\LIA-X" -Recurse -Force`
+> puis `docker volume prune`.
 
 ---
 

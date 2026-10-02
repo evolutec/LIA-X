@@ -17,25 +17,94 @@ const {
   MAX_CHUNKS_PER_EMBED_BATCH,
 } = require('./limits.cjs');
 
-/** Dimensions attendues par la colonne vector(N). Doit suivre schema.sql. */
-const EXPECTED_DIMENSIONS = 768;
+/**
+ * Aligne la base sur la dimension RÉELLEMENT produite par le modèle
+ * d'embeddings sélectionné, au lieu de la supposer égale à 768.
+ *
+ * Pourquoi c'était nécessaire : la détection par métadonnées GGUF a rendu
+ * sélectionnables des modèles autres que nomic (qwen3-embedding-0.6b,
+ * embeddinggemma-300m…), dont la dimension diffère. Avec une constante 768,
+ * ingérer un document avec l'un d'eux échouait sur une erreur demandant de
+ * modifier le schéma SQL à la main — un défaut que le produit ne peut pas
+ * demander à l'utilisateur.
+ *
+ * pgvector fige la dimension dans le type de la colonne : elle est donc lue
+ * depuis PostgreSQL, puis alignée si besoin (cf. repository.cjs).
+ *
+ * @returns {Promise<{dimensions:number|null, migrated:boolean, purged:number}>}
+ */
+// Cache mémoire de la dimension de la colonne. La lire en base à chaque
+// recherche coûtait une requête pg_attribute PAR MESSAGE (search() est le
+// chemin chaud), pour une valeur qui ne change que lorsque NOUS la changeons.
+let cachedEmbeddingDimension;
+let cachedEmbeddingDimensionAt = 0;
+const DIMENSION_CACHE_TTL_MS = 60000;
+
+async function currentEmbeddingDimension() {
+  const now = Date.now();
+  if (cachedEmbeddingDimension !== undefined
+    && (now - cachedEmbeddingDimensionAt) < DIMENSION_CACHE_TTL_MS) {
+    return cachedEmbeddingDimension;
+  }
+  const dim = await ragRepository.getEmbeddingDimension();
+  cachedEmbeddingDimension = dim;
+  cachedEmbeddingDimensionAt = now;
+  return dim;
+}
+
+/**
+ * @param {number[][]} vectors  vecteurs nouvellement produits
+ * @param {object}  [options]
+ * @param {boolean} [options.allowMigrate=true]  false sur les chemins de
+ *        LECTURE : une recherche ne doit jamais exécuter de DDL ni purger la
+ *        table. Elle se contente de vérifier et d'expliquer.
+ */
+async function ensureVectorDimensions(vectors, options = {}) {
+  const allowMigrate = options.allowMigrate !== false;
+  const actual = vectors[0]?.length ?? null;
+  if (!Number.isInteger(actual) || actual <= 0) {
+    throw new Error('Le modèle d’embeddings a renvoyé un vecteur vide : dimension indéterminée.');
+  }
+
+  const expected = await currentEmbeddingDimension();
+  if (expected === actual) {
+    return { dimensions: actual, migrated: false, purged: 0 };
+  }
+
+  // Chemin de lecture : on refuse, on ne migre pas. Un ALTER TABLE + DELETE
+  // déclenché par une recherche ouvrirait une transaction DDL au pire moment
+  // et purgerait l'index sous les pieds de l'utilisateur.
+  if (!allowMigrate) {
+    throw new Error(
+      `Le modèle d’embeddings produit des vecteurs de ${actual} dimension(s) `
+      + `mais la base en attend ${expected ?? 'inconnue'}. `
+      + 'Ré-ingérez un document pour réaligner la base automatiquement, '
+      + 'ou changez de modèle d’embeddings.',
+    );
+  }
+
+  const result = await ragRepository.migrateEmbeddingDimension(actual);
+  // La migration vient de changer la colonne : le cache doit sauter.
+  cachedEmbeddingDimension = undefined;
+  cachedEmbeddingDimensionAt = 0;
+  if (!result.changed) {
+    throw new Error(
+      `Le modèle d’embeddings produit des vecteurs de ${actual} dimension(s) `
+      + `mais la base en attend ${expected ?? 'inconnue'} : ${result.reason || 'alignement impossible'}.`,
+    );
+  }
+
+  // Les fragments de l'ancienne dimension ont été purgés : les fichiers
+  // concernés doivent être réindexés, on le dit explicitement plutôt que de
+  // laisser une recherche silencieusement vide.
+  return { dimensions: actual, migrated: true, purged: result.purged };
+}
 
 // Fenêtre de contexte injectée dans le prompt, en caractères.
 const DEFAULT_MAX_CONTEXT_CHARS = 6000;
 
 function hashContent(text) {
   return crypto.createHash('sha256').update(String(text), 'utf8').digest('hex');
-}
-
-function checkVectorDimensions(vectors) {
-  const wrong = vectors.find((vector) => vector.length !== EXPECTED_DIMENSIONS);
-  if (wrong) {
-    throw new Error(
-      `Le modèle d’embeddings a renvoyé des vecteurs de ${wrong.length} dimension(s), `
-      + `alors que la base en attend ${EXPECTED_DIMENSIONS}. Changez de modèle d’embeddings `
-      + 'ou adaptez la colonne avec ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(N).',
-    );
-  }
 }
 
 /**
@@ -105,7 +174,7 @@ async function ingestDocument({ folderId, content, contentBase64, fileName, titl
   // Embeddings par lots : un file de plusieurs milliers de fragments doit
   // être découpé en requêtes, sinon le modèle sature et la requête expire.
   const vectors = await embedTexts(chunks, { batchSize: MAX_CHUNKS_PER_EMBED_BATCH });
-  checkVectorDimensions(vectors);
+  await ensureVectorDimensions(vectors);
 
   // Taille réelle du fichier source, pour la colonne « Taille » de
   // l'explorateur. `buffer` n'existe que sur le chemin base64 : sur le chemin
@@ -150,7 +219,9 @@ async function search(query, { folderIds = [], limit = 5, minSimilarity = 0.3 } 
 
   const vector = await embedText_(text);
   if (!vector) return [];
-  checkVectorDimensions([vector]);
+  // Chemin de LECTURE : aucune migration ici. Si la dimension a changé, il
+  // faut ré-ingérer — une recherche ne purge pas la base.
+  await ensureVectorDimensions([vector], { allowMigrate: false });
 
   return ragRepository.searchChunks(toPgVector(vector), {
     folderIds,
@@ -220,7 +291,7 @@ module.exports = {
   buildSystemPrompt,
   hashContent,
   formatBytes,
-  EXPECTED_DIMENSIONS,
+  ensureVectorDimensions,
   DEFAULT_MAX_CONTEXT_CHARS,
   MAX_FILE_BYTES,
   MAX_DOCUMENT_CHARS,

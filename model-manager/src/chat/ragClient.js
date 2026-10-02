@@ -18,7 +18,14 @@ async function callApi(path, options = {}) {
   try {
     const response = await fetch(`${apiBase}${path}`, {
       method: fetchOptions.method || 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+    'Content-Type': 'application/json',
+    // Token API (même origine, injecté par le serveur). Sans effet si la
+    // protection n'est pas activée côté serveur.
+    ...(typeof window !== 'undefined' && window.__LIA_TOKEN__
+      ? { 'X-LIA-Token': window.__LIA_TOKEN__ }
+      : {}),
+  },
       cache: 'no-store',
       signal: signal || controller?.signal,
       ...fetchOptions,

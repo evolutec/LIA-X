@@ -13,13 +13,13 @@
   "docker": {
     "network": "lia-network",
     "images": {
-      "modelLoader": "lia-model-loader:latest",
+      "modelLoader": "lia-x:latest",
       "anythingllm": "mintplexlabs/anythingllm:latest",
       "openWebUi": "ghcr.io/open-webui/open-webui:main",
       "libreChat": "ghcr.io/danny-avila/librechat:latest"
     },
     "liaImages": {
-      "modelLoader": "lia-model-loader:latest",
+      "modelLoader": "lia-x:latest",
       "anythingllm": "lia-anythingllm:latest",
       "openWebUi": "lia-openwebui:latest",
       "libreChat": "lia-librechat:latest"

@@ -1,5 +1,5 @@
 /* ====================================================================
- * Page « Accueil » : hero, import GGUF, table des modeles, modales.
+ * Page « Modèles » : hero, import GGUF, table des modeles, modales.
  * --------------------------------------------------------------------
  * Regles extraites de src/App.css. Le socle commun (variables, .app-shell,
  * .card, .btn, .table-*) reste dans App.css : seules les classes propres a
@@ -195,11 +195,36 @@
   display: inline-flex;
   width: 1.4rem;
   height: 1.4rem;
-  border-radius: 50%;
-  align-items: center;
-  justify-content: center;
   flex-shrink: 0;
   position: relative;
+  /* Les icônes sont désormais des SVG inline (plus d'<img> distant'). On borne
+     quand même la taille : un média échappant à son conteneur s'afficherait
+     sinon à sa taille naturelle — c'est ainsi qu'un logo distant de 4096 px
+     avait étiré toute la page à 4151 px. */
+  max-width: 1.4rem;
+  max-height: 1.4rem;
+}
+
+.download-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* URL de l'endpoint : elle ne doit JAMAIS se couper au milieu d'un mot
+   (« http://127.0.0.1:300 / 5/v1 »). On la laisse déborder plutôt que de la
+   morceler, et on la compacte pour qu'elle tienne dans sa carte. */
+.endpoint-url {
+  font-size: 0.9rem;
+}
+
+.endpoint-url code {
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+  max-width: 100%;
 }
 
 .download-grid {
@@ -229,18 +254,60 @@
   gap: 12px;
 }
 
+.table-legend-hint {
+  opacity: 0.75;
+  font-style: italic;
+}
+
 .table-wrap {
   overflow-x: auto;
   border-radius: 18px;
   border: 1px solid var(--border);
   background: rgba(4, 12, 24, 0.54);
   width: 100%;
+  /* La table comporte treize colonnes : à 1440 px de large il reste ~220 px
+     de débordement. Plutôt que de masquer des colonnes (on perdrait des
+     contrôles), le tableau défile horizontalement — mais la barre doit être
+     VISIBLE, sinon les colonnes de droite paraissent simplement manquantes. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+  overscroll-behavior-x: contain;
+}
+
+.table-wrap::-webkit-scrollbar {
+  height: 10px;
+}
+
+.table-wrap::-webkit-scrollbar-track {
+  background: rgba(148, 163, 184, 0.06);
+  border-radius: 8px;
+}
+
+.table-wrap::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.4);
+  border-radius: 8px;
+}
+
+.table-wrap::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.6);
 }
 
 .model-table {
   width: 100%;
-  min-width: 980px;
+  min-width: 1180px;
   border-collapse: collapse;
+}
+
+/* Colonne « Nom » : elle porte l'information la plus longue de la ligne (les
+   noms de modèles vont de 10 à 40 caractères, sans espace). Sans largeur
+   MINIMALE, le navigateur sacrifie cette colonne en premier — les cellules
+   voisines (contexte, GPU) contiennent des barres et des libellés très longs,
+   donc c'est toujours le nom qui se retrouvait réduit à 3 lettres par ligne.
+   `width` sert de largeur souhaitée, `min-width` empêche l'écrasement. */
+.model-table th.col-name-header,
+.model-table td.col-name {
+  width: 26%;
+  min-width: 260px;
 }
 
 .model-table th {

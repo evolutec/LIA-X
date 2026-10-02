@@ -7,7 +7,7 @@ LIA expose deux couches principales d'API :
 - **Contrôleur hôte** (`controller`), service Windows / script PowerShell sur le port `13579`
   - gestion des instances `llama-server`
   - démarrage / arrêt / redémarrage de modèles
-- **Model Loader / UI** (`model-manager`), serveur Node.js sur `3002`
+- **LIA-X / UI** (`model-manager`), serveur Node.js sur `3005`
   - proxy OpenAI compatible `/v1`
   - API de découverte, chargement et sélection des modèles
 
@@ -16,20 +16,20 @@ LIA expose deux couches principales d'API :
 ### Open WebUI
 
 - `ENABLE_OPENAI_API=true`
-- `OPENAI_API_BASE_URL=http://model-loader:3002`
-- `OPENAI_API_BASE_URLS=http://model-loader:3002`
+- `OPENAI_API_BASE_URL=http://lia-x:3005`
+- `OPENAI_API_BASE_URLS=http://lia-x:3005`
 - `OPENAI_API_KEYS=not-used`
 - `OPENAI_API_KEY=not-used`
 
-Open WebUI utilise le proxy OpenAI du Model Loader pour parler au modèle principal via `lia-local`.
+Open WebUI utilise le proxy OpenAI du LIA-X pour parler au modèle principal via `lia-local`.
 
 ### AnythingLLM
 
 - `LLM_PROVIDER=generic-openai`
-- `GENERIC_OPEN_AI_BASE_PATH=http://model-loader:3002/v1`
+- `GENERIC_OPEN_AI_BASE_PATH=http://lia-x:3005/v1`
 - `GENERIC_OPEN_AI_MODEL_PREF=lia-local`
 
-AnythingLLM envoie ses requêtes OpenAI vers le Model Loader et préfère le modèle stable `lia-local`.
+AnythingLLM envoie ses requêtes OpenAI vers le LIA-X et préfère le modèle stable `lia-local`.
 
 ## Contrôleur hôte (port 13579)
 
@@ -51,14 +51,18 @@ AnythingLLM envoie ses requêtes OpenAI vers le Model Loader et préfère le mod
 
 > Important : le contrôleur **n'expose pas** d'API OpenAI `/v1/*`. Il gère uniquement le runtime et le cycle de vie des instances.
 
-## Model Loader / serveur UI (port 3002)
+## LIA-X / serveur UI (port 3002)
 
 ### API de gestion des modèles
 
 - `GET /health`
-  - Vérifie que le serveur Model Loader est disponible.
+  - Vérifie que le serveur LIA-X est disponible.
 - `GET /api/version`
-  - Renvoie la version, le backend, et l'URL runtime.
+  - Renvoie la version **du produit** : `{ name: "LIA-X", version: "2.0.0" }`,
+    lue dans `model-manager/package.json`.
+  - Les informations du **runtime** sont dans un objet séparé `runtime`
+    (`name`, `build`, `device`, `model_dir`, `url`, `source`) : ce n'est pas
+    une version et ne doit pas être lu comme telle.
 - `GET /api/models/available`
   - Liste les fichiers GGUF disponibles sur disque.
 - `GET /api/models`
@@ -106,6 +110,6 @@ AnythingLLM envoie ses requêtes OpenAI vers le Model Loader et préfère le mod
 
 ## Résumé des attentes
 
-- Le **modèle principal** doit être accessible via le proxy OpenAI du Model Loader sur `/v1/*` avec `model=lia-local` ou sans préciser de `model`.
+- Le **modèle principal** doit être accessible via le proxy OpenAI du LIA-X sur `/v1/*` avec `model=lia-local` ou sans préciser de `model`.
 - Les **modèles chargés** doivent être visibles via `/api/models`, `/api/modeles` et `/modeles`.
 - Le **contrôleur** sur `13579` est uniquement un backend de gestion de runtime, pas un endpoint utilisateur OpenAI.

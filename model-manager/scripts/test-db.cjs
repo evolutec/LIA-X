@@ -1,4 +1,4 @@
-// Test de la couche base de données hors conteneur model-loader.
+// Test de la couche base de données hors conteneur lia-x.
 //
 // Usage : node scripts/test-db.js
 // Prérequis : le conteneur lia-postgres tourne sur le réseau lia-network.

@@ -641,6 +641,96 @@ async function getWorkspaceFolders(workspaceId) {
   return result.rows;
 }
 
+/**
+ * Dimension ACTUELLE de la colonne chunks.embedding.
+ *
+ * pgvector fige la dimension dans le type de la colonne (vector(N)) : elle
+ * n'est pas déductible du code, seulement de PostgreSQL. C'est pourquoi elle est
+ * lue ici plutôt que codée en dur dans service.cjs.
+ * @returns {Promise<number|null>} null si la table n'existe pas encore
+ */
+async function getEmbeddingDimension() {
+  const result = await query(
+    `SELECT a.atttypmod AS dims
+       FROM pg_attribute a
+       JOIN pg_class c ON c.oid = a.attrelid
+      WHERE c.relname = 'chunks'
+        AND a.attname = 'embedding'
+        AND a.attnum > 0
+        AND NOT a.attisdropped`,
+  );
+  const dims = result.rows[0]?.dims;
+  return Number.isInteger(Number(dims)) ? Number(dims) : null;
+}
+
+/**
+ * Aligne la colonne chunks.embedding sur la dimension réellement produite par le
+ * modèle d'embeddings choisi.
+ *
+ * Changer de modèle (nomic 768 → qwen3-embedding-0.6b 1024, etc.) impose un
+ * ALTER TYPE. Deux contraintes pgvector :
+ *  1. l'index HNSW est lié à la dimension : il doit être SUPPRIMÉ avant
+ *     l'ALTER, puis recréé après ;
+ *  2. les lignes existantes contiennent des vecteurs de l'ancienne dimension :
+ *     PostgreSQL refuse l'ALTER tant qu'elles sont là (aucun transtypage
+ *     vectoriel n'est possible). Elles sont donc purgées — de toute façon
+ *     inexploitables, les similarités n'étant plus calculables.
+ *
+ * L'opération est transactionnelle : en cas d'échec, la base reste utilisable
+ * avec l'ancienne dimension et l'ingestion repartira au prochain appel.
+ *
+ * @returns {Promise<{changed:boolean, previous:number|null, purged:number, reason?:string}>}
+ */
+async function migrateEmbeddingDimension(targetDim) {
+  const dimension = Number(targetDim);
+  if (!Number.isInteger(dimension) || dimension <= 0) {
+    return { changed: false, previous: null, purged: 0, reason: `dimension invalide: ${targetDim}` };
+  }
+  // Garde-fou pgvector : un index HNSW ne peut pas dépasser 2000 dimensions.
+  if (dimension > 2000) {
+    return {
+      changed: false,
+      previous: null,
+      purged: 0,
+      reason: `dimension ${dimension} > 2000, au-delà de la limite de l'index HNSW de pgvector`,
+    };
+  }
+
+  const previous = await getEmbeddingDimension();
+  if (previous === dimension) {
+    return { changed: false, previous, purged: 0 };
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    // La dimension vient de la longueur d'un vecteur réellement produit par le
+    // modèle : c'est un entier, jamais une saisie utilisateur.
+    const purged = await client.query(
+      'DELETE FROM chunks WHERE embedding IS NOT NULL',
+    );
+    await client.query('DROP INDEX IF EXISTS chunks_embedding_hnsw_idx');
+    await client.query(
+      `ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(${dimension})`,
+    );
+    await client.query(
+      'CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx ON chunks USING hnsw (embedding vector_cosine_ops)',
+    );
+    await client.query('COMMIT');
+    console.log(
+      `[rag] dimension d'embeddings alignée : ${previous ?? '?'} -> ${dimension} `
+      + `(${purged.rowCount} fragment(s) purgé(s), réindexation requise)`,
+    );
+    return { changed: true, previous, purged: purged.rowCount };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('[rag] échec alignement dimension :', error.message);
+    return { changed: false, previous, purged: 0, reason: error.message };
+  } finally {
+    client.release();
+  }
+}
+
 async function setWorkspaceFolders(workspaceId, folderIds) {
   const ids = Array.isArray(folderIds)
     ? [...new Set(folderIds.filter((id) => typeof id === 'string'))]
@@ -725,4 +815,6 @@ module.exports = {
   listConversationsByWorkspace,
   searchChunks,
   countChunks,
+  getEmbeddingDimension,
+  migrateEmbeddingDimension,
 };

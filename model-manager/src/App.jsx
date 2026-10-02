@@ -7,14 +7,14 @@ import Documentation from "./Documentation/Documentation";
 import ChatPage from "./chat/ChatPage";
 import DocumentsPage from "./Documents/DocumentsPage";
 import StatusToasts from "./StatusToasts/StatusToasts";
-import AccueilPage from "./Accueil/AccueilPage";
+import ModelesPage from "./Modeles/ModelesPage";
 import SettingsPage from "./Settings/SettingsPage";
-import { useModelManager } from "./Accueil/useModelManager";
+import { useModelManager } from "./Modeles/useModelManager";
 
 // Pages dont le contenu occupe toute la hauteur de la fenetre, sans defilement
 // de la page : chacune de leurs colonnes defile dans son propre conteneur.
 //
-// Les autres pages (Accueil, Logs, Performance, Documentation, Parametres)
+// Les autres pages (Modèles, Logs, Performance, Documentation, Parametres)
 // gardent un defilement normal. Verrouiller .app-shell globalement cassait la
 // page d'accueil : le tableau des modeles devenait inatteignable.
 const FULL_HEIGHT_PAGES = ["chat", "documents"];
@@ -25,7 +25,7 @@ const FULL_HEIGHT_PAGES = ["chat", "documents"];
 const NAV_ITEMS = [
   { key: 'chat', label: 'Chat' },
   { key: 'documents', label: 'Documents' },
-  { key: 'home', label: 'Accueil' },
+  { key: 'home', label: 'Modèles' },
   { key: 'performance', label: 'Performance' },
   { key: 'logs', label: 'Logs' },
   { key: 'documentation', label: 'Documentation' },
@@ -34,7 +34,7 @@ const NAV_ITEMS = [
 
 // Coquille de l'application : navigation entre les pages, en-tete, barre de
 // progression, overlays (loader, telechargements, toasts). Tout l'etat des
-// modeles vit dans useModelManager() et n'est transmis a l'accueil qu'au
+// modeles vit dans useModelManager() et n'est transmis a la page qu'au
 // moment du rendu : la coquille ne connait pas le contenu des pages.
 function App() {
   const [currentPage, setCurrentPage] = useState("home");
@@ -75,7 +75,7 @@ function App() {
       return <SettingsPage />;
     }
 
-    return <AccueilPage {...manager} />;
+    return <ModelesPage {...manager} />;
   }
 
   return (

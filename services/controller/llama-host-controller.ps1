@@ -580,7 +580,7 @@ function Convert-LegacyState([hashtable]$state) {
         }
         # Aucun PID : aucun llama-server ne tourne → purger aussi les champs
         # active_* orphelins. Sans ça le state conservait un « modèle principal »
-        # fantôme (affiché dans le model-loader et /status) alors qu'aucun GGUF
+        # fantôme (affiché dans le lia-x et /status) alors qu'aucun GGUF
         # n'existait plus sur le disque.
         $state.active_model    = ''
         $state.active_filename = ''
@@ -754,7 +754,7 @@ function Get-ConsistentState {
     # ── 5bis. Purger le « modèle principal » quand plus aucune instance ──────
     # Après suppression des fantômes (running=false), il ne doit plus rester de
     # active_model/active_filename/active_path orphelins dans le state : sinon
-    # le model-loader (et /status) annonçait un modèle principal inexistant.
+    # le lia-x (et /status) annonçait un modèle principal inexistant.
     if (@($state.instances).Count -eq 0) {
         if ($state.active_model -or $state.active_filename -or $state.active_path) {
             $state.active_model    = ''
@@ -777,7 +777,7 @@ function Get-ConsistentState {
     # ── 7. Réparation : JAMAIS dans le chemin de lecture ──────────────────
     # Un Repair-DeadInstances ici bloquait /status jusqu'à 30-40 s (attente de
     # démarrage d'un llama-server) : la boucle HTTP mono-thread ne pouvait plus
-    # répondre, ce qui produisait des « fetch failed » côté model-loader après
+    # répondre, ce qui produisait des « fetch failed » côté lia-x après
     # chaque redémarrage du controller. On se contente de SIGNALER le besoin ;
     # le watchdog (exécuté quand la boucle est inactive) fera la réparation.
     if (-not $Global:StartupInProgress -and -not $Global:RepairInProgress) {
@@ -929,6 +929,16 @@ function Get-LiveInstances([hashtable]$config) {
             last_error      = ""
             server_base_url = "http://127.0.0.1:$port/v1"
             proxy_id        = "$($config.proxy_model_id)-$port"
+            # BUG : le drapeau --embedding n'etait pas recopie depuis l'etat
+            # sauvegarde lors de cette reconstruction. Comme /status expose les
+            # instances issues de Get-LiveInstances, le champ disparaissait a
+            # CHAQUE appel : le model-manager lisait toujours `embedding`
+            # absent, concluait « pas lance avec --embedding », et arretait puis
+            # relancait le modele a chaque requete /v1/embeddings (reload de
+            # plusieurs minutes). La restauration apres redemarrage du controleur
+            # (:2540) rejouait bien le drapeau dans l'etat — il etait simplement
+            # perdu ici, a la relecture.
+            embedding       = [bool]$savedInstance.embedding
         }
     }
 
@@ -1106,7 +1116,7 @@ function Resolve-InstanceRecord([string]$identifier) {
  * -NoRefresh rend la valeur en cache SANS la recalculer : c est ce qu utilise
  * le chemin de requete. Le rafraichissement reel est fait par le watchdog,
  * qui ne tourne que lorsque le controleur est inactif. Une valeur legerement
- * fraiche vaut mieux qu une requete bloquee, et le model-loader retombe de toute
+ * fraiche vaut mieux qu une requete bloquee, et le lia-x retombe de toute
  * facon sur le WorkingSet quand la carte est absente.
  #>
 function Get-GpuProcessMemoryMap([switch]$NoRefresh) {
@@ -1139,7 +1149,7 @@ function Get-GpuProcessMemoryMap([switch]$NoRefresh) {
         }
     } catch {
         # Classe absente (pilote ancien / Windows Server) : table vide, le
-        # model-loader retombera sur le WorkingSet du processus.
+        # lia-x retombera sur le WorkingSet du processus.
         $map = @{}
     }
 
@@ -1327,7 +1337,7 @@ function Open-FolderInExplorer([string]$targetPath) {
     if ($sessionId -eq 0) {
         # Service NSSM = LocalSystem/session 0 : l'Explorateur ne peut pas
         # s'afficher sur le bureau de l'utilisateur. On le signale pour que le
-        # model-loader propose le raccourci .url (qui, lui, fonctionne toujours).
+        # lia-x propose le raccourci .url (qui, lui, fonctionne toujours).
         $result.mode = 'session0'
         $result.message = "Service en session 0 : ouverture de l'Explorateur impossible depuis le service. Chemin : $targetPath"
         return $result
@@ -1734,6 +1744,15 @@ function Start-LlamaProcess([hashtable]$body, [switch]$NoWait) {
         $savedEntry.sleep_idle_seconds = $sleepIdleSecs
         $savedEntry.server_base_url    = "http://127.0.0.1:$port/v1"
         $savedEntry.proxy_id           = "$($config.proxy_model_id)-$port"
+        # BUG : le drapeau embedding n'etait ecrit que sur la branche « nouvelle
+        # entree » (ci-dessous). Or le cas normal est celui-ci : l'entree existe
+        # deja ( meme port apres un stop/start ). Le drapeau restait donc absent
+        # de l'etat, et le model-manager estimait en permanence
+        # `embedding !== true` → il arrete et relance le modele a CHAQUE appel
+        # /v1/embeddings (reload de plusieurs minutes a chaque appel), et
+        # /api/embedding-model annonçait a tort `active: false`.
+        # On suit donc exactement la meme regle que la branche « nouvelle entree ».
+        $savedEntry.embedding = ($body.ContainsKey('embedding') -and [bool]$body.embedding)
         if ($body.estimated_vram_bytes) { $savedEntry.estimated_vram_bytes = [int64]$body.estimated_vram_bytes }
         if (-not $savedEntry.path -and $record.file.FullName) { $savedEntry.path = $record.file.FullName }
     } else {
@@ -2402,6 +2421,17 @@ function Get-RuntimeStatus {
             # champ, le chat ne peut pas distinguer ces deux cas.
             sleep_idle_seconds   = if ($null -ne $instance.sleep_idle_seconds) { [int]$instance.sleep_idle_seconds } else { $null }
             gpu_layers           = if ($null -ne $instance.gpu_layers -and [int]$instance.gpu_layers -ge 0) { [int]$instance.gpu_layers } else { $null }
+            # ── Drapeau --embedding (cf. Start-LlamaProcess) ──────────────────
+            # BUG : absent de cette liste blanche. L'etat le conserve bien
+            # (Get-LiveInstances + la branche « entree existante » de
+            # Start-LlamaProcess l'ecrivent tous les deux), mais /status ne
+            # l'exposait pas : le model-manager lisait toujours `undefined`,
+            # jugeait l'instance « pas lancee avec --embedding » et relancait
+            # le modele a CHAQUE requete /v1/embeddings — sans jamais pouvoir
+            # constater que la correction avait fonctionne. Sans ce champ, ni
+            # /v1/models (embedding_active) ni /api/embedding-model (active)
+            # ne peuvent etre vrais.
+            embedding            = [bool]$instance.embedding
             # ── Mesures réelles lues sur l'hôte Windows (llama-server.exe) ──
             # process_* : WorkingSet du processus (backend CPU surtout).
             # gpu_*     : mémoire GPU attribuée au processus par Windows.
@@ -2429,7 +2459,7 @@ function Get-RuntimeStatus {
     return @{
         # P-BASSE : le format d'état est versionné (migration auto dans
         # Convert-LegacyState). On l'expose dans /status pour que les clients
-        # (model-loader, tests de fumée) puissent vérifier la compatibilité.
+        # (lia-x, tests de fumée) puissent vérifier la compatibilité.
         schema_version     = $script:SchemaVersionForStatus
         running            = [bool]($instances.Count -gt 0)
         pid                = if ($activeInstance) { $activeInstance.pid } else { $null }
@@ -2544,7 +2574,7 @@ try {
             # -NoWait : la restauration ne doit PAS bloquer le démarrage du
             # controller. Avant, /status restait injoignable 40-90 s après un
             # redémarrage (le temps de charger les GGUF) → « fetch failed » côté
-            # model-loader. Le warmup est constaté par les cycles suivants.
+            # lia-x. Le warmup est constaté par les cycles suivants.
             Start-LlamaProcess $body -NoWait | Out-Null
             Write-Host "[Controller] ✅ Instance restaurée : $($instance.model) port=$($instance.port)"
         } catch {
@@ -2702,7 +2732,7 @@ Write-Host "[Controller] Watchdog intégré à la boucle HTTP (idle >= 5 s, tout
 # chaque timeout de 1 s en ABANDONNANT l'opération précédente : les connexions
 # étaient alors captées par une opération abandonnée pendant que le code bloquait
 # dans EndAcceptTcpClient sur la plus récente. Résultat observé : requêtes perdues,
-# connexions coupées ("fetch failed" côté model-loader) et latences de 3 à 30 s.
+# connexions coupées ("fetch failed" côté lia-x) et latences de 3 à 30 s.
 $pendingAccept = $listener.BeginAcceptTcpClient($null, $null)
 
 while ($true) {
@@ -2812,7 +2842,7 @@ while ($true) {
             'POST /rescan-hardware' {
                 # Réanalyse matérielle sans réinstallation : ré-exécute exactement le
                 # même détecteur que l'installateur (source unique de vérité), puis
-                # renvoie le nouveau profil. Le conteneur model-loader ne peut pas
+                # renvoie le nouveau profil. Le conteneur lia-x ne peut pas
                 # lancer PowerShell côté hôte : cette route est la seule voie depuis
                 # l'interface.
                 # detect-hardware.ps1 est deploye dans {app}\installer\scripts\.

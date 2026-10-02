@@ -17,9 +17,8 @@ const { embedTexts, toPgVector } = require('./embeddings.cjs');
 const {
   MAX_FILE_BYTES, MAX_DOCUMENT_CHARS, MAX_CHUNKS_PER_DOCUMENT, MAX_CHUNKS_PER_EMBED_BATCH,
 } = require('./limits.cjs');
-
-
-const EXPECTED_DIMENSIONS = 768;
+// Source unique de la vérification de dimension (cf. service.cjs).
+const { ensureVectorDimensions } = require('./service.cjs');
 
 function formatBytes(bytes) {
   if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} Mo`;
@@ -124,7 +123,7 @@ async function runJob({ documentId, buffer, fileName, isBase64 }) {
       const batchChunks = chunks.slice(offset, end);
       // eslint-disable-next-line no-await-in-loop
       const vectors = await embedTexts(batchChunks, { batchSize: MAX_CHUNKS_PER_EMBED_BATCH });
-      checkDimensions(vectors);
+      await ensureVectorDimensions(vectors);
 
       // eslint-disable-next-line no-await-in-loop
       await ragRepository.appendChunks({
@@ -152,15 +151,11 @@ async function runJob({ documentId, buffer, fileName, isBase64 }) {
   }
 }
 
-function checkDimensions(vectors) {
-  const wrong = vectors.find((vector) => vector.length !== EXPECTED_DIMENSIONS);
-  if (wrong) {
-    throw new Error(
-      `Le modèle d’embeddings a renvoyé des vecteurs de ${wrong.length} dimension(s), `
-      + `alors que la base en attend ${EXPECTED_DIMENSIONS}.`,
-    );
-  }
-}
+// La vérification de dimension est Delegates à service.cjs : c'est le seul
+// endroit qui sait lire la dimension RÉELLE de la colonne chunks.embedding et
+// l'aligner si le modèle d'embeddings a changé (cf. ensureVectorDimensions).
+// Une constante 768 en dur ici aurait de nouveau casse l'ingestion avec
+// qwen3-embedding-0.6b, embeddinggemma-300m, etc.
 
 /** Demande l'annulation du travail en cours. */
 function cancelCurrent() {
@@ -173,4 +168,4 @@ function getQueueState() {
   return { running: Boolean(currentJob), currentDocumentId: currentJob?.id ?? null };
 }
 
-module.exports = { enqueueDocument, cancelCurrent, getQueueState, formatBytes, EXPECTED_DIMENSIONS };
+module.exports = { enqueueDocument, cancelCurrent, getQueueState, formatBytes };
