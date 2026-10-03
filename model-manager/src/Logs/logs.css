@@ -1,0 +1,77 @@
+/* ====================================================================
+ * Page « Journaux » : panneau de logs, filtres, lignes et niveaux.
+ * --------------------------------------------------------------------
+ * Regles extraites de src/App.css. Le socle commun (variables, .app-shell,
+ * .card, .btn, .table-*) reste dans App.css : seules les classes propres a
+ * cette page ont ete deplacees ici.
+ */
+
+.logs-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 18px;
+  padding: 20px;
+  max-height: calc(100vh - 120px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.log-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  font-weight: 700;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  flex-shrink: 0;
+}
+
+.log-filter-select {
+  appearance: none;
+  background: rgba(15, 23, 42, 0.95);
+  color: var(--text);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 12px;
+  padding: 8px 12px;
+  font-size: 0.95rem;
+  min-width: 150px;
+}
+
+.log-lines {
+  padding: 18px;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  background: rgba(15, 23, 42, 0.9);
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+  border-bottom-left-radius: 18px;
+  border-bottom-right-radius: 18px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.log-line.log-error {
+  color: var(--danger);
+}
+
+.log-line-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 4px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.log-entry-source {
+  display: inline-block;
+  min-width: 10rem;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.log-entry-message {
+  color: inherit;
+}

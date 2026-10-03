@@ -1,7 +1,13 @@
 # --- Rejets de build et artefacts locaux -------------------------
 model-manager/node_modules/
 model-manager/dist/
-logs/
+# ATTENTION : motif ANCRE (barre oblique en tete). Un motif nu 'logs/'
+# ignorait TOUT repertoire nomme logs a n'importe quelle profondeur - y
+# compris model-manager/src/Logs/, ce qui faisait disparaitre
+# src/Logs/logs.css du depot. Consequence : le build echouait sur un
+# clone frais (CI rouge, et construction Docker de l'installateur
+# impossible). /logs/ ne vise plus que le dossier racine.
+/logs/
 services/logs/
 
 # L'installateur est genere par .github\workflows\release.yml (ISCC) a chaque
