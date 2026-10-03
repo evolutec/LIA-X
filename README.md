@@ -46,6 +46,73 @@ navigateur.
 
 ---
 
+## 🖧 Partage sur le réseau local
+
+LIA-X peut tourner sur **une seule machine** et être utilisé depuis tous
+les postes du réseau, sans rien installer de plus sur ces postes.
+
+### 1. Côté machine hôte
+
+Tout écoute déjà sur toutes les interfaces (`0.0.0.0`) :
+
+| Port | Rôle | Depuis les autres postes |
+|------|------|--------------------------|
+| **3005** | Model Loader : API OpenAI-compatible + interface web | **OUI** — c'est celui-là qu'il faut ouvrir |
+| 13579 | Contrôleur hôte (charge/décharge les modèles) | techniques, non nécessaire |
+| 12434 | llama-server (inférence directe) | non nécessaire, passer par 3005 |
+
+Seul **3005** est utile aux clients. Le reste peut rester fermé au pare-feu.
+
+### 2. Ouvrir le pare-feu Windows
+
+Par défaut, Windows bloque les entrées. En **PowerShell administrateur** sur
+la machine hôte :
+
+```powershell
+New-NetFirewallRule -DisplayName "LIA-X (API 3005)" -Direction Inbound `
+  -Protocol TCP -LocalPort 3005 -Action Allow -Profile Domain,Private
+```
+
+Remplacez `Domain,Private` par `Any` si votre réseau est classé « Public ».
+Limitez le périmètre à votre sous-réseau si vous le pouvez :
+
+```powershell
+New-NetFirewallRule -DisplayName "LIA-X (API 3005)" -Direction Inbound `
+  -Protocol TCP -LocalPort 3005 -RemoteAddress 10.20.3.0/24 -Action Allow `
+  -Profile Domain,Private
+```
+
+> Docker Desktop ajoute ses propres règles : vérifiez qu'aucune règle
+> plus restrictive ne prend le dessus sur celle ci-dessus.
+
+### 3. Côté postes clients
+
+- **Navigateur** : `http://10.20.3.50:3005`
+- **Client OpenAI / Cline / Continue / AnythingLLM** :
+
+  | champ | valeur |
+  |-------|---------|
+  | Base URL | `http://10.20.3.50:3005/v1` |
+  | API key | *vide* — aucune clé n'est requise |
+  | Modèle | `lia-local` |
+
+Rien à installer sur les postes clients : ni Docker, ni Node, ni Python.
+
+### 4. Durcissement optionnel
+
+Ces deux protections sont **désactivées par défaut** pour ne pas
+gêner le partage réseau. À activer si la machine hôte est exposée à
+Internet :
+
+| variable | effet |
+|----------|-------|
+| `LIA_API_TOKEN=1` | exige `X-LIA-Token` sur les écritures `/api/*` |
+| `LIA_ALLOWED_HOSTS=10.20.3.50,poste-maitre.lan` | rejette tout autre `Host` (anti DNS-rebinding) |
+
+### 5. Ce que le partage ne change pas
+
+Les modèles, les documents RAG et l'historique de chat restent sur la
+machine hôte : chaque poste client ne voit que l'API.
 ## 📋 Prérequis
 
 | Élément | Version minimale | Remarque |
