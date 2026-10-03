@@ -60,6 +60,42 @@ jobs:
             "  {0,-18} {1} octets" -f $f, (Get-Item $p).Length
           }
 
+      - name: Verifier que l'application se construit
+        # GARDE-FOU. Sans cette etape, la release publiait un installeur sans
+        # jamais construire l'interface : deux releases ont ainsi ete publiees
+        # alors que le depot ne compilait pas (un fichier manquant du .gitignore).
+        # On ne construit donc jamais, et l'on ne publie jamais, un code dont le
+        # frontend ne se construit pas.
+        working-directory: model-manager
+        run: |
+          npm ci --no-audit --no-fund
+          $env:VITE_API_BASE_URL = ''
+          npm run build
+          if (-not (Test-Path 'dist\index.html')) {
+            throw 'Le build n a pas produit dist\index.html.'
+          }
+          "Build OK : $((Get-ChildItem 'dist' -Recurse -File | Measure-Object).Count) fichiers dans dist\"
+
+      - name: Aligner package.json sur la version du tag
+        # L'endpoint /api/version lit model-manager/package.json, tandis que la
+        # version de l'installateur vient du tag (/DAppVersion). Sans ce
+        # raccordement, un utilisateur installant 2.0.1 lisait « 2.0.0 » dans
+        # l'application : toute detection de mise a jour etait faussee.
+        # L'image Docker etant construite a l'INSTALLATION (par l'ISS), le
+        # package.json corrige doit etre EMBALLE dans l'installateur : cette
+        # etape doit donc preceder la compilation ISCC.
+        run: |
+          $pkgPath = Join-Path $env:GITHUB_WORKSPACE 'model-manager\package.json'
+          $pkg = Get-Content -LiteralPath $pkgPath -Raw | ConvertFrom-Json
+          "Version package.json : $($pkg.version)"
+          $pkg.version = $env:APP_VERSION
+          $json = ($pkg | ConvertTo-Json -Depth 10)
+          # UTF-8 sans BOM : un BOM ferait echouer npm plus tard.
+          [System.IO.File]::WriteAllText($pkgPath, $json, (New-Object System.Text.UTF8Encoding $false))
+          $check = (Get-Content -LiteralPath $pkgPath -Raw | ConvertFrom-Json).version
+          if ($check -ne $env:APP_VERSION) { throw "package.json non aligne : $check" }
+          "Version alignee sur le tag : $check"
+
       - name: Compiler l'installateur
         # LIA-X.iss ecrit dans dist\ (OutputDir), relatif au .iss : on compile
         # depuis installer\ et l'EXE atterrit donc dans installer\dist\.
