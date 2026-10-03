@@ -39,6 +39,17 @@ si LIA-X est déjà installé.
 > → *Exécuter quand même*, et vérifie le SHA256 avec le fichier `SHA256SUMS.txt`
 > publié à côté de l'installateur.
 
+### Quelle version utiliser ?
+
+| Version | Statut |
+|---------|--------|
+| **dernière release** ([v2.0.1](https://github.com/evolutec/LIA-X/releases/tag/v2.0.1)) | ⚠️ **connue : défaut** — la validation `Host` y renvoie `421` aux clients réseau. Le correctif est sur `main`. |
+| `main` | à jour, y compris le correctif réseau et l'épinglement côté serveur |
+
+> **Si tu veux utiliser LIA-X depuis d'autres postes du réseau**, ne prends pas
+> la dernière release mais reconstruis l'installateur depuis `main`
+> (`installer\compile.ps1`). Le tag `v2.0.2` est en préparation.
+
 L'installateur détecte ton matériel (GPU, CPU, RAM), choisit le backend le plus
 performant (Vulkan, CUDA, ROCm ou CPU), installe les services Windows, démarre
 Docker et déploie les conteneurs. À la fin, LIA-X s'ouvre dans ton
@@ -170,6 +181,38 @@ LIA-X expose une API compatible OpenAI. Tu peux donc l'utiliser avec :
 3. Ouvre http://localhost:3005
 4. Le modèle apparaît automatiquement dans la liste
 5. Clique sur "Charger" puis "Activer"
+
+---
+
+## 📌 Modèles épinglés (résidence permanente en VRAM)
+
+Un modèle **épinglé** (interrupteur « Épinglé » dans l'onglet Modèles) reste
+entièrement chargé en mémoire vidéo : il ne se décharge jamais après
+inactivité et répond sans latence de rechargement.
+
+Techniquement, un modèle épinglé est démarré **sans** l'option
+`--sleep-idle-seconds` de llama.cpp, qui est précisément ce qui vide la VRAM
+après une période d'inactivité (60 s par défaut).
+
+À vérifier soi-même (PowerShell) :
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" |
+  ForEach-Object { "$($_.ProcessId) : " + ($_.CommandLine -match '--sleep-idle-seconds') }
+# False = modèle résident (épinglé ou modèle principal en cours d'usage)
+```
+
+> **Épingler un modèle déjà chargé le redémarre.** L'option ne peut être
+> appliquée qu'au lancement du processus ; le serveur arrête puis relance donc
+> l'instance (~1 à 2 minutes pour un gros modèle). C'est visible sur la réponse
+> de l'API : `{"pinned": true, "reloaded": {"applied": true}}`.
+
+Deux limites à connaître :
+
+- **Sans base de données** (PostgreSQL indisponible), l'épinglement est ignoré :
+  le modèle sera déchargé normalement.
+- **Désépingler** ne décharge pas le modèle immédiatement : il retrouve son
+  comportement normal au prochain démarrage.
 
 ---
 

@@ -5522,12 +5522,79 @@ app.post('/api/models/pin', async (req, res) => {
       'INSERT INTO pinned_models (filename) VALUES ($1) ON CONFLICT (filename) DO NOTHING',
       [filename],
     );
-    res.json({ filename, pinned: true });
+
+    // Le drapeau --sleep-idle-seconds n'est appliqué qu'AU DÉMARRAGE du
+    // modèle (buildModelStartRequest). Épingler un modèle DÉJÀ chargé ne
+    // changeait donc rien : l'instance continuait avec --sleep-idle-seconds 60
+    // et se déchargeait après inactivité, alors que l'interface annonçait
+    // « épinglé ». Seule l'interface déclenchait un rechargement, via un
+    // chemin que les appels directs à l'API ne suivaient pas.
+    // On applique donc l'invariant ici, côté serveur : l'épinglement n'est
+    // effectif que si le processus tourne réellement sans --sleep-idle-seconds.
+    const reloaded = await reconcilePinOnRunningInstance(filename);
+    res.json({ filename, pinned: true, reloaded });
   } catch (error) {
     logError('/api/models/pin', error);
     err(res, 500, error.message);
   }
 });
+
+/**
+ * Applique l'épinglement à une instance DÉJÀ en cours.
+ *
+ * Redémarre le modèle si, et seulement si, il tourne avec un
+ * --sleep-idle-seconds >= 0 : c'est le signe qu'il pourra être déchargé malgré
+ * l'épinglement. Si le modèle n'est pas chargé, ou s'il est déjà résident,
+ * rien n'est fait — un redémarrage inutile coûterait plusieurs secondes de
+ * VRAM et d'indisponibilité pour rien.
+ *
+ * @returns {Promise<{applied:boolean, reason:string}>}
+ */
+async function reconcilePinOnRunningInstance(filename) {
+  try {
+    const snapshot = await getRuntimeSnapshot();
+    const instances = Array.isArray(snapshot.runtime?.instances) ? snapshot.runtime.instances : [];
+    const instance = instances.find((item) => String(item.filename || '').toLowerCase() === filename.toLowerCase()
+      || String(item.model || '').toLowerCase() === filename.toLowerCase()
+      || `${String(item.model || '')}.gguf`.toLowerCase() === filename.toLowerCase());
+    if (!instance || !instance.running) {
+      return { applied: false, reason: 'modele non charge : l epinglement s appliquera au prochain demarrage' };
+    }
+    if (Number(instance.sleep_idle_seconds) < 0) {
+      return { applied: false, reason: 'deja resident (aucun --sleep-idle-seconds)' };
+    }
+    const startRequest = await buildModelStartRequest(instance.filename || instance.model);
+    startRequest.payload.activate = Boolean(instance.active);
+
+    // ARRÊT PUIS DÉMARRAGE, impératif. Un simple /start sur une instance déjà
+    // vivante ne la relance PAS : le contrôleur prend son chemin « fast path »
+    // (promotion sans reload) et ignore les nouveaux arguments. On l'avait
+    // constaté pour le drapeau --embedding ; c'est exactement le même piège.
+    // Sans cet arrêt, l'API répondait « appliqué » alors que le processus
+    // gardait --sleep-idle-seconds : un succès trompeur.
+    await controllerRequest('/stop', {
+      method: 'POST',
+      body: JSON.stringify({ model: instance.model }),
+      timeout: 60000,
+      maxRetries: 1,
+    });
+    await controllerRequest('/start', {
+      method: 'POST',
+      body: JSON.stringify(startRequest.payload),
+      timeout: CONTROLLER_START_TIMEOUT_MS,
+      maxRetries: 0,
+    });
+    console.log('[pin] instance redemarree pour appliquer l epinglement', {
+      model: instance.model,
+      port: instance.port,
+      ancien_sleep: instance.sleep_idle_seconds,
+    });
+    return { applied: true, reason: 'redemarre sans --sleep-idle-seconds' };
+  } catch (error) {
+    console.error('[pin] reconciliation impossible :', error?.message || error);
+    return { applied: false, reason: `reconciliation impossible : ${error?.message || error}` };
+  }
+}
 
 app.delete('/api/models/pin', async (req, res) => {
   try {
