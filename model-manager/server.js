@@ -825,28 +825,31 @@ function requestHasApiToken(req) {
   return queryToken ? timingSafeEquals(queryToken, API_TOKEN) : false;
 }
 
-// Host autorisés par défaut : loopback + les alias utilisés par les conteneurs
-// et par le navigateur sur le poste. Une liste explicite passée via
-// LIA_ALLOWED_HOSTS remplace entièrement celle-ci.
-const DEFAULT_ALLOWED_HOSTS = [
-  'localhost',
-  '127.0.0.1',
-  '[::1]',
-  '::1',
-  '0.0.0.0',
-  'lia-x',
-  'host.docker.internal',
-];
-
+// Validation du header Host (anti-DNS-rebinding).
+//
+// DÉSACTIVÉE PAR DÉFAUT, et c'est délibéré : LIA-X est conçu pour être
+// déployé sur UNE machine et joignable depuis tout le réseau local
+// (poste maître 10.20.3.50, clients 10.20.3.51/52...). Or une liste
+// « loopback uniquement » répondait 421 Misdirected Request à ces clients,
+// cassant le cas d'usage principal du produit.
+//
+// La protection n'est donc activée QUE si l'administrateur renseigne
+// LIA_ALLOWED_HOSTS. Activation recommandée uniquement si la machine
+// hôte est exposée à Internet :
+//   -e LIA_ALLOWED_HOSTS=10.20.3.50,poste-maitre.lan
+// Un serveur DNS rebindé (attaquant.fr -> 127.0.0.1) sera alors rejeté.
 function hostIsAllowed(hostHeader) {
+  // Pas de liste configurée : aucune restriction (comportement par défaut).
+  if (ALLOWED_HOSTS.length === 0) {
+    return true;
+  }
   const raw = String(hostHeader || '').trim().toLowerCase();
   if (!raw) {
     return true; // HTTP/1.0 sans Host : on ne casse pas ces clients
   }
   // On compare sur le nom seul, en ignorant le port.
   const hostname = raw.startsWith('[') ? raw.slice(0, raw.indexOf(']') + 1) : raw.split(':')[0];
-  const allowList = ALLOWED_HOSTS.length > 0 ? ALLOWED_HOSTS : DEFAULT_ALLOWED_HOSTS;
-  return allowList.includes(hostname);
+  return ALLOWED_HOSTS.includes(hostname);
 }
 
 app.use((req, res, next) => {
