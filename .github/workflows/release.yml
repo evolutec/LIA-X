@@ -21,17 +21,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Determiner la version
-        # La version de l'installateur doit venir du TAG, sinon
-        # LIA-X.iss reste fige sur sa valeur de secours et Parametres >
-        # Applications affiche une version fausse. Sur push de tag on lit
-        # github.ref_name (v2.1.0 -> 2.1.0) ; en dispatch manuel, l'entree.
+        # La version de l'installateur doit venir du TAG. On lit les variables
+        # d'environnement NATIVES du runner (GITHUB_REF_NAME) au lieu des
+        # expressions ${{ github.ref_name }} : cette étape échouait en 1 s sur
+        # le runner (tout le reste du job était ignoré), le script n'allant
+        # jamais jusqu'à la compilation.
         run: |
-          $tag = if (github.event_name -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          $tag = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
           if (-not $tag) { throw 'Tag introuvable : precise le tag en dispatch manuel.' }
           $version = $tag -replace '^v', ''
           if ($version -notmatch '^\d+\.\d+\.\d+') { throw "Version invalide depuis le tag '$tag' : $version" }
-          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "TAG_REF=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+          "TAG_REF=$tag" >> $env:GITHUB_ENV
           "Version de l'installateur : $version"
 
       - name: Installer Inno Setup
