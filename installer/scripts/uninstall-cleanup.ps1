@@ -84,8 +84,16 @@ try {
             & docker stop --time 5 $c 2>$null | Out-Null
             & docker rm -f $c 2>$null | Out-Null
         }
-        # Idem pour l'ancienne image : elle ne sert plus mais occupe ~1 Go.
-        & docker rmi lia-model-loader:latest 2>$null | Out-Null
+        # Purge des IMAGES LIA. Constat reel : la desinstallation laissait
+        # 19 Go sur le disque, car seule l ancienne image lia-model-loader
+        # etait supprimee — apres le renommage en lia-x, plus aucune image
+        # n etait plus visee, et les trois images d interfaces non plus.
+        # On vise donc les deux noms (ancien et nouveau) ET les interfaces.
+        foreach ($img in @('lia-x:latest', 'lia-model-loader:latest',
+                            'lia-librechat:latest', 'lia-openwebui:latest',
+                            'lia-anythingllm:latest')) {
+            & docker rmi -f $img 2>$null | Out-Null
+        }
         if ($Full) {
             # -Full supprime aussi l'historique des conversations. Sans ce
             # drapeau, le volume lia-postgres-data est conserve : le

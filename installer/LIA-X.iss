@@ -766,6 +766,7 @@ procedure InitializeWizard();
 var
   InstallInfoPath: String;
   SurfaceW: Integer;
+  Requested: String;
 begin
   InterfacesPage := CreateCustomPage(wpSelectDir, 'Interfaces IA', 'Choisissez les interfaces à installer.');
   SurfaceW := InterfacesPage.Surface.Width - ScaleX(8);
@@ -790,6 +791,23 @@ begin
   chkAnythingLLM.Top := ScaleY(52);
   chkAnythingLLM.Left := ScaleX(4);
   chkAnythingLLM.Width := SurfaceW;
+
+  { Parametre /INTERFACES=librechat,openwebui,anythingllm
+    Sans lui, une installation silencieuse (/VERYSILENT) ne peut
+    selectionner AUCUNE interface : le defaut est « tout decoche », l
+    utilisateur n a pas d assistant pour cliquer. Indispensable pour tout
+    deploiement automatise (poste maitre, image de VM, script CI).
+    Liste vide ou absente = comportement historique (rien de coche). }
+  Requested := Lowercase(Trim(ExpandConstant('{param:INTERFACES|}')));
+  if Requested <> '' then
+  begin
+    chkLibreChat.Checked  := Pos('librechat', Requested) > 0;
+    chkOpenWebUI.Checked  := Pos('openwebui', Requested) > 0;
+    chkAnythingLLM.Checked := Pos('anythingllm', Requested) > 0;
+    Log('  /INTERFACES=' + Requested + ' -> LibreChat=' + BoolToStrIS7(chkLibreChat.Checked) +
+        ' OpenWebUI=' + BoolToStrIS7(chkOpenWebUI.Checked) +
+        ' AnythingLLM=' + BoolToStrIS7(chkAnythingLLM.Checked));
+  end;
 
   { Avertissement Docker affiché dans la page : aucune popup }
   DockerWarning := TNewStaticText.Create(WizardForm);
