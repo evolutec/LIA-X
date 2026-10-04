@@ -1910,7 +1910,7 @@ function ConvertTo-SerializableObject($value) {
     if ($value -is [System.Collections.IEnumerable] -and -not ($value -is [string])) {
         $items = @()
         foreach ($item in $value) { $items += ,(ConvertTo-SerializableObject $item) }
-        return $items
+          return ,$items
     }
 
     return $value

@@ -260,13 +260,19 @@ function ChatPage() {
     getRuntimeState()
       .then((state) => {
         if (cancelled) return;
-        setRuntime({
+          // Defense : le controleur peut renvoyer `instances` sous forme d objet
+          // unique plutot que de tableau selon le nombre d instances. On
+          // normalise plutot que de faire planter l onglet.
+          const instances = Array.isArray(state?.runtime?.instances)
+            ? state.runtime.instances
+            : (state?.runtime?.instances ? [state.runtime.instances] : []);
+          setRuntime({
           loading: false,
           activeModel: state?.runtime?.active_model || '',
           error: '',
           // Filenames des instances residentes : un modèle y figure s il est
           // épinglé (sleep_idle_seconds < 0), donc jamais déchargé.
-          resident: new Set((state?.runtime?.instances || [])
+          resident: new Set(instances
             .filter((instance) => Number(instance.sleep_idle_seconds) < 0)
             .map((instance) => instance.filename))
         });
