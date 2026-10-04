@@ -58,7 +58,7 @@ ArchitecturesInstallIn64BitMode=x64
 CloseApplications=yes
 ; * .exe ferme TOUT (navigateur, explorateur...) : tres intrusif et source
 ; d'annulation. On ne ferme que les processus vraimentLocker par LIA-X.
-CloseApplicationsFilter=llama-server.exe;docker.exe;Docker Desktop.exe;com.docker.backend.exe;node.exe;pwsh.exe;powershell.exe;LIA-X.exe
+CloseApplicationsFilter=nssm.exe;llama-server.exe;docker.exe;Docker Desktop.exe;com.docker.backend.exe;node.exe;pwsh.exe;powershell.exe;LIA-X.exe
 RestartApplications=no
 VersionInfoVersion={#AppVersion}
 VersionInfoCompany={#AppPublisher}
@@ -454,7 +454,20 @@ begin
   if ResultCode = 0 then
     Log('  lia-x démarré sur http://localhost:3005')
   else
-    Log('  ERREUR : démarrage de lia-x impossible.');
+  begin
+    // ÉCHEC BLOQUANT. Le conteneur LIA-X EST l'application : sans lui,
+    // l'installateur déposait des fichiers et declarait pourtant une
+    // installation reussie, sans aucune fenetre d'erreur en mode
+    // /VERYSILENT. Cause observee : un conteneur portant deja le nom `lia-x`
+    // fait echouer `docker run` (name already in use) sans que l'ISS ne
+    // le remarque. On prefere un echec bruyant et explicite a une
+    // installation silencieusement cassee.
+    Log('  ERREUR FATALE : le conteneur lia-x n a pas demarre.');
+    Log('  Cause probable : un conteneur nomme lia-x existe deja.');
+    Log('  Pour le retirer :  docker rm -f lia-x');
+    Log('  Ou desinstaller proprement LIA-X avant de reinstaller.');
+    RaiseException('Le conteneur LIA-X n''a pas pu demarrer (code ' + IntToStr(ResultCode) + ').');
+  end;
 end;
 
 procedure RunPostgresContainer;
@@ -479,7 +492,14 @@ begin
   if ResultCode = 0 then
     Log('  lia-postgres démarré (PostgreSQL 16 + pgvector)')
   else
-    Log('  ERREUR : démarrage de lia-postgres impossible.');
+  begin
+    // BLOQUANT comme lia-x : sans base, l'historique de chat et le RAG sont
+    // muets. Le symptome serait trompeur (l'interface semble charger mais
+    // tout est perdu au premier message).
+    Log('  ERREUR FATALE : le conteneur lia-postgres n a pas demarre.');
+    Log('  Verifiez que Docker demarre et que le port 5432 est libre.');
+    RaiseException('Le conteneur lia-postgres n''a pas pu demarrer (code ' + IntToStr(ResultCode) + ').');
+  end;
 end;
 
 procedure BuildModelLoaderImage(const InstallDir: String);
@@ -978,6 +998,40 @@ begin
       end;
     end;
   end;
+end;
+
+
+// Arret des services AVANT la copie des fichiers.
+//
+// Les deux services LIA ont nssm.exe pour image : ce binaire reste verrouille
+// par le SCM tant que le service tourne. Ecraser {app} echoue alors sur
+// "Acces refuse" et Inno annule l installation en rollback.
+//
+// CloseApplications ne suffit pas : le mecanisme de fermeture d Inno ne
+// repere pas les images de service. Il faut donc arreter les services
+// explicitement ici, et non dans CurStepChanged(ssPostInstall) qui
+// s execute apres la copie.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+  ServiceName: String;
+begin
+  Result := '';
+  { Premiere installation : les services n existent pas, sans effet. }
+  if not RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\LIA Controller') then
+    if not RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\LIA GPU Metrics') then
+      exit;
+
+  ServiceName := 'LIA Controller';
+  Exec('sc.exe', 'stop "' + ServiceName + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Log('  Arret demande : ' + ServiceName + ' (code ' + IntToStr(ResultCode) + ')');
+
+  ServiceName := 'LIA GPU Metrics';
+  Exec('sc.exe', 'stop "' + ServiceName + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Log('  Arret demande : ' + ServiceName + ' (code ' + IntToStr(ResultCode) + ')');
+
+  { Laisse le temps au SCM de liberer nssm.exe avant la copie. }
+  Sleep(3000);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
