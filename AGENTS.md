@@ -4,7 +4,7 @@
 > `main` est **en avance** sur le tag (correctifs embeddings, désinstallation,
 > `instances`, `/INTERFACES`).
 > **Mettre à jour cette ligne à chaque validation de bout en bout**, et seulement
-> après avoir exécuté la section 10 « Validation ».
+> après avoir exécuté la section 12 « Validation ».
 
 ---
 
@@ -87,7 +87,105 @@ ce point sur la foi d'un ancien doublon périmé.
 
 ---
 
-## 4. Infrastructure
+## 4. Détection matérielle (à l'installation)
+
+Étape **2/6** de l'assistant, avant toute création de service. Elle décide du
+backend llama.cpp et des réglages par défaut. **Refaite à chaque installation
+et à chaque Réparer.**
+
+### Chaîne
+
+```
+installer\scripts\hardware.ps1          moteur d'analyse (sans effet de bord)
+  Get-HardwareProfile                   CPU, RAM, GPU (WMI), iGPU vs dGPU
+  Get-BackendCapabilities               cuda / rocm / vulkan réellement utilisables
+  Get-BackendPlan                       choisit et justifie le backend
+  Get-RecommendedRuntimeConfig          contexte, gpu_layers, sleep par défaut
+  Test-LlamaBinary                      le binaire téléchargé démarre-t-il ?
+  Save-HardwareProfile                  écrit hardware-profile.json
+        ↓
+installer\scripts\detect-hardware.ps1   orchestration
+  Resolve-LlamaReleaseTag               tag de release officielle
+  Try-DownloadLlamaCppRelease           runtime téléchargé, vérifié SHA-256
+  Remove-StaleLlamaReleases             purge les runtimes devenus inutiles
+        ↓
+{app}\runtime\hardware-profile.json     ce qui a été détecté (lu par l'UI)
+{app}\runtime\host-runtime-config.json   config permanente, éditable à la main
+```
+
+### Backends, par ordre de préférence
+
+| Backend | Détecté par | `source` |
+|---|---|---|
+| **CUDA** | `nvidia-smi.exe` interrogeant **réellement** le pilote | `nvidia-smi` |
+| **ROCm** | `rocm-smi.exe`, **ou** DLL HIP / `HIP_PATH` | `rocm-smi` / `hip-runtime` |
+| **Vulkan** | `vulkaninfo.exe`, **ou** ICD registre, **ou** `vulkan-1.dll` | `vulkaninfo` |
+| **CPU** | toujours disponible | `always` |
+
+⚠️ La présence de l'outil ne suffit pas : `nvidia-smi` installé mais pilote
+non fonctionnel est classé **non disponible** (`available: false`, avec le
+`detail` du motif de rejet).
+
+### Mémoire GPU : le cas des iGPU
+
+Sur un iGPU (Intel Arc, AMD intégré) il n'y a **pas de VRAM dédiée** : la
+mémoire est unifiée avec la RAM. Mesures réelles sur cette machine :
+
+```
+gpu.memory.is_unified       = true
+gpu.memory.dedicated_bytes  = 0
+gpu.memory.unified_bytes    = 17179869184   (16 Go)
+gpu.memory.usable_bytes     = 10307921510   (9,6 Go réellement exploitables)
+gpu.memory.system_ram_bytes = 33840226304   (31,5 Go de RAM)
+```
+
+⚠️ **Comparer la consommation à `usable_bytes`, jamais à `unified_bytes`** :
+dépasser la RAM réellement disponible fait échouer le chargement.
+
+`best_device.adapter_ram_bytes` (4,3 Go ici) est le total **annoncé par le
+pilote**, souvent fantaisiste sur iGPU ; `dedicated_estimated_bytes` (16 Go) est
+la mémoire unifiée réelle. Ne pas les confondre.
+
+### Runtime llama.cpp
+
+Téléchargé depuis les releases officielles de `ggml-org/llama.cpp` et
+**vérifié par SHA-256** avant installation. Les releases obsolètes sont purgées à
+chaque passage, pour ne pas conserver ~250 Mo par release.
+
+### Réglages recommandés
+
+`Get-RecommendedRuntimeConfig` produit `default_context`, `default_gpu_layers`
+et `sleep_idle_seconds`, bornés par le contexte natif du GGUF. Ce sont des
+**suggestions** : modifiables dans l'onglet Modèles (« Mise à jour auto »),
+et toute modification exige un rechargement explicite de l'instance.
+
+### Forcer un backend
+
+`host-runtime-config.json` est la source de vérité partagée avec l'UI :
+
+```json
+{ "backend": "cpu", "default_gpu_layers": 0, "default_context": 4096 }
+```
+
+Puis relancer la détection (assistant en mode **Réparer**, ou
+`detect-hardware.ps1`). Un fichier absent ou corrompu **ne bloque pas** :
+la détection automatique reprend la main.
+
+### Diagnostic — à faire dans cet ordre
+
+```powershell
+Get-Content 'C:\Program Files\LIA-X\runtime\hardware-profile.json' -Raw | ConvertFrom-Json
+Get-Content 'C:\Program Files\LIA-X\runtime\host-runtime-config.json' -Raw | ConvertFrom-Json
+Get-Content 'C:\Program Files\LIA-X\logs\hw-detect.log' -Tail 40
+```
+
+`logs\hw-detect.log` indique pour chaque backend le `source` retenu et le motif
+de rejet. **À lire en premier** quand un modèle ne se charge pas ou quand le
+GPU est ignoré.
+
+---
+
+## 5. Infrastructure
 
 ### Conteneurs (réseau `lia-network`)
 
@@ -134,7 +232,7 @@ restriction ; sinon les clients distants reçoivent `421`.
 
 ---
 
-## 5. Modèles
+## 6. Modèles
 
 - Emplacement canonique : `%USERPROFILE%\Documents\LIA-X\Models`, monté dans le
   conteneur en `/models`. **Ne jamais le changer** : le montage et le Model
@@ -184,7 +282,7 @@ modèle résident : Working Set minuscule + Commit énorme + GPU saturé.
 
 ---
 
-## 6. Cycle de développement conteneur
+## 7. Cycle de développement conteneur
 
 ```powershell
 cd model-manager; npm run build
@@ -211,7 +309,7 @@ avoir fermé Docker, `docker start lia-x` est requis.
 
 ---
 
-## 7. Options et variables d'environnement
+## 8. Options et variables d'environnement
 
 | Variable | Effet |
 |---|---|
@@ -230,7 +328,7 @@ appellent cette surface.
 
 ---
 
-## 8. Release et CI
+## 9. Release et CI
 
 | Workflow | Déclencheur | Contenu |
 |---|---|---|
@@ -245,7 +343,7 @@ Règles à ne pas casser :
 
 ---
 
-## 9. Tests
+## 10. Tests
 
 ```powershell
 node --check model-manager\server.js          # syntaxe
@@ -264,7 +362,7 @@ Test à ajouter en priorité, quelques lignes : **`/status` doit renvoyer
 
 ---
 
-## 10. Pièges connus
+## 11. Pièges connus
 
 1. **PowerShell déroule un tableau à un élément.** `return $items` renvoie
    l'objet seul → JSON invalide. Écrire `return ,$items`. C'est ce qui cassait
@@ -290,7 +388,7 @@ Test à ajouter en priorité, quelques lignes : **`/status` doit renvoyer
 
 ---
 
-## 11. Validation avant de déclarer un travail terminé
+## 12. Validation avant de déclarer un travail terminé
 
 ```powershell
 # 1. Compilation de l'installateur
