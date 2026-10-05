@@ -1,8 +1,10 @@
 # AGENTS.md — consignes de travail sur LIA-X
 
-> **⚠️ DERNIÈRE VALIDATION : 2026-10-04 — release publiée v2.0.2, `main` = 5f1808a**
-> `main` est **en avance** sur le tag (correctifs embeddings, désinstallation,
-> `instances`, `/INTERFACES`).
+> **⚠️ DERNIÈRE VALIDATION : 2026-10-04 — release publiée v2.0.2, `main` = a417fb0**
+> `main` est **en avance** sur le tag : correctifs du contrôleur (`instances`,
+> `embedding`), désinstallation (purge des images), `/INTERFACES`, RAG.
+> La dernière release **v2.0.2** est la seule utilisable : v2.0.1 renvoie
+> `421` aux clients réseau, v2.0.0 est obsolète.
 > **Mettre à jour cette ligne à chaque validation de bout en bout**, et seulement
 > après avoir exécuté la section 12 « Validation ».
 
@@ -50,9 +52,16 @@ installer\dist\LIA-X-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- `
 | `/LOG=<fichier>` | journal détaillé, **indispensable pour tout diagnostic** |
 | `/DAppVersion=` (compilation) | version injectée dans l'EXE et `package.json` |
 
-Durée **20 à 40 min** (images d'interfaces ≈ 10 Go, build de l'image `lia-x`,
-runtime llama.cpp téléchargé). Ne jamais dépasser 280 s sur une commande : lancer
-en arrière-plan puis sonder.
+Durée **très variable**, et c'est le cache Docker qui commande :
+
+| Situation | Durée |
+|---|---|
+| images déjà en cache (réinstallation) | **~10 min** |
+| première installation, 3 interfaces | **20 à 40 min** |
+
+Ce qui coûte le plus : la construction de l'image `lia-x` (`npm ci` + build
+Vite) et le téléchargement des images d'interfaces (≈ 10 Go) si absentes. Ne
+jamais dépasser 280 s sur une commande : lancer en arrière-plan puis sonder.
 
 ### Désinstaller
 
@@ -66,6 +75,25 @@ images LIA, raccourcis. `-Full` purge aussi les volumes (historique perdu).
 Résidus normaux : `model-manager\dist\`, `runtime\host-runtime-state.json.bak`,
 `is-*.tmp` d'Inno — artefacts générés à l'exécution, hors du journal
 d'installation, donc non supprimés.
+
+Deux points souvent mal compris :
+
+- **`host-runtime-state.json` n'est PAS supprimé** (voir § 6) : les modèles
+  rejoués survivent donc à une désinstallation.
+- Des dossiers littéraux `{userdocs}` et `models` peuvent subsister dans
+  `{app}\runtime` : ce sont des résidus d'une ancienne disposition, sans effet.
+
+### Ce que l'installation télécharge ou construit (hors images Docker)
+
+| Poste | Poids | Remarque |
+|---|---|---|
+| runtime llama.cpp | 19 à 245 Mo | selon le backend, vérifié SHA-256 |
+| voix neuronale Kokoro | ~310 Mo | dans `Models\.cache\kokoro`, au premier usage |
+| `node_modules` | ~39 Mo | **construit sur le poste** par `postinstall.ps1` |
+
+D'où l'exigence **Node.js** : l'image Docker est reconstruite chez
+l'utilisateur, et le frontend l'est deux fois (sur le poste, puis dans
+l'image).
 
 ### Emplacement
 
@@ -81,6 +109,7 @@ ce point sur la foi d'un ancien doublon périmé.
 |---|---|---|
 | **Docker Desktop** | obligatoire | l'installation **échoue** (contrôle bloquant) |
 | **Node.js 20+** | obligatoire | le frontend est **construit sur le poste** |
+| Windows | **10 x64** | `MinVersion=10.0` ; Windows 7/8.1 refusés. Windows 11 recommandé |
 | PowerShell 7 | recommandé | 5.1 fonctionne, plus lent |
 | RAM | 16 Go | 32 Go pour les modèles > 7B |
 | Espace | 20 Go + modèles | images d'interfaces ≈ 10 Go |
@@ -255,6 +284,44 @@ Limites : sans PostgreSQL l'épinglement est ignoré ; désépingler ne décharg
 pas immédiatement ; **épingler un modèle déjà chargé le redémarre** (stop +
 start, 1 à 2 min) car l'option n'est appliquée qu'au lancement.
 
+### Quels modèles sont rechargés au démarrage — et où c'est décidé
+
+Il y a **deux endroits distincts**, et ils n'ont pas le même destin lors d'une
+désinstallation. C'est la source n°1 de confusion sur « il est épinglé mais pas
+chargé ».
+
+| Information | Où elle vit | Que devient-elle après désinstallation |
+|---|---|---|
+| **quels modèles rejouer** (modèle, port, contexte, gpu_layers, `sleep_idle_seconds`, `active`) | `{app}\runtime\host-runtime-state.json` | **conservée** : fichier créé à l'exécution, donc inconnu d'Inno et laissé en place. En revanche, un nettoyage manuel de `{app}\runtime`, ou une réinstallation sur un dossier `{app}` vierge, le font disparaître |
+| **quels modèles sont épinglés** | table `pinned_models`, PostgreSQL (volume `lia-postgres-data`) | **conservée** (le volume est préservé) |
+
+Conséquence : une réinstallation **sans** conservation de `{app}\runtime`
+retrouve les modèles épinglés en base, mais plus aucun à rejouer → ils
+apparaissent épinglés tout en n'étant pas chargés. C'est le symptôme exact
+« épinglé mais pas chargé ».
+
+Au démarrage du contrôleur, la séquence de restauration relit
+`host-runtime-state.json` :
+
+```
+Startup: restoring active   id=… model=… port=… ctx=… ngl=…
+Startup: restoring inactive id=… model=… port=… ctx=… ngl=…
+```
+
+⚠️ La restauration est **séquentielle** : chaque `llama-server` met 1 à 2 min à
+démarrer. Juste après une installation, l'onglet Modèles affiche donc un **état
+intermédiaire** (le premier modèle présent, le second pas encore) sans rien
+signaler. Vérifier les processus avant de conclure à un défaut :
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" |
+  ForEach-Object { $_.CommandLine -match '-m\s+"([^"]+)"' }   # ce qui tourne VRAIMENT
+```
+
+Si un modèle est épinglé en base mais absent de cette liste, c'est qu'il n'a
+pas été rejoué : vérifier que `host-runtime-state.json` contient bien une entrée
+`running: true` pour lui.
+
 ### Mémoire — ne pas se fier à la colonne « Mémoire » du Gestionnaire
 
 Avec `-ngl 999` (tout déchargé en VRAM) et `mmap` actif (défaut, pas de
@@ -287,18 +354,38 @@ modèle résident : Working Set minuscule + Commit énorme + GPU saturé.
 ```powershell
 cd model-manager; npm run build
 docker build -t lia-x -f Dockerfiles/Dockerfile.lia-x .
-docker rm -f lia-x
+
+docker rm -f lia-x model-loader          # model-loader = ancien nom (migration)
+docker rmi lia-model-loader:latest
+
 docker run -d --name lia-x --network lia-network -p 3005:3005 `
   --add-host host.docker.internal:host-gateway `
-  -e MODEL_STORAGE_DIR=/models -e RUNTIME_STATE_PATH=/runtime/host-runtime-state.json `
+  -e LLAMA_HOST_CONTROL_URL=http://host.docker.internal:13579 `
+  -e LLAMA_SERVER_BASE_URL=http://host.docker.internal:12434 `
   -e METRICS_HOST_URL=http://host.docker.internal:13621 `
+  -e MODEL_STORAGE_DIR=/models `
+  -e RUNTIME_STATE_PATH=/runtime/host-runtime-state.json `
   -e EMBEDDING_MODEL_STATE_PATH=/models/.lia/embedding-model.json `
-  -e HOST_MODELS_DIR="$env:USERPROFILE\Documents\LIA-X\Models" `
-  -e PROXY_MODEL_ID=lia-local -e POSTGRES_HOST=lia-postgres `
+  -e PROXY_MODEL_ID=lia-local `
+  -e "HOST_MODELS_DIR=$env:USERPROFILE\Documents\LIA-X\Models" `
+  -e "HOST_INSTALL_DIR=C:\Program Files\LIA-X" `
   --mount "type=bind,source=$env:USERPROFILE\Documents\LIA-X\Models,target=/models" `
-  --mount "type=bind,source=C:\Program Files\LIA-X\runtime,target=/runtime" `
-  --restart unless-stopped lia-x
+  --mount "type=bind,source=C:\Program Files\LIA-X\runtime,target=/runtime,readonly" `
+  --restart unless-stopped `
+  --health-cmd "curl -fsS http://127.0.0.1:3005/health > /dev/null || exit 1" `
+  --health-interval 15s --health-timeout 10s --health-retries 2 `
+  lia-x
 ```
+
+Cette commande doit rester **alignée sur `RunLiaXContainer`** dans
+`installer\LIA-X.iss`. Trois points omisivables qui cassent le diagnostic :
+
+- `LLAMA_HOST_CONTROL_URL` : sans lui, le proxy n'atteint pas le contrôleur ;
+- `/runtime` monté **`readonly`**, comme à l'installation. Un montage en
+  lecture-écriture autorise le conteneur à écrire dans le dossier runtime de la
+  machine hôte, ce que l'installateur interdit ;
+- `--health-cmd` : c'est lui qui fait apparaître `healthy` ou `unhealthy` dans
+  `docker ps`.
 
 Itérer vite sur le **frontend seul** : `npm run build` puis
 `docker cp model-manager\dist\. lia-x:/app/model-manager/dist`.
@@ -373,9 +460,13 @@ Test à ajouter en priorité, quelques lignes : **`/status` doit renvoyer
 3. **`nssm.exe` est l'image des deux services** : le SCM le verrouille. Il doit
    figurer dans `CloseApplicationsFilter` **et** les services doivent être
    arrêtés dans `PrepareToInstall` avant la copie.
-4. **Inno Setup : `[Code]` = ASCII pur.** Un caractère non-ASCII fait échouer la
-   compilation avec un message trompeur. `PrepareToInstall` est une
-   **`function` qui renvoie un String**, pas une `procedure`.
+4. **Inno Setup, section `[Code]` : préfère l'ASCII, mais ce n'est pas une
+   interdiction.** Les chaînes accentuées compilent (les messages
+   `RaiseException` en contiennent). Le vrai piège est ailleurs : un caractère
+   non-ASCII **précède une déclaration** fait échouer la compilation sur
+   l'identifiant, avec un message trompeur — c'est arrivé sur
+   `PrepareToInstall`. Autre point : `PrepareToInstall` est une **`function` qui
+   renvoie un String**, pas une `procedure`.
 5. **Écrire avec `[System.IO.File]::WriteAllText` écrase les fins de ligne** :
    le dépôt est en CRLF. Utiliser `WriteAllLines`, ou préserver.
 6. **Vérifier sur les octets bruts.** `Invoke-RestMethod` désérialise un tableau
