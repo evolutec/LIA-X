@@ -12,7 +12,7 @@
 </p>
 
 <p>
-  <img alt="Windows 11" src="https://img.shields.io/badge/Windows-11-0078D4?style=for-the-badge&logo=windows&logoColor=white">
+  <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=for-the-badge&logo=windows&logoColor=white">
   <img alt="Docker Desktop" src="https://img.shields.io/badge/Docker-Desktop-2496ED?style=for-the-badge&logo=docker&logoColor=white">
   <img alt="llama.cpp" src="https://img.shields.io/badge/llama.cpp-native-111111?style=for-the-badge">
   <img alt="Multi-LLM" src="https://img.shields.io/badge/Multi--LLM-parallel-2EA043?style=for-the-badge">
@@ -28,8 +28,10 @@
 1. Télécharge `LIA-X-Setup.exe` sur [GitHub Releases](https://github.com/evolutec/LIA-X/releases)
 2. Lance-le : Windows demandera l'élévation ( administrateur ), c'est normal —
    LIA-X installe des services Windows.
-3. Suis les instructions à l'écran (~15 à 35 min : téléchargement du runtime
-   llama.cpp, de Docker et construction des images).
+3. Suis les instructions à l'écran. Comptez **20 à 40 min** la première fois
+   (runtime llama.cpp, voix neuronale ~310 Mo, construction de l'image,
+   téléchargement des interfaces ~10 Go), **~10 min** si les images Docker sont
+   déjà en cache.
 
 Au démarrage, une page **Réparer / Supprimer / Nouvelle installation** apparaît
 si LIA-X est déjà installé.
@@ -43,12 +45,13 @@ si LIA-X est déjà installé.
 
 | Version | Statut |
 |---------|--------|
-| **dernière release** ([v2.0.1](https://github.com/evolutec/LIA-X/releases/tag/v2.0.1)) | ⚠️ **connue : défaut** — la validation `Host` y renvoie `421` aux clients réseau. Le correctif est sur `main`. |
-| `main` | à jour, y compris le correctif réseau et l'épinglement côté serveur |
+| **v2.0.2** ([télécharger](https://github.com/evolutec/LIA-X/releases/tag/v2.0.2)) | ✅ **à utiliser** — corrige le blocage réseau de la v2.0.1 |
+| v2.0.1 | ⚠️ **déconseillée** : la validation `Host` renvoie `421` aux clients distants. Son installateur reste téléchargeable, mais il est cassé pour le partage réseau |
+| v2.0.0 | 🗄️ obsolète — tag pointant 5 commits en arrière, marquée « OBSOLETE » sur GitHub |
 
-> **Si tu veux utiliser LIA-X depuis d'autres postes du réseau**, ne prends pas
-> la dernière release mais reconstruis l'installateur depuis `main`
-> (`installer\compile.ps1`). Le tag `v2.0.2` est en préparation.
+> Si tu as besoin de ce qui n'est pas encore dans un tag (correctifs du
+> contrôleur, désinstallation, `/INTERFACES`), reconstruis l'installateur
+> depuis `main` : `installer\compile.ps1`.
 
 L'installateur détecte ton matériel (GPU, CPU, RAM), choisit le backend le plus
 performant (Vulkan, CUDA, ROCm ou CPU), installe les services Windows, démarre
@@ -68,7 +71,7 @@ Tout écoute déjà sur toutes les interfaces (`0.0.0.0`) :
 
 | Port | Rôle | Depuis les autres postes |
 |------|------|--------------------------|
-| **3005** | Model Loader : API OpenAI-compatible + interface web | **OUI** — c'est celui-là qu'il faut ouvrir |
+| **3005** | LIA-X : API OpenAI-compatible + interface web | **OUI** — c'est celui-là qu'il faut ouvrir |
 | 13579 | Contrôleur hôte (charge/décharge les modèles) | techniques, non nécessaire |
 | 12434 | llama-server (inférence directe) | non nécessaire, passer par 3005 |
 
@@ -219,16 +222,25 @@ Deux limites à connaître :
 ## 🔧 Commandes utiles
 
 ```powershell
-# Vérifier que le LIA-X fonctionne
+# Ouvrir l'interface
 Start-Process "http://localhost:3005"
 
-# Vérifier le statut du contrôleur
-Invoke-WebRequest -Uri "http://127.0.0.1:13579/status" -UseBasicParsing
+# Vérifier le statut du contrôleur (les objets sont masqués : /status est volumineux)
+(Invoke-WebRequest "http://127.0.0.1:13579/health" -TimeoutSec 10).StatusCode
 
-# Arrêter tous les services Docker
-docker stop $(docker ps -q)
-docker rm $(docker ps -aq)
+# Arrêter les conteneurs LIA-X (et eux seuls)
+docker stop lia-x lia-postgres
+
+# Tout retirer : ATTENTION, à lire avant de lancer
+#   docker rm $(docker ps -aq)        <-- bash : NE PAS coller dans PowerShell
+#   docker ps -aq | ForEach-Object { docker rm -f $_ }   <-- équivalent PowerShell
+# Cette commande supprime TOUS les conteneurs de la machine, y compris ceux
+# d'autres projets (bases de données, outils…). À n'utiliser que si c'est voulu.
 ```
+
+> Sous PowerShell 7, n'ajoutez pas `-UseBasicParsing` : le paramètre n'existe
+> plus, la commande échoue. C'est aussi vrai de `GetResponseStream()`, absent
+> de `HttpResponseMessage`.
 
 ---
 
@@ -243,8 +255,19 @@ docker rm $(docker ps -aq)
 ### Un modèle ne charge pas
 
 - Vérifie que le fichier `.gguf` n'est pas corrompu
-- Vérifie que tu as assez de RAM/VRAM
-- Consulte les logs dans `logs/controller/` et `logs/runtime/`
+- Vérifie que tu as assez de RAM/VRAM — sur un iGPU, la mémoire est partagée
+  avec la RAM système : comparer à la mémoire **utilisable**, pas au total
+- Consulte les logs dans `C:\Program Files\LIA-X\logs\controller\` et
+  `C:\Program Files\LIA-X\logs\runtime\`. ⚠️ Les journaux ne contiennent
+  **plus** le contenu de tes requêtes (protection de la vie privée) : un
+  diagnostic doit s'appuyer sur `/status`, pas sur les logs.
+- ⚠️ Juste après l'installation, l'onglet Modèles peut afficher un état
+  intermédiaire : les modèles sont restaurés **un par un**, 1 à 2 min chacun.
+  Attendez, ou vérifiez les processus réellement lancés :
+  ```powershell
+  Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" |
+    ForEach-Object { $_.CommandLine -match '-m\s+"([^"]+)"' }
+  ```
 
 ### Docker ne démarre pas
 
@@ -277,15 +300,23 @@ modèles sont conservés ; réinstalle par la suite sans rien perdre.
 ## 🔐 Sécurité
 
 - Toutes les inférences sont locales : tes données ne quittent jamais ton PC
-- L'API écoute uniquement sur `127.0.0.1` (pas d'accès depuis le réseau)
 - Pas de télémétrie ni d'envoi de données vers des serveurs externes
+- L'API **écoute sur toutes les interfaces** (`0.0.0.0:3005`) pour être
+  joignable depuis le réseau local. C'est un choix assumé : c'est ce qui permet
+  à un poste maître de servir tous les autres. Si tu n'en as pas l'usage,
+  **n'ouvre pas la règle de pare-feu** de la section « Partage sur le réseau
+  local » : sans elle, le port 3005 reste inaccessible aux autres postes.
+- Deux protections sont disponibles mais **désactivées par défaut** :
+  `LIA_API_TOKEN=1` (jeton sur les écritures) et `LIA_ALLOWED_HOSTS=…`
+  (anti DNS-rebinding). Voir § 4 de la section réseau.
 
 ---
 
 ## 📚 Documentation technique
 
 Pour les développeurs, la documentation complète est dans
-[`model-manager/src/Documentation.jsx`](model-manager/src/Documentation.jsx) et [`docs/`](docs/).
+[`model-manager/src/Documentation/Documentation.jsx`](model-manager/src/Documentation/Documentation.jsx),
+[`docs/`](docs/), et les consignes de travail dans [`AGENTS.md`](AGENTS.md).
 
 ---
 
@@ -297,4 +328,6 @@ Les contributions sont les bienvenues ! N'hésite pas à ouvrir une issue ou une
 
 ## 📄 Licence
 
-MIT
+**Non définie à ce jour.** Aucun fichier `LICENSE` n'est présent dans le dépôt :
+avant toute distribution publique, il faut choisir une licence (MIT, Apache-2.0…)
+et l'ajouter à la racine.
