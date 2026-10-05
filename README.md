@@ -328,6 +328,12 @@ Les contributions sont les bienvenues ! N'hésite pas à ouvrir une issue ou une
 
 ## 📄 Licence
 
-**Non définie à ce jour.** Aucun fichier `LICENSE` n'est présent dans le dépôt :
-avant toute distribution publique, il faut choisir une licence (MIT, Apache-2.0…)
-et l'ajouter à la racine.
+LIA-X est distribué sous **licence MIT** — voir [`LICENSE`](LICENSE).
+
+Les composants tiers embarqués (NSSM, images Docker des interfaces) conservent
+leur propre licence ; voir [`THIRD_PARTY.md`](THIRD_PARTY.md) pour le détail.
+
+> ⚠️ Open WebUI applique depuis la v0.6.6 une clause de protection du branding
+> au-delà de 50 utilisateurs / 30 jours. LIA-X ne le retire pas et le
+> redistribue tel quel : c'est l'exploitant du déploiement qui doit vérifier
+> ses conditions d'usage.
