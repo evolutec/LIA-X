@@ -598,7 +598,7 @@ if ($InstallLibreChat) {
             -e ENABLE_OPENAI=true -e OPENAI_PROXY_ENABLED=true `
             -e DISABLE_TELEMETRY=true `
             -v librechat-data:/app/api/data --restart unless-stopped `
-            ghcr.io/danny-avila/librechat:latest | Out-Null
+            ghcr.io/danny-avila/librechat@sha256:c5db3331b845e1f289f8d04c0c77936c4bbe372f76730a804abc1c37e44d23a9 | Out-Null
         Write-Ok 'LibreChat lancé sur http://localhost:3007'
     } catch {
         Write-Fail "Impossible de démarrer LibreChat : $($_.Exception.Message)"
@@ -619,7 +619,7 @@ if ($InstallOpenWebUI) {
             -e OPENAI_API_BASE_URLS=http://lia-x:3005/v1 `
             -e OPENAI_API_KEYS=not-used -e OPENAI_API_KEY=not-used `
             -v open-webui-data:/app/backend/data --restart unless-stopped `
-            ghcr.io/open-webui/open-webui:main | Out-Null
+            ghcr.io/open-webui/open-webui:v0.11.4 | Out-Null
         Write-Ok 'Open WebUI lancé sur http://localhost:3008'
     } catch {
         Write-Fail "Impossible de démarrer Open WebUI : $($_.Exception.Message)"
@@ -639,7 +639,7 @@ if ($InstallAnythingLLM) {
             -e GENERIC_OPEN_AI_MODEL_PREF=lia-local -e GENERIC_OPEN_AI_API_KEY=not-used `
             -e GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=8192 -e EMBEDDING_ENGINE=native `
             -v anythingllm-storage:/app/server/storage --restart unless-stopped `
-            mintplexlabs/anythingllm:latest | Out-Null
+            mintplexlabs/anythingllm:1.17.0 | Out-Null
         Write-Ok 'AnythingLLM lancé sur http://localhost:3006'
     } catch {
         Write-Fail "Impossible de démarrer AnythingLLM : $($_.Exception.Message)"

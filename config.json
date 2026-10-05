@@ -14,9 +14,9 @@
     "network": "lia-network",
     "images": {
       "modelLoader": "lia-x:latest",
-      "anythingllm": "mintplexlabs/anythingllm:latest",
-      "openWebUi": "ghcr.io/open-webui/open-webui:main",
-      "libreChat": "ghcr.io/danny-avila/librechat:latest"
+      "anythingllm": "mintplexlabs/anythingllm:1.17.0",
+      "openWebUi": "ghcr.io/open-webui/open-webui:v0.11.4",
+      "libreChat": "ghcr.io/danny-avila/librechat@sha256:c5db3331b845e1f289f8d04c0c77936c4bbe372f76730a804abc1c37e44d23a9"
     },
     "liaImages": {
       "modelLoader": "lia-x:latest",

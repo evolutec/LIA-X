@@ -334,6 +334,6 @@ Les composants tiers embarqués (NSSM, images Docker des interfaces) conservent
 leur propre licence ; voir [`THIRD_PARTY.md`](THIRD_PARTY.md) pour le détail.
 
 > ⚠️ Open WebUI applique depuis la v0.6.6 une clause de protection du branding
-> au-delà de 50 utilisateurs / 30 jours. LIA-X ne le retire pas et le
-> redistribue tel quel : c'est l'exploitant du déploiement qui doit vérifier
-> ses conditions d'usage.
+> au-delà de 50 utilisateurs / 30 jours. LIA-X ne le retire pas, le
+> redistribue tel quel, et **fige sa version** (`v0.11.4`) : c'est l'exploitant
+> du déploiement qui doit vérifier les conditions d'usage de cette version.

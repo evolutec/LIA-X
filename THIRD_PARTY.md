@@ -21,11 +21,11 @@ Redistribution sans obligation particulière.
 Images **téléchargées telles quelles** puis recopiées en `lia-*`. LIA-X n'en
 modifie pas le code, seulement la configuration.
 
-| Image amont | Étiquette | Licence | Condition |
+| Image amont | Référence figée | Licence | Condition |
 |---|---|---|---|
-| [LibreChat](https://github.com/danny-avila/librechat) | `ghcr.io/danny-avila/librechat:latest` | MIT | Aucune. Redistribution et rebranding libres |
-| [Open WebUI](https://github.com/open-webui/open-webui) | `ghcr.io/open-webui/open-webui:main` | BSD-3 modifiée (depuis v0.6.6) | ⚠️ **Clause de protection du branding** : au-delà de 50 utilisateurs sur 30 jours, ni le logo, ni le nom, ni les éléments visuels ne peuvent être retirés ou modifiés |
-| [AnythingLLM](https://github.com/Mintplex-Labs/anything-llm) | `mintplexlabs/anythingllm:latest` | MIT | Aucune |
+| [LibreChat](https://github.com/danny-avila/librechat) | `ghcr.io/danny-avila/librechat@sha256:c5db3331…` (digest) | MIT | Aucune. Redistribution et rebranding libres |
+| [Open WebUI](https://github.com/open-webui/open-webui) | `ghcr.io/open-webui/open-webui:v0.11.4` | BSD-3 modifiée (depuis v0.6.6) | ⚠️ **Clause de protection du branding** : au-delà de 50 utilisateurs sur 30 jours, ni le logo, ni le nom, ni les éléments visuels ne peuvent être retirés ou modifiés |
+| [AnythingLLM](https://github.com/Mintplex-Labs/anything-llm) | `mintplexlabs/anythingllm:1.17.0` | MIT | Aucune |
 
 ### ⚠️ Open WebUI — point d'attention
 
@@ -33,30 +33,31 @@ LIA-X **conserve le branding intact** et ne redistribue pas de version
 rebrandée : la redistribution est donc possible. En revanche, l'**exploitant** d'un
 déploiement LIA-X qui expose Open WebUI à plus de 50 utilisateurs sur 30 jours
 doit vérifier qu'il respecte la clause en vigueur de la version qu'il a
-installée — et donc **vérifier la licence de la version réellement déployée**.
-
-C'est d'autant plus important que l'étiquette `main` est **flottante** :
-l'installateur récupère « la dernière version publiée », dont les conditions
-d/use peuvent avoir changé depuis le dernier test. Voir la section 3.
+installée — ici **v0.11.4**, figée dans `config.json` et `postinstall.ps1`.
 
 ---
 
-## 3. Étiquettes d'images non figées
+## 3. Versions figées
 
-Les trois images amont sont référencées avec un tag flottant
-(`latest` / `main`) :
+Les images amont étaient référencées avec un tag **flottant** (`latest` /
+`main`). Deux installations à des dates différentes pouvaient donc obtenir des
+versions différentes, **dont des licences différentes** — sans que LIA-X le
+sache. C'est précisément le risque que la clause de branding d'Open WebUI rend
+concret.
 
-```
-config.json                          installer\scripts\postinstall.ps1
-  "openWebUi":  ghcr.io/open-webui/open-webui:main     ligne 622
-  "libreChat":  ghcr.io/danny-avila/librechat:latest    ligne 601
-  "anythingllm": mintplexlabs/anythingllm:latest       ligne 642
-```
+Références figées le 2026-10-05 :
 
-**Conséquence** : deux installations à des dates différentes peuvent obtenir des
-versions différentes, avec des licences potentiellement différentes. Épingler
-une version (`open-webui:v0.6.6`) rend le déploiement reproductible et le
-risque juridique maîtrisé.
+| Composant | Avant | Après |
+|---|---|---|
+| Open WebUI | `:main` | `:v0.11.4` |
+| AnythingLLM | `:latest` | `:1.17.0` |
+| LibreChat | `:latest` | `@sha256:c5db3331…` |
+
+> **LibreChat ne publie aucun tag de version** sur GHCR (seul `latest` existe,
+> vérifié) : il est donc figé par **digest**, seul moyen de garantir
+> l'immuabilité. Conséquence : LIA-X ne recevra pas les correctifs amont
+> automatiquement — c'est le prix assumé du contrôle juridique. Relevé
+> trimestriel recommandé.
 
 ---
 
