@@ -88,7 +88,9 @@ New-NetFirewallRule -DisplayName "LIA-X (API 3005)" -Direction Inbound `
 ```
 
 Remplacez `Domain,Private` par `Any` si votre réseau est classé « Public ».
-Limitez le périmètre à votre sous-réseau si vous le pouvez :
+Limitez le périmètre à votre sous-réseau si vous le pouvez — ci-dessous
+`10.20.3.0/24` est **un exemple**, remplacez-le par le sous-réseau de vos postes
+clients (le premier groupe des trois premiers octets de l'IP de l'hôte) :
 
 ```powershell
 New-NetFirewallRule -DisplayName "LIA-X (API 3005)" -Direction Inbound `
@@ -101,14 +103,36 @@ New-NetFirewallRule -DisplayName "LIA-X (API 3005)" -Direction Inbound `
 
 ### 3. Côté postes clients
 
-- **Navigateur** : `http://10.20.3.50:3005`
+L'adresse ci-dessous **est un exemple**. Il faut la remplacer par **l'adresse
+IPv4 de la machine qui héberge LIA-X** — celle où Docker Desktop tourne et où
+le modèle est chargé, pas le poste client.
+
+Pour la trouver, sur le poste hôte :
+
+```powershell
+ipconfig
+```
+
+Repérez la carte **Ethernet** ou **Wi-Fi** (pas *Loopback*, ni *Docker*),
+dans la rubrique « Adresse IPv4 ». Exemple de sortie : `192.168.1.42`.
+
+> ⚠️ `localhost` et `127.0.0.1` ne fonctionnent **pas** depuis un autre poste :
+> ils désignent le client lui-même. Seul le port `3005` est joignable depuis
+> le réseau.
+
+Une fois `<IP-HÔTE>` remplacé par cette adresse :
+
+- **Navigateur** : `http://<IP-HÔTE>:3005`
 - **Client OpenAI / Cline / Continue / AnythingLLM** :
 
   | champ | valeur |
   |-------|---------|
-  | Base URL | `http://10.20.3.50:3005/v1` |
+  | Base URL | `http://<IP-HÔTE>:3005/v1` |
   | API key | *vide* — aucune clé n'est requise |
   | Modèle | `lia-local` |
+
+Concrètement, avec un hôte à `192.168.1.42`, la base URL sera
+`http://192.168.1.42:3005/v1`.
 
 Rien à installer sur les postes clients : ni Docker, ni Node, ni Python.
 
@@ -121,7 +145,7 @@ Internet :
 | variable | effet |
 |----------|-------|
 | `LIA_API_TOKEN=1` | exige `X-LIA-Token` sur les écritures `/api/*` |
-| `LIA_ALLOWED_HOSTS=10.20.3.50,poste-maitre.lan` | rejette tout autre `Host` (anti DNS-rebinding) |
+| `LIA_ALLOWED_HOSTS=<IP-HÔTE>,poste-maitre.lan` | rejette tout autre `Host` (anti DNS-rebinding) |
 
 ### 5. Ce que le partage ne change pas
 

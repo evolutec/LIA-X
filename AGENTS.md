@@ -42,12 +42,13 @@ cd installer
 
 ```powershell
 installer\dist\LIA-X-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- `
-  /INTERFACES=librechat,openwebui,anythingllm
+  /ACCEPTLICENSE /INTERFACES=librechat,openwebui,anythingllm
 ```
 
 | Paramètre | Effet |
 |---|---|
 | `/VERYSILENT` | sans interface — **seul moyen de choisir les cases** |
+| `/ACCEPTLICENSE` | **obligatoire** avec `/VERYSILENT` : accepte la licence MIT. Sans lui, l'installation s'arrête sur une erreur explicite — on n'accepte jamais un contrat à la place de l'utilisateur |
 | `/INTERFACES=…` | `librechat`, `openwebui`, `anythingllm`. Absent = rien de coché |
 | `/LOG=<fichier>` | journal détaillé, **indispensable pour tout diagnostic** |
 | `/DAppVersion=` (compilation) | version injectée dans l'EXE et `package.json` |
@@ -247,6 +248,9 @@ Images via NSSM (`{app}\tools\nssm\nssm.exe`). Logs : `{app}\logs\controller\`,
 
 ### Partage réseau (poste maître + clients)
 
+`10.20.3.0/24` est **un exemple** : le remplacer par le sous-réseau des postes
+clients (les trois premiers octets de l'IP de l'hôte).
+
 ```powershell
 New-NetFirewallRule -DisplayName "LIA-X (API 3005)" -Direction Inbound `
   -Protocol TCP -LocalPort 3005 -RemoteAddress 10.20.3.0/24 -Action Allow `
@@ -255,6 +259,11 @@ New-NetFirewallRule -DisplayName "LIA-X (API 3005)" -Direction Inbound `
 
 Côté clients : `http://<IP-HÔTE>:3005`, base URL `.../v1`, modèle `lia-local`,
 **aucune clé API**. Rien à installer côté client.
+
+⚠️ `<IP-HÔTE>` est l'**IPv4 de la machine hôte** (`ipconfig` → carte Ethernet
+ou Wi-Fi), pas celle du client, et **jamais `localhost` / `127.0.0.1`** depuis un
+autre poste. Ne jamais figer une adresse d'exemple dans la doc : c'est déjà
+l'erreur commise, et elle envoie l'utilisateur vers un hôte inexistant.
 
 La validation `Host` est **opt-in** (`LIA_ALLOWED_HOSTS`) : sans elle, aucune
 restriction ; sinon les clients distants reçoivent `421`.
@@ -476,6 +485,21 @@ Test à ajouter en priorité, quelques lignes : **`/status` doit renvoyer
 8. Ne jamais `git stash` pendant une opération destructive : cela emporte l'index.
 9. Les **journaux ne contiennent plus les corps de requête** (vie privée) :
    un diagnostic doit s'appuyer sur `/status`, pas sur les logs.
+10. **`and` n'est PAS court-circuit en Pascal Script.** Écrire
+    `if (Page <> nil) and (CurPageID = Page.ID)` déréférence `Page.ID` même
+    quand `Page` est `nil` → access violation. Imbriquer les `if`.
+11. **Ne jamais affecter `WizardForm.NextButton.OnClick`.** Chez Inno, cela
+    *remplace* la navigation interne : le premier clic est consommé et il faut
+    deux clics pour avancer. Le bon point d'ancrage est la fonction
+    `NextButtonClick(CurPageID)`, surchargeable sans casser la navigation.
+    Même logique pour un désactivement : `NextButton.Enabled := False` dans
+    `InitializeWizard` condamne *toutes* les pages, pas seulement la page
+    visée. Passer par `CurPageChanged`.
+12. **`WizardForm.OnPageChanged` n'existe pas.** Le hook s'appelle
+    `CurPageChanged`, en procédure, détecté automatiquement — surtout ne pas
+    l'affecter. Et `OnCancelClick` attend la signature
+    `(CurPageID; var Cancel, Confirm)`, alors qu'un `OnClick` de bouton attend
+    seulement `(Sender)` : d'où un `Type mismatch` si on les confond.
 
 ---
 
@@ -491,7 +515,7 @@ cd model-manager; npm run build; node scripts\test-rag.cjs
 # 3. Cycle réel désinstallation → installation
 & 'C:\Program Files\LIA-X\unins000.exe' /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 installer\dist\LIA-X-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- `
-  /INTERFACES=librechat,openwebui,anythingllm /LOG="$env:TEMP\install.log"
+  /ACCEPTLICENSE /INTERFACES=librechat,openwebui,anythingllm /LOG="$env:TEMP\install.log"
 
 # 4. Conservation : modèles et volumes intacts
 Get-ChildItem "$env:USERPROFILE\Documents\LIA-X\Models" -Filter *.gguf | Measure-Object

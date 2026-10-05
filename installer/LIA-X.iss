@@ -8,7 +8,7 @@
 ; Sans ce parametre, on retombe sur la valeur de secours ci-dessous. La
 ; version ne doit donc JAMAIS etre bumped "a la main" en oubliant le tag.
 #ifndef AppVersion
-  #define AppVersion "2.0.0"
+  #define AppVersion "2.1.0"
 #endif
 
 #define AppName "LIA-X"
@@ -127,6 +127,8 @@ Source: "..\services\host-launcher\host-launcher.ps1"; DestDir: "{app}\services\
 Source: "logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "nssm\win64\nssm.exe"; DestDir: "{app}\tools\nssm"; Flags: ignoreversion
 Source: "..\Dockerfiles\*"; DestDir: "{app}\Dockerfiles"; Flags: ignoreversion recursesubdirs
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\THIRD_PARTY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "logo-big.bmp"; DestDir: "{tmp}"; Flags: dontcopy
 
 [Directories]
@@ -207,6 +209,13 @@ Name: "{autodesktop}\LIA-X Model Manager"; Filename: "http://localhost:3005"; Ic
 var
   InterfacesPage, MaintenancePage: TWizardPage;
   chkLibreChat, chkOpenWebUI, chkAnythingLLM: TNewCheckBox;
+  { Page de licence }
+  LicensePage: TWizardPage;
+  LicenseMemo: TNewMemo;
+  LicenseNote: TLabel;
+  LicenseAccept: TNewCheckBox;
+  LicenseNext: TButton;
+  LicenseAccepted: Boolean;
   optRepair, optRemove, optNewInstall: TNewRadioButton;
   MaintenanceMode: String;
   LiaClosingForUninstall: Boolean;
@@ -762,12 +771,53 @@ begin
   Result := BoolToStrIS7(chkAnythingLLM.Checked);
 end;
 
+{ ---------------------------------------------------------------------------
+  ACCEPTATION DE LICENCE
+  ---------------------------------------------------------------------------
+  Condition bloquante : on ne peut pas quitter la page Licence sans avoir
+  coche la case, y compris en mode /VERYSILENT (via /ACCEPTLICENSE).
+
+  Le verrou est porte par NextButtonClick, surcharge plus bas : c est le seul
+  point qui couvre a la fois le clic, la touche Entree et le mode silencieux.
+  On ne s'attache PAS au OnClick de NextButton : chez Inno, cette affectation
+  REMPLACE la navigation interne et le premier clic serait consomme.
+
+  L aspect du bouton est tenu par CurPageChanged (desactive a l arrivee sur la
+  page) et LicenseAcceptClick (active a la coche).
+  --------------------------------------------------------------------------- }
+
+procedure LicenseAcceptClick(Sender: TObject);
+begin
+  { La case fait foi : LicenseAccepted est l etat verifie par le verrou
+    NextButtonClick, LicenseNext n est que son reflet visuel. }
+  LicenseAccepted := LicenseAccept.Checked;
+  WizardForm.NextButton.Enabled := LicenseAccepted;
+end;
+
+{ Declaration anticipee : Pascal Script exige qu une procedure soit declaree
+  AVANT d etre appelable. CreateLicensePage est ecrite plus loin dans le
+  fichier, pres des sections Run/Uninstall, pour rester regroupee par theme. }
+procedure CreateLicensePage; forward;
+
 procedure InitializeWizard();
 var
   InstallInfoPath: String;
   SurfaceW: Integer;
   Requested: String;
 begin
+  { LICENCE + mode silencieux : aucune boite de dialogue ne peut etre cochee.
+    On n'impose donc PAS une acceptation implicite (cela reviendrait a
+    accepter un contrat a la place de l utilisateur) : le silence doit porter
+    l acceptation explicite, sinon arret net avant toute action. }
+  if (WizardSilent) and
+     (CompareText(ExpandConstant('{param:ACCEPTLICENSE}'), '1') <> 0) and
+     (CompareText(ExpandConstant('{param:ACCEPTLICENSE}'), 'yes') <> 0) and
+     (CompareText(ExpandConstant('{param:ACCEPTLICENSE}'), 'true') <> 0) then
+  begin
+    RaiseException('Installation silencieuse refusee.' + #13#10 +
+      'La licence MIT doit etre acceptee explicitement :' + #13#10 + #13#10 +
+      '  LIA-X-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /ACCEPTLICENSE');
+  end;
   InterfacesPage := CreateCustomPage(wpSelectDir, 'Interfaces IA', 'Choisissez les interfaces à installer.');
   SurfaceW := InterfacesPage.Surface.Width - ScaleX(8);
 
@@ -888,6 +938,89 @@ begin
     optNewInstall.Caption := 'Nouvelle installation (remplace l''existante)';
     optNewInstall.SetBounds(ScaleX(4), ScaleY(76), SurfaceW, ScaleY(20));
   end;
+
+  { Page de licence : creee dans tous les cas, premiere installation comme
+    reparation. CreateCustomPage(wpWelcome, ...) la place immediatement apres
+    l'accueil, quel que soit l'ordre de creation. }
+  CreateLicensePage;
+end;
+
+  { -----------------------------------------------------------------------
+    PAGE LICENCE
+    Construite dans une procedure dediee (appelee en fin d
+    InitializeWizard) : le bloc est plus long que la page Maintenance et
+    l inserer directement dans InitializeWizard le plaçait apres le `end;`
+    de la procedure, ce qui cassait la compilation.
+    ----------------------------------------------------------------------- }
+procedure CreateLicensePage;
+var
+  LicenseSurfaceW: Integer;
+  LicenseText: AnsiString;
+begin
+  LicensePage := CreateCustomPage(wpWelcome, 'Licence', 'LIA-X est distribu' + #233 + ' sous licence MIT.');
+  LicenseSurfaceW := LicensePage.Surface.Width - ScaleX(8);
+  LicenseMemo := TNewMemo.Create(WizardForm);
+  LicenseMemo.Parent := LicensePage.Surface;
+  LicenseMemo.ScrollBars := ssVertical;
+  LicenseMemo.ReadOnly := True;
+  LicenseMemo.BorderStyle := bsSingle;
+  LicenseMemo.WordWrap := True;
+  LicenseMemo.SetBounds(ScaleX(4), ScaleY(4), LicenseSurfaceW, ScaleY(126));
+  { Texte lu depuis le fichier livre a cote de l'installateur : une seule
+    source de verite, la meme que le depot et que le dossier d installation.
+    S'il est absent, on retombe sur un resume plutot que de bloquer
+    l installation.
+    ATTENTION : aucune constante entre accolades dans ce commentaire (la
+    constante app, par exemple) : l accolade interne fermerait le
+    commentaire prematurement et le reste serait lu comme du code. }
+  { LoadStringFromFile attend un AnsiString en sortie (signature Inno), pas un
+    composant : on charge dans une variable, puis on alimente le memo. }
+  LicenseText := '';
+  if LoadStringFromFile(ExpandConstant('{src}\..\LICENSE'), LicenseText) = False then
+    LicenseText := 'MIT License' + #13#10 + 'Copyright (c) 2026 evolutec' + #13#10 + #13#10 +
+      'Permission is hereby granted, free of charge, to any person obtaining a copy ' +
+      'of this software and associated documentation files (the "Software"), to deal ' +
+      'in the Software without restriction, including without limitation the rights ' +
+      'to use, copy, modify, merge, publish, distribute, sublicense, and/or sell ' +
+      'copies of the Software.' + #13#10 + #13#10 +
+      'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR ' +
+      'IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY.';
+  LicenseMemo.Text := String(LicenseText);
+
+  LicenseNote := TLabel.Create(WizardForm);
+  LicenseNote.Parent := LicensePage.Surface;
+  LicenseNote.Caption := 'Composants tiers (NSSM, LibreChat, Open WebUI, AnythingLLM) : voir THIRD_PARTY.md, install' + #233 + ' dans le dossier d''installation.';
+  LicenseNote.SetBounds(ScaleX(4), ScaleY(132), LicenseSurfaceW, ScaleY(14));
+
+  LicenseAccept := TNewCheckBox.Create(WizardForm);
+  LicenseAccept.Parent := LicensePage.Surface;
+  LicenseAccept.Caption := 'J''accepte les conditions de la licence MIT';
+  LicenseAccept.SetBounds(ScaleX(4), ScaleY(150), LicenseSurfaceW, ScaleY(18));
+  LicenseAccept.OnClick := @LicenseAcceptClick;
+
+  LicenseAccepted := False;
+  if (CompareText(ExpandConstant('{param:ACCEPTLICENSE}'), '1') = 0) or
+     (CompareText(ExpandConstant('{param:ACCEPTLICENSE}'), 'yes') = 0) or
+     (CompareText(ExpandConstant('{param:ACCEPTLICENSE}'), 'true') = 0) then
+  begin
+    { /ACCEPTLICENSE n est admis qu avec /VERYSILENT (controle en tete de
+      InitializeWizard). En mode interactif, accepter reste un geste humain. }
+    if WizardSilent then
+    begin
+      LicenseAccepted := True;
+      LicenseAccept.Checked := True;
+    end;
+  end;
+  { Alias sur le bouton natif : on garde le pointeur pour piloter Enabled,
+    mais on ne touche surtout pas a son OnClick. }
+  LicenseNext := WizardForm.NextButton;
+  { NE PAS desactiver « Suivant » ici, et NE PAS intercepter son OnClick :
+    - desactiver a la creation condamnerait aussi la page d'accueil, ou le
+      bouton doit rester actif pour atteindre cette page ;
+    - affecter NextButton.OnClick REMPLACE la navigation interne d Inno : le
+      premier clic serait consomme et il faudrait deux clics pour avancer.
+    Le verrou est porte par NextButtonClick (voir plus bas), et l aspect du
+    bouton par CurPageChanged / LicenseAcceptClick. }
 end;
 
 { Le désinstalleur DOIT tuer llama-server.exe AVANT de supprimer les fichiers :
@@ -924,6 +1057,24 @@ procedure CurPageChanged(CurPageID: Integer);
 begin
   if FinishLogo <> nil then
     FinishLogo.Visible := (CurPageID = wpFinished);
+
+  { Page Licence : « Suivant » ne s'active qu'apres acceptation. Ce hook est
+    appele a chaque changement de page, donc il couvre aussi le retour depuis
+    une page ulterieure (sans quoi le bouton resterait actif).
+    Attention : `and` n'est PAS court-circuit en Pascal Script (cf. NextButtonClick).
+    LicensePage / LicenseAccept sont donc testes par if imbriques, sinon on
+    dereference LicensePage.ID alors qu'il est encore nil sur la 1re page. }
+  if LicensePage <> nil then
+  begin
+    if LicenseAccept <> nil then
+    begin
+      if CurPageID = LicensePage.ID then
+      begin
+        LicenseAccept.Checked := LicenseAccepted;
+        LicenseNext.Enabled := LicenseAccepted;
+      end;
+    end;
+  end;
 
   // Mode suppression de secours (desinstalleur introuvable) : on arrive malgre
   // tout sur la page de fin D'INSTALLATION. On y adapte le libelle de confirmation.
@@ -969,8 +1120,33 @@ end;
   NOTE : Cancel doit rester True (autoriser la fermeture), seul Confirm
   passe a False (pas de dialogue). Mettre Cancel a False BLOQUE la
   fermeture — c'etait le bug "la fenetre ne se ferme pas". }
+{ Fermeture pendant la page Licence, avant acceptation : la condition est
+  rappelee plutot que d annuler silencieusement. Cancel reste TRUE
+  (autoriser la fermeture) ; c'est ce gestionnaire qui empeche de quitter
+  la page sans avoir coche la case. }
 procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
 begin
+  { LICENCE : on rappelle la condition au moment d annuler. Cancel reste TRUE
+    (fermeture toujours possible) ; ne pas mettre Cancel a False ici, ce serait
+    le bug « la fenetre ne se ferme pas ».
+    Ne pas remplacer ce gestionnaire : il porte aussi la suppression de la
+    confirmation « annuler » en mode desinstallation.
+    if imbriques : `and` n'est pas court-circuit en Pascal Script. }
+  if LicensePage <> nil then
+  begin
+    if CurPageID = LicensePage.ID then
+    begin
+      if not LicenseAccepted then
+      begin
+        LicenseNext.Enabled := False;
+        if not (WizardSilent) then
+          MsgBox('Vous devez accepter la licence MIT pour continuer l''installation.' + #13#10 +
+                 'Cochez la case, ou fermez l''assistant pour annuler.',
+                 mbConfirmation, MB_OK);
+      end;
+    end;
+  end;
+
   if LiaClosingForUninstall then
     Confirm := False;
 end;
@@ -981,6 +1157,24 @@ var
   Res: Integer;
 begin
   Result := True;
+  if LicensePage <> nil then
+  begin
+    if CurPageID = LicensePage.ID then
+    begin
+      { LICENCE : refus de QUITTER la page tant que la case n est pas cochee.
+        C est le seul verrou reellement efficace : survol du clic, du clavier,
+        et mode silencieux. Le message n est affiche qu en mode interactif,
+        sinon il gellerait une installation sans fenetre. }
+      if not LicenseAccepted then
+      begin
+        LicenseNext.Enabled := False;
+        if not (WizardSilent) then
+          MsgBox('Vous devez accepter la licence MIT pour continuer l''installation.',
+                 mbConfirmation, MB_OK);
+        Result := False;
+      end;
+    end;
+  end;
   if (MaintenancePage <> nil) and (CurPageID = MaintenancePage.ID) then
   begin
     if optRepair.Checked then
